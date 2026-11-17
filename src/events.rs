@@ -44,6 +44,13 @@ pub type Reply = async_channel::Sender<Response>;
 #[derive(Clone, Debug, Message)]
 pub struct InputEvent(pub Event);
 
+/// Overview commands, gestures, capture completions, and environment changes
+/// that invalidate an open overview, republished on their own stream by
+/// [`demux_input_events`](crate::ecs::systems::demux_input_events) so
+/// `overview_handler` stays idle during normal desktop activity.
+#[derive(Clone, Debug, Message)]
+pub struct OverviewEvent(pub Event);
+
 /// Several variants carry a payload used only by the Lua bridge
 /// (`src/lua/convert.rs`). The dead-code lint is suppressed only when the
 /// `lua` feature is off, so it still applies to the build that ships.
@@ -290,6 +297,44 @@ impl Event {
                 | Event::Scroll { .. }
                 | Event::TouchpadDown
                 | Event::TouchpadUp
+        )
+    }
+
+    /// Whether this event directly drives or wakes the workspace overview.
+    pub fn is_overview(&self) -> bool {
+        matches!(
+            self,
+            Event::Command {
+                command: Command::Overview,
+            } | Event::OverviewClick { .. }
+                | Event::OverviewScroll { .. }
+                | Event::OverviewDismiss
+                | Event::OverviewAccept
+                | Event::OverviewTransitionDone { .. }
+                | Event::OverviewSwipe { .. }
+                | Event::OverviewSwipeEnd
+                | Event::OverviewTouchDown
+                | Event::OverviewCaptureLanded
+        )
+    }
+
+    /// Whether this OS environment change invalidates an open overview and
+    /// requires tearing down its stationary panels immediately.
+    pub fn invalidates_overview(&self) -> bool {
+        matches!(
+            self,
+            Event::SpaceChanged
+                | Event::SpaceDestroyed { .. }
+                | Event::DisplayAdded { .. }
+                | Event::DisplayRemoved { .. }
+                | Event::DisplayMoved { .. }
+                | Event::DisplayResized { .. }
+                | Event::DisplayConfigured { .. }
+                | Event::DisplayChanged
+                | Event::MissionControlShowAllWindows
+                | Event::MissionControlShowFrontWindows
+                | Event::MissionControlShowDesktop
+                | Event::Exit
         )
     }
 }

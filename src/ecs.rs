@@ -31,7 +31,7 @@ use crate::config::{CONFIGURATION_FILE, Config, InitialWindowWidth, WindowParams
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender, InputEvent};
+use crate::events::{Event, EventSender, InputEvent, OverviewEvent};
 #[cfg(feature = "lua")]
 use crate::lua;
 use crate::manager::{
@@ -268,6 +268,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // Registered with `add_message`, not `init_resource`, so the buffer is
     // double-buffered and dropped after a frame like any other message stream.
     app.add_message::<InputEvent>();
+    app.add_message::<OverviewEvent>();
     // Sample Bevy time after the blocking OS wait, so this frame uses its own
     // elapsed interval rather than the previous frame's sleep.
     app.add_systems(First, systems::pump_events.in_set(FirstSet::Pump));

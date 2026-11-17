@@ -240,9 +240,9 @@ impl Plugin for ScrollEventsPlugin {
         // The overview owns the trackpad while it is up, like Mission Control.
         let mission_control_inactive =
             |mission_control: Option<Res<MissionControlActive>>,
-             overview: Option<Res<crate::ecs::overview::OverviewState>>| {
+             overview: Option<Res<crate::ecs::overview::OverviewPhase>>| {
                 mission_control.is_none_or(|active| !active.0)
-                    && overview.is_none_or(|overview| !overview.is_active())
+                    && overview.is_none_or(|phase| !phase.is_active())
             };
 
         app.add_systems(

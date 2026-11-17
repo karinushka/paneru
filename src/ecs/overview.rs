@@ -15,11 +15,12 @@ use std::time::{Duration, Instant};
 use bevy::app::{App, Last, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
+use bevy::ecs::lifecycle::RemovedComponents;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::on_message;
+use bevy::ecs::schedule::common_conditions::{not, on_message, resource_equals};
 use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, SystemParam};
 use objc2_core_foundation::CGPoint;
 use tracing::debug;
@@ -32,10 +33,10 @@ use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::workspace::spawn_snap_strip_guard;
 use crate::ecs::{
     ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, LayoutPosition, ManualStripOffset,
-    Position, PreUpdateSet, RepositionMarker, Scrolling, SelectedVirtualMarker,
-    SpawnCommandsExt as _, Unmanaged,
+    MissionControlActive, Position, PreUpdateSet, RepositionMarker, Scrolling,
+    SelectedVirtualMarker, SpawnCommandsExt as _, Unmanaged,
 };
-use crate::events::Event;
+use crate::events::{Event, OverviewEvent};
 use crate::manager::WindowManager;
 use crate::manager::{Display, Window};
 use crate::overview::view::{
@@ -63,14 +64,26 @@ const SCRUB_TIMEOUT: Duration = Duration::from_millis(1500);
 /// heading down, and there's nothing below closed to scrub into.
 const CANCEL_TRAVEL: f64 = 0.02;
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum Phase {
+#[derive(Resource, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum OverviewPhase {
     #[default]
     Closed,
     Opening,
     Open,
     Closing,
     Scrubbing,
+}
+
+impl OverviewPhase {
+    pub fn is_active(self) -> bool {
+        self != Self::Closed
+    }
+
+    /// The main loop must keep ticking: a spring runs, or a scrub is in
+    /// progress and its watchdog has to be able to fire.
+    pub fn needs_frames(self) -> bool {
+        matches!(self, Self::Opening | Self::Closing | Self::Scrubbing)
+    }
 }
 
 struct DisplayEntry {
@@ -87,81 +100,141 @@ struct DisplayEntry {
     parked: bevy::math::IVec2,
 }
 
-#[derive(Resource, Default)]
-pub struct OverviewState {
-    phase: Phase,
-    displays: Vec<DisplayEntry>,
-    /// Progress at `spring.1`, or the scrubbed progress while tracking.
+struct Scrub {
     progress: f64,
-    spring: Option<(Spring, Instant)>,
-    generation: u64,
-    gesture_raw: f64,
-    gesture_velocity: f64,
+    raw: f64,
+    velocity: f64,
     /// When the last scrub sample arrived; see [`SCRUB_TIMEOUT`].
     last_sample: Option<Instant>,
+    /// Downward travel accumulated while built on touch-down before ever
+    /// moving up (`None` once swiped up or opened another way).
+    prebuilt_down_travel: Option<f64>,
+}
+
+impl Scrub {
+    fn timed_out(&self, now: Instant) -> bool {
+        self.last_sample
+            .is_none_or(|last| now.saturating_duration_since(last) > SCRUB_TIMEOUT)
+    }
+
+    /// Evaluates a swipe sample on an overview built on touch-down: `None`
+    /// once it has moved up (scrub as usual), otherwise whether downward
+    /// travel has exceeded [`CANCEL_TRAVEL`]; `Some(false)` ignores jitter.
+    fn downward_cancel(&mut self, delta: f64) -> Option<bool> {
+        let down_travel = self.prebuilt_down_travel.as_mut()?;
+        if delta > 0.0 {
+            self.prebuilt_down_travel = None;
+            return None;
+        }
+        *down_travel -= delta;
+        Some(*down_travel > CANCEL_TRAVEL)
+    }
+}
+
+enum Motion {
+    Scrub(Scrub),
+    Spring {
+        spring: Spring,
+        started_at: Instant,
+        generation: u64,
+    },
+    Settled,
+}
+
+struct ActiveSession {
+    displays: Vec<DisplayEntry>,
+    motion: Motion,
     /// The close has written what the overview showed back to the ECS: no
     /// reopening into the stale layout, the next open builds afresh.
     committed: bool,
-    /// Built on touch-down and not yet swiped up: a swipe down cancels it.
-    prebuilt: bool,
-    /// Downward travel so far while `prebuilt`; see [`CANCEL_TRAVEL`].
-    down_travel: f64,
 }
 
-impl OverviewState {
-    fn current(&self) -> (f64, f64) {
-        match self.spring {
-            Some((spring, start)) if self.phase != Phase::Scrubbing => {
-                let t = start.elapsed().as_secs_f64();
+impl ActiveSession {
+    fn current_progress_and_velocity(&self) -> (f64, f64) {
+        match &self.motion {
+            Motion::Scrub(scrub) => (scrub.progress, scrub.velocity),
+            Motion::Spring {
+                spring, started_at, ..
+            } => {
+                let t = started_at.elapsed().as_secs_f64();
                 (spring.value(t), spring.velocity_at(t))
             }
-            _ => (self.progress, self.gesture_velocity),
+            Motion::Settled => (1.0, 0.0),
         }
     }
+}
 
-    pub fn is_active(&self) -> bool {
-        self.phase != Phase::Closed
+/// Session state for an active overview, kept separate from [`OverviewPhase`]
+/// so pointer/gesture run conditions only inspect the 1-byte phase resource
+/// while `activate` / `close` / `Drop` own [`OVERVIEW_OPEN`] synchronization.
+#[derive(Resource, Default)]
+struct OverviewSession(Option<ActiveSession>);
+
+impl OverviewSession {
+    fn activate(
+        &mut self,
+        phase: &mut OverviewPhase,
+        next_phase: OverviewPhase,
+        displays: Vec<DisplayEntry>,
+        motion: Motion,
+    ) -> &mut ActiveSession {
+        debug_assert!(next_phase.is_active());
+        *phase = next_phase;
+        OVERVIEW_OPEN.store(true, Ordering::Relaxed);
+        self.0.insert(ActiveSession {
+            displays,
+            motion,
+            committed: false,
+        })
     }
 
-    /// The main loop must keep ticking: a spring runs, or a scrub is in
-    /// progress and its watchdog has to be able to fire.
-    pub fn needs_frames(&self) -> bool {
-        matches!(
-            self.phase,
-            Phase::Opening | Phase::Closing | Phase::Scrubbing
-        )
+    fn close(&mut self, phase: &mut OverviewPhase) -> Option<ActiveSession> {
+        *phase = OverviewPhase::Closed;
+        OVERVIEW_OPEN.store(false, Ordering::Relaxed);
+        self.0.take()
+    }
+}
+
+impl Drop for OverviewSession {
+    fn drop(&mut self) {
+        OVERVIEW_OPEN.store(false, Ordering::Relaxed);
     }
 }
 
 /// Run condition: pointer and swipe systems pause while the overview owns
 /// the screen, so clicks on cards don't also reach the windows beneath.
-pub fn overview_inactive(state: Option<Res<OverviewState>>) -> bool {
-    state.is_none_or(|state| !state.is_active())
+pub fn overview_inactive(phase: Option<Res<OverviewPhase>>) -> bool {
+    phase.is_none_or(|phase| !phase.is_active())
 }
 
 pub fn register_overview(app: &mut App) {
-    app.init_resource::<OverviewState>()
+    app.add_message::<OverviewEvent>()
+        .init_resource::<OverviewPhase>()
+        .init_resource::<OverviewSession>()
         .add_systems(
             PreUpdate,
             overview_handler
                 .in_set(PreUpdateSet::Dispatch)
-                .run_if(on_message::<Event>),
+                .run_if(on_message::<OverviewEvent>),
         )
         .add_systems(
             Update,
-            overview_tick.run_if(|state: Res<OverviewState>| state.is_active()),
+            overview_tick.run_if(not(resource_equals(OverviewPhase::Closed))),
         )
         // After every layout system has written this frame's targets.
         .add_systems(
             Last,
-            overview_follow_layout.run_if(|state: Res<OverviewState>| state.phase == Phase::Open),
+            overview_follow_layout
+                .run_if(resource_equals(OverviewPhase::Open))
+                .run_if(overview_layout_dirty),
         );
 }
 
 /// Per-frame work while the overview is up: release a scrub that went quiet,
 /// and pick up the snapshots that landed from the background captures.
 fn overview_tick(
-    mut state: ResMut<OverviewState>,
+    mut phase: ResMut<OverviewPhase>,
+    mut session: ResMut<OverviewSession>,
     manager: Option<NonSendMut<OverviewManager>>,
     strips: StripQuery,
     windows: Windows,
@@ -170,9 +243,19 @@ fn overview_tick(
     let Some(mut manager) = manager else {
         return;
     };
-    if scrub_timed_out(&state, Instant::now()) {
+    if *phase == OverviewPhase::Scrubbing
+        && let Some(active) = session.0.as_mut()
+        && matches!(&active.motion, Motion::Scrub(scrub) if scrub.timed_out(Instant::now()))
+    {
         debug!("overview: scrub went quiet, releasing");
-        release(&mut state, &mut manager, &strips, &windows, &mut commands);
+        release(
+            &mut phase,
+            active,
+            &mut manager,
+            &strips,
+            &windows,
+            &mut commands,
+        );
     }
     manager.poll_captures();
 }
@@ -215,44 +298,64 @@ struct Scene<'w, 's> {
     windows: WindowQuery<'w, 's>,
     config: Res<'w, Config>,
     window_manager: Res<'w, WindowManager>,
+    mission_control: Option<Res<'w, MissionControlActive>>,
 }
 
 #[allow(clippy::too_many_lines, reason = "one arm per overview event")]
 fn overview_handler(
-    mut messages: MessageReader<Event>,
-    mut state: ResMut<OverviewState>,
+    mut messages: MessageReader<OverviewEvent>,
+    mut phase: ResMut<OverviewPhase>,
+    mut session: ResMut<OverviewSession>,
     manager: Option<NonSendMut<OverviewManager>>,
     scene: Scene,
     windows: Windows,
-    focused: Query<Entity, With<FocusedMarker>>,
     mut commands: Commands,
 ) {
     let Some(mut manager) = manager else {
         messages.clear();
         return;
     };
-    for event in messages.read() {
+    for OverviewEvent(event) in messages.read() {
         match event {
             Event::Command {
                 command: Command::Overview,
-            } => match state.phase {
-                Phase::Closed => {
-                    if open(&mut state, &mut manager, &scene) {
-                        settle(&mut state, &mut manager, 1.0, 0.0);
+            } => match *phase {
+                OverviewPhase::Closed => {
+                    if let Some(entries) = open_displays(&mut manager, &scene) {
+                        let active = session.activate(
+                            &mut phase,
+                            OverviewPhase::Opening,
+                            entries,
+                            Motion::Scrub(Scrub {
+                                progress: 0.0,
+                                raw: 0.0,
+                                velocity: 0.0,
+                                last_sample: None,
+                                prebuilt_down_travel: None,
+                            }),
+                        );
+                        settle(&mut phase, active, &mut manager, 1.0, 0.0);
                     }
                 }
-                // Already committed: let it finish closing.
-                Phase::Closing if state.committed => {}
-                Phase::Closing => settle(&mut state, &mut manager, 1.0, 0.0),
-                Phase::Open | Phase::Opening | Phase::Scrubbing => {
-                    close(
-                        &mut state,
-                        &mut manager,
-                        &scene.strips,
-                        &windows,
-                        &mut commands,
-                        None,
-                    );
+                OverviewPhase::Closing => {
+                    if let Some(active) = session.0.as_mut()
+                        && !active.committed
+                    {
+                        settle(&mut phase, active, &mut manager, 1.0, 0.0);
+                    }
+                }
+                OverviewPhase::Open | OverviewPhase::Opening | OverviewPhase::Scrubbing => {
+                    if let Some(active) = session.0.as_mut() {
+                        close(
+                            &mut phase,
+                            active,
+                            &mut manager,
+                            &scene.strips,
+                            &windows,
+                            &mut commands,
+                            None,
+                        );
+                    }
                 }
             },
 
@@ -260,144 +363,207 @@ fn overview_handler(
                 delta,
                 elapsed_secs,
             } => {
-                if state.phase == Phase::Closed {
+                if *phase == OverviewPhase::Closed {
                     // Only an upward swipe opens.
-                    if *delta <= 0.0 || !open(&mut state, &mut manager, &scene) {
+                    if *delta <= 0.0 {
                         continue;
                     }
-                    state.gesture_raw = 0.0;
-                    state.gesture_velocity = 0.0;
-                    state.phase = Phase::Scrubbing;
-                } else if state.committed {
-                    continue;
-                } else if state.phase != Phase::Scrubbing {
-                    // Grab a running or settled transition where it is,
-                    // heading for where letting go closes into.
-                    preview_close(&state, &mut manager, &scene.strips, &windows);
-                    let (p, _) = state.current();
-                    state.gesture_raw = p;
-                    state.gesture_velocity = 0.0;
-                    state.phase = Phase::Scrubbing;
+                    let Some(entries) = open_displays(&mut manager, &scene) else {
+                        continue;
+                    };
+                    session.activate(
+                        &mut phase,
+                        OverviewPhase::Scrubbing,
+                        entries,
+                        Motion::Scrub(Scrub {
+                            progress: 0.0,
+                            raw: 0.0,
+                            velocity: 0.0,
+                            last_sample: Some(Instant::now()),
+                            prebuilt_down_travel: None,
+                        }),
+                    );
+                } else {
+                    let Some(active) = session.0.as_mut() else {
+                        continue;
+                    };
+                    if active.committed {
+                        continue;
+                    }
+                    if !matches!(active.motion, Motion::Scrub(_)) {
+                        // Grab a running or settled transition where it is,
+                        // heading for where letting go closes into.
+                        preview_close(&active.displays, &mut manager, &scene.strips, &windows);
+                        let (p, _) = active.current_progress_and_velocity();
+                        *phase = OverviewPhase::Scrubbing;
+                        active.motion = Motion::Scrub(Scrub {
+                            progress: p,
+                            raw: p,
+                            velocity: 0.0,
+                            last_sample: Some(Instant::now()),
+                            prebuilt_down_travel: None,
+                        });
+                    }
                 }
-                match downward_from_closed(&mut state, *delta) {
+                let Some(active) = session.0.as_mut() else {
+                    continue;
+                };
+                let Motion::Scrub(scrub) = &mut active.motion else {
+                    continue;
+                };
+                match scrub.downward_cancel(*delta) {
                     Some(true) => {
                         debug!("overview: swipe went down from closed, cancelling");
                         // The panel may already have taken key focus.
-                        if let Ok(entity) = focused.single() {
+                        if let Some((_, entity)) = windows.focused() {
                             commands.focus_entity(entity, true);
                         }
-                        finish_close(&mut state, &mut manager);
+                        finish_close(&mut phase, &mut session, &mut manager);
                         continue;
                     }
-                    Some(false) => continue,
+                    Some(false) => {
+                        scrub.last_sample = Some(Instant::now());
+                        continue;
+                    }
                     None => {}
                 }
                 let step = delta * GESTURE_GAIN;
                 // Nothing below closed: swiping down from it just stays put.
-                state.gesture_raw = (state.gesture_raw + step).max(0.0);
+                scrub.raw = (scrub.raw + step).max(0.0);
                 if *elapsed_secs > 0.0 {
                     let sample = step / elapsed_secs;
-                    state.gesture_velocity = 0.3 * sample + 0.7 * state.gesture_velocity;
+                    scrub.velocity = 0.3 * sample + 0.7 * scrub.velocity;
                 }
-                state.progress = rubber_band(state.gesture_raw);
-                state.last_sample = Some(Instant::now());
-                manager.set_progress(state.progress);
+                scrub.progress = rubber_band(scrub.raw);
+                scrub.last_sample = Some(Instant::now());
+                manager.set_progress(scrub.progress);
             }
 
             Event::OverviewCaptureLanded => manager.poll_captures(),
 
-            Event::OverviewTouchDown if state.phase == Phase::Closed => {
+            Event::OverviewTouchDown if *phase == OverviewPhase::Closed => {
                 // Build now, at progress 0 (identical to the real screen), so
                 // the first movement only has to move layers.
-                if open(&mut state, &mut manager, &scene) {
-                    state.gesture_raw = 0.0;
-                    state.gesture_velocity = 0.0;
-                    state.last_sample = Some(Instant::now());
-                    state.phase = Phase::Scrubbing;
-                    state.prebuilt = true;
+                if let Some(entries) = open_displays(&mut manager, &scene) {
+                    session.activate(
+                        &mut phase,
+                        OverviewPhase::Scrubbing,
+                        entries,
+                        Motion::Scrub(Scrub {
+                            progress: 0.0,
+                            raw: 0.0,
+                            velocity: 0.0,
+                            last_sample: Some(Instant::now()),
+                            prebuilt_down_travel: Some(0.0),
+                        }),
+                    );
                 }
             }
 
-            Event::OverviewSwipeEnd if state.phase == Phase::Scrubbing => {
-                release(
-                    &mut state,
-                    &mut manager,
-                    &scene.strips,
-                    &windows,
-                    &mut commands,
-                );
+            Event::OverviewSwipeEnd if *phase == OverviewPhase::Scrubbing => {
+                if let Some(active) = session.0.as_mut() {
+                    release(
+                        &mut phase,
+                        active,
+                        &mut manager,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                    );
+                }
             }
 
             Event::OverviewClick { point }
-                if matches!(state.phase, Phase::Open | Phase::Opening) =>
+                if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) =>
             {
-                select(
-                    &mut state,
-                    &mut manager,
-                    *point,
-                    &scene.strips,
-                    &windows,
-                    &mut commands,
-                );
+                if let Some(active) = session.0.as_mut() {
+                    select(
+                        &mut phase,
+                        active,
+                        &mut manager,
+                        *point,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                    );
+                }
             }
 
             Event::OverviewScroll { point, dx, dy }
-                if matches!(state.phase, Phase::Open | Phase::Opening) =>
+                if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) =>
             {
-                scroll(&mut state, &mut manager, *point, *dx, *dy);
+                if let Some(active) = session.0.as_mut() {
+                    scroll(active, &mut manager, *point, *dx, *dy);
+                }
             }
 
-            Event::OverviewDismiss if state.is_active() => {
+            Event::OverviewDismiss if phase.is_active() => {
                 // The panel took key focus; hand it back.
-                if let Ok(entity) = focused.single() {
+                if let Some((_, entity)) = windows.focused() {
                     commands.focus_entity(entity, true);
                 }
-                restore_rests(&state, &mut manager);
-                settle(&mut state, &mut manager, 0.0, 0.0);
-            }
-
-            Event::OverviewAccept if state.is_active() && !state.committed => {
-                close(
-                    &mut state,
-                    &mut manager,
-                    &scene.strips,
-                    &windows,
-                    &mut commands,
-                    None,
-                );
-            }
-
-            Event::OverviewTransitionDone { generation } if *generation == state.generation => {
-                match state.phase {
-                    Phase::Closing => finish_close(&mut state, &mut manager),
-                    Phase::Opening => state.phase = Phase::Open,
-                    _ => {}
+                if let Some(active) = session.0.as_mut() {
+                    restore_rests(&active.displays, &mut manager);
+                    settle(&mut phase, active, &mut manager, 0.0, 0.0);
                 }
             }
+
+            Event::OverviewAccept if phase.is_active() => {
+                if let Some(active) = session.0.as_mut()
+                    && !active.committed
+                {
+                    close(
+                        &mut phase,
+                        active,
+                        &mut manager,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                        None,
+                    );
+                }
+            }
+
+            Event::OverviewTransitionDone { generation } => {
+                if let Some(active) = session.0.as_mut()
+                    && matches!(active.motion, Motion::Spring { generation: g, .. } if g == *generation)
+                {
+                    match *phase {
+                        OverviewPhase::Closing => {
+                            finish_close(&mut phase, &mut session, &mut manager);
+                        }
+                        OverviewPhase::Opening => {
+                            *phase = OverviewPhase::Open;
+                            active.motion = Motion::Settled;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
+            event if phase.is_active() && event.invalidates_overview() => {
+                debug!("overview: environment changed ({event:?}), dismissing");
+                finish_close(&mut phase, &mut session, &mut manager);
+            }
+
             _ => {}
         }
     }
 }
 
-/// A swipe sample on an overview built on touch-down: `None` once it has
-/// moved up (scrub as usual), otherwise whether it has now gone down far
-/// enough to cancel ([`CANCEL_TRAVEL`]); `Some(false)` ignores the sample.
-fn downward_from_closed(state: &mut OverviewState, delta: f64) -> Option<bool> {
-    if !state.prebuilt {
-        return None;
-    }
-    if delta > 0.0 {
-        state.prebuilt = false;
-        return None;
-    }
-    state.down_travel -= delta;
-    Some(state.down_travel > CANCEL_TRAVEL)
-}
-
 /// Removes the overview and forgets it, ready for the next open.
-fn finish_close(state: &mut OverviewState, manager: &mut OverviewManager) {
-    if let Some((_, start)) = state.spring {
-        debug!("overview: closed {:?} after letting go", start.elapsed());
+fn finish_close(
+    phase: &mut OverviewPhase,
+    session: &mut OverviewSession,
+    manager: &mut OverviewManager,
+) {
+    if let Some(active) = session.close(phase)
+        && let Motion::Spring { started_at, .. } = active.motion
+    {
+        debug!(
+            "overview: closed {:?} after letting go",
+            started_at.elapsed()
+        );
     }
     manager.teardown();
     // Ask for screen recording once the overlay is gone (it would cover the
@@ -405,47 +571,48 @@ fn finish_close(state: &mut OverviewState, manager: &mut OverviewManager) {
     if !manager.previews() {
         screen_capture::request_once();
     }
-    OVERVIEW_OPEN.store(false, Ordering::Relaxed);
-    *state = OverviewState {
-        generation: state.generation,
-        ..OverviewState::default()
-    };
 }
 
 /// Ends a scrub: open or close depending on where and how fast it was let go.
 fn release(
-    state: &mut OverviewState,
+    phase: &mut OverviewPhase,
+    active: &mut ActiveSession,
     manager: &mut OverviewManager,
     strips: &StripQuery,
     windows: &Windows,
     commands: &mut Commands,
 ) {
-    let (p, v) = (state.progress, state.gesture_velocity);
-    state.last_sample = None;
-    if state.prebuilt {
+    let Motion::Scrub(scrub) = &mut active.motion else {
+        return;
+    };
+    let (p, v) = (scrub.progress, scrub.velocity);
+    let prebuilt = scrub.prebuilt_down_travel.is_some();
+    scrub.last_sample = None;
+    if prebuilt {
         // Lifted without ever moving up: nothing was looked at, so
         // nothing to commit.
-        settle(state, manager, 0.0, 0.0);
+        settle(phase, active, manager, 0.0, 0.0);
     } else if release_opens(p, v) {
-        settle(state, manager, 1.0, v);
+        settle(phase, active, manager, 1.0, v);
     } else {
-        commit(state, manager, strips, windows, commands, None);
-        settle(state, manager, 0.0, v);
+        commit(active, manager, strips, windows, commands, None);
+        settle(phase, active, manager, 0.0, v);
     }
 }
 
 /// Closes into what the overview shows (everything but Escape): see
 /// [`commit`].
 fn close(
-    state: &mut OverviewState,
+    phase: &mut OverviewPhase,
+    active: &mut ActiveSession,
     manager: &mut OverviewManager,
     strips: &StripQuery,
     windows: &Windows,
     commands: &mut Commands,
     pick: Option<Pick>,
 ) {
-    commit(state, manager, strips, windows, commands, pick);
-    settle(state, manager, 0.0, 0.0);
+    commit(active, manager, strips, windows, commands, pick);
+    settle(phase, active, manager, 0.0, 0.0);
 }
 
 /// The row a display closes into, and the window to bring into view there.
@@ -467,21 +634,21 @@ struct Pick {
 /// again. When the pan took the focused window out of view, focus moves to
 /// the window nearest the middle, so paneru has nothing to scroll back for.
 fn commit(
-    state: &mut OverviewState,
+    active: &mut ActiveSession,
     manager: &mut OverviewManager,
     strips: &StripQuery,
     windows: &Windows,
     commands: &mut Commands,
     pick: Option<Pick>,
 ) {
-    let (anchors, wrote) = write_back(&state.displays, strips, windows, commands, pick.as_ref());
-    state.committed = wrote || pick.is_some();
-    for (entry, anchor) in state.displays.iter_mut().zip(anchors) {
+    let (anchors, wrote) = write_back(&active.displays, strips, windows, commands, pick.as_ref());
+    active.committed = wrote || pick.is_some();
+    for (entry, anchor) in active.displays.iter_mut().zip(anchors) {
         if let Some((virtual_index, focus)) = anchor {
             reanchor(&mut entry.layout, virtual_index, focus.as_ref());
         }
     }
-    let layouts: Vec<_> = state.displays.iter().map(|d| &d.layout).collect();
+    let layouts: Vec<_> = active.displays.iter().map(|d| &d.layout).collect();
     manager.retarget(&layouts);
 }
 
@@ -580,14 +747,13 @@ fn holds_focus(entry: &DisplayEntry, shown: Option<usize>, strips: &StripQuery) 
 /// the open overview heads there all the way rather than back to where the
 /// windows were taken from. [`restore_rests`] undoes it.
 fn preview_close(
-    state: &OverviewState,
+    displays: &[DisplayEntry],
     manager: &mut OverviewManager,
     strips: &StripQuery,
     windows: &Windows,
 ) {
     let focused = windows.focused().map(|(_, entity)| entity);
-    let layouts: Vec<_> = state
-        .displays
+    let layouts: Vec<_> = displays
         .iter()
         .map(|entry| {
             let mut layout = entry.layout.clone();
@@ -611,8 +777,8 @@ fn preview_close(
 }
 
 /// Puts the cards' targets back to where the windows were taken from.
-fn restore_rests(state: &OverviewState, manager: &mut OverviewManager) {
-    let layouts: Vec<_> = state.displays.iter().map(|d| &d.layout).collect();
+fn restore_rests(displays: &[DisplayEntry], manager: &mut OverviewManager) {
+    let layouts: Vec<_> = displays.iter().map(|d| &d.layout).collect();
     manager.retarget(&layouts);
 }
 
@@ -747,52 +913,57 @@ fn nearest_middle(layout: &DisplayLayout<Entity>, row: usize) -> Option<Entity> 
         .map(|w| w.key)
 }
 
-/// Whether a scrub has gone without samples for longer than [`SCRUB_TIMEOUT`].
-fn scrub_timed_out(state: &OverviewState, now: Instant) -> bool {
-    state.phase == Phase::Scrubbing
-        && state
-            .last_sample
-            .is_none_or(|last| now.saturating_duration_since(last) > SCRUB_TIMEOUT)
-}
-
 /// Springs from wherever the overview is now to `target`.
-fn settle(state: &mut OverviewState, manager: &mut OverviewManager, target: f64, velocity: f64) {
-    let (from, current_velocity) = state.current();
-    let velocity = if state.phase == Phase::Scrubbing {
-        velocity
-    } else {
-        current_velocity
+fn settle(
+    phase: &mut OverviewPhase,
+    active: &mut ActiveSession,
+    manager: &mut OverviewManager,
+    target: f64,
+    scrub_velocity: f64,
+) {
+    let (from, velocity) = match &active.motion {
+        Motion::Scrub(scrub) => (scrub.progress, scrub_velocity),
+        Motion::Spring {
+            spring, started_at, ..
+        } => {
+            let t = started_at.elapsed().as_secs_f64();
+            (spring.value(t), spring.velocity_at(t))
+        }
+        Motion::Settled => (1.0, 0.0),
     };
     // A faster release settles a little quicker.
     let response = SPRING_RESPONSE * (1.0 - 0.25 * (velocity.abs() / 0.5).tanh());
     let spring = Spring::new(from, target, velocity, response);
-    state.generation = manager.animate(&spring);
-    state.spring = Some((spring, Instant::now()));
-    state.progress = from;
-    state.phase = if target > 0.5 {
-        Phase::Opening
+    let generation = manager.animate(&spring);
+    active.motion = Motion::Spring {
+        spring,
+        started_at: Instant::now(),
+        generation,
+    };
+    *phase = if target > 0.5 {
+        OverviewPhase::Opening
     } else {
-        Phase::Closing
+        OverviewPhase::Closing
     };
 }
 
 /// Trackpad scroll inside the open overview: mostly-horizontal motion pans
 /// the strip under the pointer, mostly-vertical scrolls the stack.
 fn scroll(
-    state: &mut OverviewState,
+    active: &mut ActiveSession,
     manager: &mut OverviewManager,
     point: CGPoint,
     dx: f64,
     dy: f64,
 ) {
-    let Some(index) = state
+    let Some(index) = active
         .displays
         .iter()
         .position(|d| d.cg_bounds.contains(point.x, point.y))
     else {
         return;
     };
-    let entry = &mut state.displays[index];
+    let entry = &mut active.displays[index];
     let (x, y) = (point.x - entry.cg_bounds.x, point.y - entry.cg_bounds.y);
     let moved = if dx.abs() > dy.abs() {
         entry
@@ -808,14 +979,15 @@ fn scroll(
 }
 
 fn select(
-    state: &mut OverviewState,
+    phase: &mut OverviewPhase,
+    active: &mut ActiveSession,
     manager: &mut OverviewManager,
     point: CGPoint,
     strips: &StripQuery,
     windows: &Windows,
     commands: &mut Commands,
 ) {
-    let hit = state
+    let hit = active
         .displays
         .iter()
         .enumerate()
@@ -838,14 +1010,14 @@ fn select(
         _ => None,
     };
     // Pans first: a row shown by the click starts from its panned origin.
-    commit(state, manager, strips, windows, commands, pick);
+    commit(active, manager, strips, windows, commands, pick);
     match hit {
         Some((_, Hit::Window { key, virtual_index })) => {
             debug!("overview: selected window {key} on row {virtual_index}");
             commands.focus_entity(key, true);
         }
         Some((display, Hit::Strip { virtual_index })) => {
-            let strip = state.displays.get(display).and_then(|entry| {
+            let strip = active.displays.get(display).and_then(|entry| {
                 let row = entry
                     .layout
                     .strips
@@ -861,59 +1033,71 @@ fn select(
         }
         _ => {}
     }
-    settle(state, manager, 0.0, 0.0);
+    settle(phase, active, manager, 0.0, 0.0);
+}
+
+type ChangedOverviewStrips<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        With<LayoutStrip>,
+        Or<(
+            Changed<LayoutStrip>,
+            Changed<RepositionMarker>,
+            Added<ActiveWorkspaceMarker>,
+            Added<PreviousStripPosition>,
+        )>,
+    ),
+>;
+
+type ChangedOverviewWindows<'w, 's> = Query<
+    'w,
+    's,
+    (),
+    (
+        Without<LayoutStrip>,
+        Or<(
+            Changed<LayoutPosition>,
+            Changed<Bounds>,
+            Added<FocusedMarker>,
+        )>,
+    ),
+>;
+
+fn overview_layout_dirty(
+    changed_strips: ChangedOverviewStrips,
+    changed_windows: ChangedOverviewWindows,
+    mut removed_windows: RemovedComponents<Window>,
+) -> bool {
+    let any_removed = removed_windows.read().count() > 0;
+    any_removed || !changed_strips.is_empty() || !changed_windows.is_empty()
 }
 
 /// While open, re-snapshots the layout whenever paneru changed it (a hotkey
-/// scrolled a strip, switched rows, moved focus) and springs the cards to
-/// their new places, so the overview never shows stale positions.
-#[allow(clippy::type_complexity)]
+/// scrolled a strip, switched rows, moved focus, or closed a window) and
+/// springs the cards to their new places, so the overview never shows stale
+/// positions.
 fn overview_follow_layout(
-    mut state: ResMut<OverviewState>,
+    mut session: ResMut<OverviewSession>,
     manager: Option<NonSendMut<OverviewManager>>,
     scene: Scene,
-    changed_strips: Query<
-        (),
-        (
-            With<LayoutStrip>,
-            Or<(
-                Changed<LayoutStrip>,
-                Changed<RepositionMarker>,
-                Added<ActiveWorkspaceMarker>,
-                Added<PreviousStripPosition>,
-            )>,
-        ),
-    >,
-    changed_windows: Query<
-        (),
-        (
-            Without<LayoutStrip>,
-            Or<(
-                Changed<LayoutPosition>,
-                Changed<Bounds>,
-                Added<FocusedMarker>,
-            )>,
-        ),
-    >,
 ) {
-    let Some(mut manager) = manager else {
+    let (Some(mut manager), Some(active)) = (manager, session.0.as_mut()) else {
         return;
     };
-    if changed_strips.is_empty() && changed_windows.is_empty() {
-        return;
-    }
     let mut entries = gather(&scene, None);
-    let unchanged = entries.len() == state.displays.len()
+    let unchanged = entries.len() == active.displays.len()
         && entries
             .iter()
-            .zip(&state.displays)
+            .zip(&active.displays)
             .all(|(new, old)| same_geometry(&new.layout, &old.layout));
     if unchanged {
         return;
     }
     // Keep the user's vertical scroll; per-strip pans give way to the real
     // strip's own scrolling, which the new layout already reflects.
-    for (new, old) in entries.iter_mut().zip(&state.displays) {
+    for (new, old) in entries.iter_mut().zip(&active.displays) {
         new.layout.scroll_by(old.layout.scroll);
     }
     let layouts: Vec<_> = entries.iter().map(|e| &e.layout).collect();
@@ -932,16 +1116,24 @@ fn overview_follow_layout(
         let labels = card_labels(&scene, manager.previews());
         manager.build(&scenes, &info, &labels, 1.0);
     }
-    state.displays = entries;
+    active.displays = entries;
 }
 
 /// Snapshots the ECS into per-display layouts and builds the panels at
-/// progress 0. Returns `false` when there is nothing to show.
-fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene) -> bool {
+/// progress 0. Returns `None` when Mission Control is active or there is
+/// nothing to show.
+fn open_displays(manager: &mut OverviewManager, scene: &Scene) -> Option<Vec<DisplayEntry>> {
+    if scene
+        .mission_control
+        .as_ref()
+        .is_some_and(|active| active.0)
+    {
+        return None;
+    }
     let info = window_server_info();
     let entries = gather(scene, Some(&info));
     if entries.is_empty() {
-        return false;
+        return None;
     }
     let scenes: Vec<_> = entries
         .iter()
@@ -960,11 +1152,7 @@ fn open(state: &mut OverviewState, manager: &mut OverviewManager, scene: &Scene)
     manager.set_previews(screen_capture::allowed());
     let labels = card_labels(scene, manager.previews());
     manager.build(&scenes, &info, &labels, 0.0);
-    OVERVIEW_OPEN.store(true, Ordering::Relaxed);
-    state.displays = entries;
-    state.progress = 0.0;
-    state.spring = None;
-    true
+    Some(entries)
 }
 
 /// Builds the overview layout of every display. With `info`, windows of the
@@ -2003,11 +2191,13 @@ mod tests {
             .run(commands);
     }
 
-    fn scrubbing(last_sample: Option<Instant>) -> OverviewState {
-        OverviewState {
-            phase: Phase::Scrubbing,
+    fn scrubbing(last_sample: Option<Instant>) -> Scrub {
+        Scrub {
+            progress: 0.0,
+            raw: 0.0,
+            velocity: 0.0,
             last_sample,
-            ..OverviewState::default()
+            prebuilt_down_travel: None,
         }
     }
 
@@ -2015,56 +2205,93 @@ mod tests {
     fn a_quiet_scrub_times_out() {
         let now = Instant::now();
         let fresh = scrubbing(Some(now));
-        assert!(!scrub_timed_out(&fresh, now + Duration::from_millis(100)));
-        assert!(scrub_timed_out(
-            &fresh,
-            now + SCRUB_TIMEOUT + Duration::from_millis(1)
-        ));
+        assert!(!fresh.timed_out(now + Duration::from_millis(100)));
+        assert!(fresh.timed_out(now + SCRUB_TIMEOUT + Duration::from_millis(1)));
         // A scrub that never got a sample (opened by a grab) is released too.
-        assert!(scrub_timed_out(&scrubbing(None), now));
+        assert!(scrubbing(None).timed_out(now));
     }
 
-    #[test]
-    fn only_scrubs_time_out() {
-        let now = Instant::now();
-        for phase in [Phase::Closed, Phase::Opening, Phase::Open, Phase::Closing] {
-            let state = OverviewState {
-                phase,
-                last_sample: Some(now),
-                ..OverviewState::default()
-            };
-            assert!(!scrub_timed_out(&state, now + Duration::from_secs(5)));
-        }
-    }
-
-    fn prebuilt() -> OverviewState {
-        OverviewState {
-            prebuilt: true,
+    fn prebuilt() -> Scrub {
+        Scrub {
+            prebuilt_down_travel: Some(0.0),
             ..scrubbing(Some(Instant::now()))
         }
     }
 
     #[test]
     fn a_swipe_down_cancels_an_overview_built_on_touch_down() {
-        let mut state = prebuilt();
+        let mut scrub = prebuilt();
         // A little jitter downwards is ignored, not cancelled.
-        assert_eq!(downward_from_closed(&mut state, -0.01), Some(false));
-        assert_eq!(downward_from_closed(&mut state, -0.015), Some(true));
+        assert_eq!(scrub.downward_cancel(-0.01), Some(false));
+        assert_eq!(scrub.downward_cancel(-0.015), Some(true));
     }
 
     #[test]
     fn once_swiped_up_a_swipe_down_scrubs_instead() {
-        let mut state = prebuilt();
-        assert_eq!(downward_from_closed(&mut state, -0.01), Some(false));
-        assert_eq!(downward_from_closed(&mut state, 0.01), None);
-        assert_eq!(downward_from_closed(&mut state, -0.5), None);
+        let mut scrub = prebuilt();
+        assert_eq!(scrub.downward_cancel(-0.01), Some(false));
+        assert_eq!(scrub.downward_cancel(0.01), None);
+        assert_eq!(scrub.downward_cancel(-0.5), None);
         // Nor does it apply to an overview opened any other way.
-        assert_eq!(downward_from_closed(&mut scrubbing(None), -0.5), None);
+        assert_eq!(scrubbing(None).downward_cancel(-0.5), None);
     }
 
     #[test]
     fn scrubbing_keeps_the_loop_awake() {
-        assert!(scrubbing(None).needs_frames());
-        assert!(!OverviewState::default().needs_frames());
+        assert!(OverviewPhase::Scrubbing.needs_frames());
+        assert!(!OverviewPhase::default().needs_frames());
+    }
+
+    #[test]
+    fn session_lifecycle_and_drop_own_overview_open_flag() {
+        let mut phase = OverviewPhase::default();
+        {
+            let mut session = OverviewSession::default();
+            assert!(!OVERVIEW_OPEN.load(Ordering::Relaxed));
+            session.activate(&mut phase, OverviewPhase::Open, Vec::new(), Motion::Settled);
+            assert_eq!(phase, OverviewPhase::Open);
+            assert!(OVERVIEW_OPEN.load(Ordering::Relaxed));
+
+            // Dropping `OverviewSession` without `close` still clears `OVERVIEW_OPEN`.
+        }
+        assert!(!OVERVIEW_OPEN.load(Ordering::Relaxed));
+    }
+
+    #[test]
+    fn demux_keeps_overview_stream_silent_on_ordinary_desktop_events() {
+        use crate::tests::TestHarness;
+        use bevy::ecs::message::Messages;
+
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.world().init_resource::<OverviewPhase>();
+        harness.advance(Duration::from_millis(100));
+
+        // Ordinary input and space events while closed never populate `OverviewEvent`.
+        harness.world().write_message(Event::MouseMoved {
+            point: CGPoint::new(50.0, 50.0),
+            modifiers: crate::platform::Modifiers::empty(),
+        });
+        harness.world().write_message(Event::SpaceChanged);
+        harness.app.update();
+        assert!(
+            harness
+                .world()
+                .resource::<Messages<OverviewEvent>>()
+                .is_empty(),
+            "OverviewEvent must stay empty while closed for non-overview events"
+        );
+
+        // Once active, environment changes (`SpaceChanged`, Mission Control, display changes)
+        // are forwarded onto `OverviewEvent` so the overview tears down promptly.
+        *harness.world().resource_mut::<OverviewPhase>() = OverviewPhase::Open;
+        harness.world().write_message(Event::SpaceChanged);
+        harness
+            .world()
+            .write_message(Event::MissionControlShowAllWindows);
+        harness.app.update();
+        assert_eq!(
+            harness.world().resource::<Messages<OverviewEvent>>().len(),
+            2
+        );
     }
 }

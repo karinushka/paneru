@@ -273,7 +273,6 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::OverviewDismiss
             | Event::OverviewAccept
             | Event::OverviewKey { .. }
-            | Event::OverviewMove { .. }
             | Event::OverviewTransitionDone { .. }
             | Event::OverviewSwipe { .. }
             | Event::OverviewSwipeEnd

@@ -1043,7 +1043,7 @@ floating = true
 }
 
 #[test]
-fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
+fn overview_focus_falls_back_from_lone_floating_window_to_active_strip() {
     use crate::commands::Direction;
 
     let mut harness = TestHarness::new()
@@ -1058,9 +1058,14 @@ fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
         tick(),
         // Iteration 1: float & focus window 200, open overview phase.
         tick(),
-        // Iteration 2: press `focus east` while lone floating window 200 is focused in overview.
+        // Iteration 2: press `focus east` while lone floating window 200 is focused in overview:
+        // the overview takes it for its selection, the real focus stays.
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        // Iteration 3: `focus last` still acts on the real layout.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
         },
     ];
 
@@ -1088,10 +1093,17 @@ fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
             *world.resource_mut::<OverviewPhase>() = OverviewPhase::Open;
         })
         .on_iteration(2, |world, _| {
+            assert_eq!(
+                focused_ids(world),
+                [200],
+                "focus east moves the overview's selection, not the real focus"
+            );
+        })
+        .on_iteration(3, |world, _| {
             let focused = focused_ids(world);
             assert!(
                 focused == [100] || focused == [101],
-                "focus east in overview must fall back from lone floater 200 to tiled strip, got {focused:?}"
+                "focus last in overview must fall back from lone floater 200 to tiled strip, got {focused:?}"
             );
         })
         .run(commands);

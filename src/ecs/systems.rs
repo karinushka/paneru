@@ -896,7 +896,9 @@ pub(crate) fn demux_input_events(
         if event.is_overview() {
             overview_active = true;
             overview.write(OverviewEvent(event.clone()));
-        } else if overview_active && event.invalidates_overview() {
+        } else if overview_active
+            && (event.invalidates_overview() || event.moves_overview_selection())
+        {
             overview.write(OverviewEvent(event.clone()));
         }
     }
@@ -968,13 +970,6 @@ pub(crate) fn pump_events(
     };
 
     received_events.extend(pending_mouse.take());
-    // The open overview takes the focus hotkeys for its own selection.
-    if crate::overview::OVERVIEW_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
-        received_events = received_events
-            .into_iter()
-            .map(crate::overview::redirect_command)
-            .collect();
-    }
     messages.write_batch(received_events);
 
     if drained {

@@ -209,11 +209,6 @@ pub enum Event {
         text: String,
         modifiers: KeyModifiers,
     },
-    /// A window-focus hotkey pressed while the overview is open, redirected
-    /// to move its selection (see `overview::redirect_command`).
-    OverviewMove {
-        direction: crate::overview::Direction,
-    },
     /// The overview transition with this generation finished animating.
     OverviewTransitionDone { generation: u64 },
     /// Continuous overview gesture progress: vertical finger travel in
@@ -359,12 +354,22 @@ impl Event {
                 | Event::OverviewDismiss
                 | Event::OverviewAccept
                 | Event::OverviewKey { .. }
-                | Event::OverviewMove { .. }
                 | Event::OverviewTransitionDone { .. }
                 | Event::OverviewSwipe { .. }
                 | Event::OverviewSwipeEnd
                 | Event::OverviewTouchDown
                 | Event::OverviewCaptureLanded
+        )
+    }
+
+    /// Whether this is a window command the open overview takes to move its
+    /// selection (see [`overview_move`](crate::overview::overview_move)).
+    pub fn moves_overview_selection(&self) -> bool {
+        matches!(
+            self,
+            Event::Command {
+                command: Command::Window(op),
+            } if crate::overview::overview_move(op).is_some()
         )
     }
 

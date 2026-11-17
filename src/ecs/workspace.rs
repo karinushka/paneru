@@ -1451,6 +1451,7 @@ fn mid_strip_slot(
 #[instrument(level = Level::DEBUG, skip_all)]
 fn switch_virtual_workspace_bind(
     mut messages: MessageReader<Event>,
+    overview: Option<Res<crate::ecs::overview::OverviewPhase>>,
     windows: Windows,
     active_display: ActiveDisplay,
     workspaces: Query<(Entity, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
@@ -1465,6 +1466,8 @@ fn switch_virtual_workspace_bind(
                 | Operation::VirtualAdd
                 | Operation::FocusOrVirtual(_)
         )
+            // The open overview moves its selection with these instead.
+            && !overview.as_ref().is_some_and(|phase| phase.takes_command(op))
     })
     .next() else {
         return;

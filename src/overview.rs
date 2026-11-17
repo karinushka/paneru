@@ -476,35 +476,29 @@ pub enum Direction {
     Down,
 }
 
-/// While the overview is open, the window-focus hotkeys move its
-/// selection instead of focusing real windows behind it: focus west/east go
-/// left/right, focus north/south and the virtual-workspace switches go
-/// up/down (rows are the virtual workspaces). Everything else passes.
-pub fn redirect_command(event: crate::events::Event) -> crate::events::Event {
-    use crate::commands::{Command, Direction as Towards, Operation};
-    use crate::events::Event;
-    let Event::Command {
-        command: Command::Window(op),
-    } = &event
-    else {
-        return event;
-    };
-    let direction = match op {
+/// The overview move a window command stands for while the overview is
+/// open, if any: focus west/east go left/right, focus north/south and the
+/// virtual-workspace switches go up/down (rows are the virtual
+/// workspaces). The overview takes these from the handlers that would
+/// otherwise move the real focus behind it; every other command (and
+/// focus first/last/nth) still acts on the real layout.
+pub fn overview_move(op: &crate::commands::Operation) -> Option<Direction> {
+    use crate::commands::{Direction as Towards, Operation};
+    match op {
         Operation::Focus(towards) => match towards {
-            Towards::West => Direction::Left,
-            Towards::East => Direction::Right,
-            Towards::North => Direction::Up,
-            Towards::South => Direction::Down,
-            _ => return event,
+            Towards::West => Some(Direction::Left),
+            Towards::East => Some(Direction::Right),
+            Towards::North => Some(Direction::Up),
+            Towards::South => Some(Direction::Down),
+            _ => None,
         },
         Operation::Virtual(towards) | Operation::FocusOrVirtual(towards) => match towards {
-            Towards::North => Direction::Up,
-            Towards::South => Direction::Down,
-            _ => return event,
+            Towards::North => Some(Direction::Up),
+            Towards::South => Some(Direction::Down),
+            _ => None,
         },
-        _ => return event,
-    };
-    Event::OverviewMove { direction }
+        _ => None,
+    }
 }
 
 /// Centre of a row's card where it shows while open: it moves with the
@@ -1012,35 +1006,29 @@ mod tests {
     }
 
     #[test]
-    fn focus_hotkeys_move_the_selection_while_open() {
-        use crate::commands::{Command, Direction as Towards, Operation};
-        use crate::events::Event;
-        let command = |op| Event::Command {
-            command: Command::Window(op),
-        };
-        let moved = |event| match redirect_command(event) {
-            Event::OverviewMove { direction } => Some(direction),
-            _ => None,
-        };
+    fn focus_commands_are_overview_moves() {
+        use crate::commands::{Direction as Towards, Operation};
+        let moved = |op| overview_move(&op);
         assert_eq!(
-            moved(command(Operation::Focus(Towards::West))),
+            moved(Operation::Focus(Towards::West)),
             Some(Direction::Left)
         );
         assert_eq!(
-            moved(command(Operation::Focus(Towards::South))),
+            moved(Operation::Focus(Towards::South)),
             Some(Direction::Down)
         );
         assert_eq!(
-            moved(command(Operation::Virtual(Towards::North))),
+            moved(Operation::Virtual(Towards::North)),
             Some(Direction::Up)
         );
         assert_eq!(
-            moved(command(Operation::FocusOrVirtual(Towards::South))),
+            moved(Operation::FocusOrVirtual(Towards::South)),
             Some(Direction::Down)
         );
-        assert_eq!(moved(command(Operation::Focus(Towards::First))), None);
+        assert_eq!(moved(Operation::Focus(Towards::First)), None);
+        assert_eq!(moved(Operation::Virtual(Towards::Last)), None);
         assert_eq!(
-            moved(command(Operation::Swap(Towards::West))),
+            moved(Operation::Swap(Towards::West)),
             None,
             "acts on the layout"
         );

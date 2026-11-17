@@ -48,7 +48,8 @@ use crate::overview::view::{
 use crate::overview::{
     Direction, DisplayLayout, FloatingInput, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN,
     Rect, SPRING_RESPONSE, Spring, StripInput, WindowInput, exposing_shift, hit_test,
-    layout_display, middle_row, neighbour, reanchor, release_opens, rubber_band, same_geometry,
+    layout_display, middle_row, neighbour, overview_move, reanchor, release_opens, rubber_band,
+    same_geometry,
 };
 use crate::screen_capture;
 
@@ -80,6 +81,13 @@ pub enum OverviewPhase {
 impl OverviewPhase {
     pub fn is_active(self) -> bool {
         self != Self::Closed
+    }
+
+    /// Whether the overview handles `op` instead of its usual handler: the
+    /// focus commands (see [`overview_move`]) while it is up, so they move
+    /// its selection rather than the real focus behind it.
+    pub fn takes_command(self, op: &crate::commands::Operation) -> bool {
+        self.is_active() && overview_move(op).is_some()
     }
 }
 
@@ -629,15 +637,20 @@ fn overview_handler(
                 );
             }
 
-            Event::OverviewMove { direction }
-                if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening) =>
+            Event::Command {
+                command: Command::Window(op),
+            } if matches!(*phase, OverviewPhase::Open | OverviewPhase::Opening)
+                && overview_move(op).is_some() =>
             {
+                // The focus commands move the selection while open; their
+                // usual handlers leave them alone (see `takes_command`).
                 if let Some(active) = session.0.as_mut()
                     && !active.committed
+                    && let Some(direction) = overview_move(op)
                 {
                     let focused = windows.focused().map(|(_, entity)| entity);
                     let from = active.selection.map(|m| m.key).or(focused);
-                    move_selection(active, &mut manager, from, *direction);
+                    move_selection(active, &mut manager, from, direction);
                 }
             }
 

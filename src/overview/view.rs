@@ -954,6 +954,10 @@ pub struct OverviewManager {
     /// When to bring the live streams in line with what's visible, once a
     /// scroll has rested; see [`LIVE_SETTLE`].
     live_due: Option<Instant>,
+    /// Whether `ScreenCaptureKit` streams have been started for the current
+    /// build. Touch-down prebuilds stay at `progress == 0.0` so a cancelled
+    /// touch or 4-finger Space swipe never flashes macOS's recording dot.
+    live_synced: bool,
     /// Whether windows are captured at all (screen recording permission).
     /// Without it nothing is captured or streamed: cards are tiles with the
     /// app icon and title, the wallpaper comes from the desktop picture
@@ -1066,6 +1070,7 @@ impl OverviewManager {
             max_live: 4,
             live_margin: 0.0,
             live_due: None,
+            live_synced: false,
             previews: true,
             icons: HashMap::new(),
         }
@@ -1258,8 +1263,12 @@ impl OverviewManager {
             queue,
         );
         self.reveal_since = Some(Instant::now());
+        self.live_due = None;
+        self.live_synced = false;
         let built = started.elapsed();
-        self.sync_live();
+        if progress > 0.0 {
+            self.ensure_live_synced();
+        }
         let synced = started.elapsed();
         self.poll_captures();
         debug!(
@@ -1650,6 +1659,9 @@ impl OverviewManager {
 
     /// Jumps every layer to progress `p` (gesture scrubbing).
     pub fn set_progress(&mut self, p: f64) {
+        if p > 0.0 {
+            self.ensure_live_synced();
+        }
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for layer in self.layers() {
@@ -1695,23 +1707,32 @@ impl OverviewManager {
             }
         }
         CATransaction::commit();
+        if !closing {
+            self.ensure_live_synced();
+        }
         generation
     }
 
-    /// Applies a scroll or pan of display `index` immediately (the overview
-    /// is open; trackpad scroll events arrive at display rate).
     /// Live preview limits, see the fields.
     pub fn set_live_limits(&mut self, max: usize, margin: f64) {
         self.max_live = max;
         self.live_margin = margin;
     }
 
+    fn ensure_live_synced(&mut self) {
+        if !self.live_synced {
+            self.sync_live();
+        }
+    }
+
     /// Streams the windows whose cards are (nearly) on screen.
     fn sync_live(&mut self) {
+        self.live_synced = true;
         self.live_due = None;
-        if !self.previews {
-            // Not even listing the windows: that alone can bring up the
-            // permission prompt.
+        if !self.previews || self.max_live == 0 {
+            // Not even listing the windows: without permission that alone can
+            // bring up the system prompt, and with `live_previews = 0` no
+            // stream will be started anyway.
             self.live.set(Vec::new());
             return;
         }
@@ -1839,6 +1860,7 @@ impl OverviewManager {
         CATransaction::flush();
         let hidden = started.elapsed();
         self.live_due = None;
+        self.live_synced = false;
         _ = self.sender.send(Event::OverviewCaptureLanded);
         self.live.stop_all();
         // Whatever is still in flight lands in an old batch and is dropped.

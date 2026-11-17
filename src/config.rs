@@ -2429,6 +2429,18 @@ window_virtualsendnum_3 = "cmd + alt + shift - 3"
 }
 
 #[test]
+fn test_overview_binding() {
+    let config = Config::try_from("[bindings]\noverview = \"alt - o\"\n").expect("parses");
+    let keycode = virtual_keycode()
+        .find_map(|(s, v)| (*s == "o").then_some(*v))
+        .unwrap();
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::ALT),
+        Some(Command::Overview)
+    ));
+}
+
+#[test]
 fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "resize"]).unwrap(),

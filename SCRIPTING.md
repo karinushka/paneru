@@ -32,6 +32,9 @@ paneru.on("window_focused", function(event, ws)
 end)
 
 paneru.bind("alt - j", "window focus east")
+
+-- Any command works from a script too, e.g. toggling the overview:
+paneru.bind("alt - o", function() paneru.run("overview") end)
 ```
 
 ---
@@ -74,6 +77,7 @@ paneru.setup {
   bindings = {
     ["window focus east"] = "alt - l",
     ["quit"] = "ctrl + alt - q",
+    ["overview"] = "alt - o",
   },
 }
 ```

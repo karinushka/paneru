@@ -602,20 +602,23 @@ impl Spring {
     }
 
     /// How long the transition is shown for: until what's left of the travel
-    /// is too small to see ([`VISIBLE_REMAINDER`]), well before the spring
-    /// settles in full. The last frame jumps to the target, which a close
-    /// never shows: the overview is gone by then.
+    /// stays too small to see ([`VISIBLE_REMAINDER`]), well before the spring
+    /// settles in full. Scanning from the end avoids truncating a high-velocity
+    /// transition at an early overshoot crossing of `to`.
     pub fn visible_duration(&self) -> f64 {
+        const STEP: f64 = 1.0 / 240.0;
+        const MAX_STEPS: u32 = 720;
         let left = VISIBLE_REMAINDER * (self.to - self.from).abs().max(f64::EPSILON);
-        let mut t = 0.0;
-        while t < 3.0 {
-            if (self.value(t) - self.to).abs() < left {
+        let mut settled_step = 0;
+        for step in (0..MAX_STEPS).rev() {
+            let t = f64::from(step) * STEP;
+            if (self.value(t) - self.to).abs() >= left {
+                settled_step = step + 1;
                 break;
             }
-            t += 1.0 / 240.0;
         }
         // A zero duration means Core Animation's default (0.25 s).
-        t.max(1.0 / 120.0)
+        (f64::from(settled_step) * STEP).max(1.0 / 120.0)
     }
 
     /// Time until both displacement and velocity are negligible.
@@ -1070,6 +1073,24 @@ mod tests {
         assert!(spring.value(shown - 0.02).abs() >= VISIBLE_REMAINDER);
         // A transition going nowhere still gets a real duration.
         assert!(Spring::new(0.0, 0.0, 0.0, SPRING_RESPONSE).visible_duration() > 0.0);
+
+        // High-velocity flicks cross `to` early and overshoot; `visible_duration`
+        // must wait until the overshoot settles back within `VISIBLE_REMAINDER`.
+        let flick = Spring::new(0.5, 1.0, 8.0, SPRING_RESPONSE);
+        let shown = flick.visible_duration();
+        let left = VISIBLE_REMAINDER * 0.5;
+        assert!(
+            shown > 0.2,
+            "overshooting spring must not truncate at first crossing: {shown}"
+        );
+        for step in 0..120 {
+            let t = shown + f64::from(step) / 240.0;
+            assert!(
+                (flick.value(t) - 1.0).abs() < left,
+                "t={t}: {}",
+                flick.value(t)
+            );
+        }
     }
 
     #[test]

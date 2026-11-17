@@ -689,13 +689,25 @@ fn write_back(
                     if let Some(key) = focus {
                         commands.focus_entity(key, true);
                     }
-                } else if let (Some(&old_strip), Some(&origin)) =
-                    (entry.strips.get(old), entry.origins.get(old))
-                {
+                } else if let (Some(&old_strip), Some(&old_origin), Some(&new_base)) = (
+                    entry.strips.get(old),
+                    entry.origins.get(old),
+                    entry.origins.get(target),
+                ) {
                     #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
-                    let dx = entry.layout.pan_points(old).round() as i32;
-                    let origin = origin + bevy::math::IVec2::new(dx, 0);
-                    show_row(old_strip, origin, new, entry.parked, commands);
+                    let old_dx = entry.layout.pan_points(old).round() as i32;
+                    #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
+                    let new_dx = entry.layout.pan_points(target).round() as i32;
+                    let old_origin = old_origin + bevy::math::IVec2::new(old_dx, 0);
+                    let new_origin = new_base + bevy::math::IVec2::new(new_dx, 0);
+                    show_row(
+                        old_strip,
+                        old_origin,
+                        new,
+                        new_origin,
+                        entry.parked,
+                        commands,
+                    );
                 }
             }
         } else if picked.is_none()
@@ -810,64 +822,52 @@ fn keep_pans(
                 .get(entity)
                 .ok()
                 .map(|strip| strip_signature(strip.1, windows));
-            commands.queue(move |world: &mut bevy::ecs::world::World| {
-                if let Some(mut position) = world.get_mut::<Position>(entity) {
-                    position.0 = origin;
-                }
-                let Ok(mut strip) = world.get_entity_mut(entity) else {
-                    return;
-                };
-                strip.remove::<(RepositionMarker, Scrolling)>();
+            if let Ok(mut strip_cmds) = commands.get_entity(entity) {
+                strip_cmds.try_insert(Position(origin));
+                strip_cmds.try_remove::<(RepositionMarker, Scrolling)>();
                 if let Some(signature) = signature {
-                    strip.insert(ManualStripOffset { signature });
+                    strip_cmds.try_insert(ManualStripOffset { signature });
                 }
-            });
+            }
             spawn_snap_strip_guard(entity, commands);
         } else {
-            commands.queue(move |world: &mut bevy::ecs::world::World| {
-                if let Some(mut previous) = world.get_mut::<PreviousStripPosition>(entity) {
-                    previous.origin = origin;
-                }
-            });
+            let focus = strips
+                .get(entity)
+                .ok()
+                .and_then(|s| s.4.and_then(|previous| previous.focus));
+            if let Ok(mut strip_cmds) = commands.get_entity(entity) {
+                strip_cmds.try_insert(PreviousStripPosition { origin, focus });
+            }
         }
     }
     wrote
 }
 
 /// Switches a display that doesn't hold focus from row `old` to row `new`
-/// without touching focus: parks `old`, remembering it at `origin` (where the
-/// overview showed it, not its own possibly stale one), and puts `new` where
-/// it was parked from, as paneru's own switch does.
+/// without touching focus: parks `old`, remembering it at `old_origin`, and
+/// places `new` at `new_origin`.
 fn show_row(
     old: Entity,
-    origin: bevy::math::IVec2,
+    old_origin: bevy::math::IVec2,
     new: Entity,
+    new_origin: bevy::math::IVec2,
     parked: bevy::math::IVec2,
     commands: &mut Commands,
 ) {
-    commands.queue(move |world: &mut bevy::ecs::world::World| {
-        if let Ok(mut strip) = world.get_entity_mut(old) {
-            strip.insert(PreviousStripPosition {
-                origin,
+    if let Ok(mut old_cmds) = commands.get_entity(old) {
+        old_cmds.try_insert((
+            Position(parked),
+            PreviousStripPosition {
+                origin: old_origin,
                 focus: None,
-            });
-            strip.remove::<(RepositionMarker, Scrolling, ManualStripOffset)>();
-            if let Some(mut position) = strip.get_mut::<Position>() {
-                position.0 = parked;
-            }
-        }
-        let Ok(mut strip) = world.get_entity_mut(new) else {
-            return;
-        };
-        let restored = strip.take::<PreviousStripPosition>();
-        strip.remove::<(RepositionMarker, Scrolling)>();
-        if let Some(previous) = restored
-            && let Some(mut position) = strip.get_mut::<Position>()
-        {
-            position.0 = previous.origin;
-        }
-        strip.insert(SelectedVirtualMarker);
-    });
+            },
+        ));
+        old_cmds.try_remove::<(RepositionMarker, Scrolling, ManualStripOffset)>();
+    }
+    if let Ok(mut new_cmds) = commands.get_entity(new) {
+        new_cmds.try_insert((Position(new_origin), SelectedVirtualMarker));
+        new_cmds.try_remove::<(PreviousStripPosition, RepositionMarker, Scrolling)>();
+    }
     spawn_snap_strip_guard(new, commands);
 }
 
@@ -1389,15 +1389,49 @@ fn floating_windows<'a>(
         })
 }
 
-/// The windows a strip shows: native tab groups contribute their front tab.
-/// Tabbed-display stacks still contribute every member (they share a frame,
-/// so the last one drawn wins) — good enough for the spike.
+enum ColumnWindows<'a> {
+    None,
+    One(Entity),
+    Stack(std::slice::Iter<'a, StackItem>),
+}
+
+impl Iterator for ColumnWindows<'_> {
+    type Item = Entity;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        match self {
+            Self::None => None,
+            Self::One(entity) => {
+                let out = *entity;
+                *self = Self::None;
+                Some(out)
+            }
+            Self::Stack(items) => items.find_map(StackItem::top),
+        }
+    }
+}
+
+/// The windows a strip shows on screen: native tab groups contribute their
+/// front tab, tabbed-display stacks contribute only their active tab (parked
+/// tabs sit off-screen at the right-edge sliver), and vertical stacks
+/// contribute each item's top tab.
 fn visible_windows(strip: &LayoutStrip) -> impl Iterator<Item = Entity> + '_ {
-    strip.columns().flat_map(|column| -> Vec<Entity> {
-        match column {
-            Column::Single(entity) | Column::Fullscren(entity) => vec![*entity],
-            Column::Tabs(tabs) => tabs.first().copied().into_iter().collect(),
-            Column::Stack(items) => items.iter().filter_map(StackItem::top).collect(),
+    strip.columns().flat_map(|column| match column {
+        Column::Single(entity) | Column::Fullscren(entity) => ColumnWindows::One(*entity),
+        Column::Tabs(tabs) => tabs
+            .first()
+            .copied()
+            .map_or(ColumnWindows::None, ColumnWindows::One),
+        Column::Stack(items) => {
+            if let Some(active) = items
+                .first()
+                .and_then(StackItem::top)
+                .and_then(|first| strip.active_tab(first))
+            {
+                ColumnWindows::One(active)
+            } else {
+                ColumnWindows::Stack(items.iter())
+            }
         }
     })
 }
@@ -2311,5 +2345,27 @@ mod tests {
             harness.world().resource::<Messages<OverviewEvent>>().len(),
             2
         );
+    }
+
+    #[test]
+    fn tabbed_display_stacks_only_expose_their_active_tab_to_the_overview() {
+        let mut world = bevy::ecs::world::World::new();
+        let [w1, w2, w3, w4] = std::array::from_fn(|_| world.spawn_empty().id());
+        let mut strip = LayoutStrip::new(1, 0);
+        strip.append(w1);
+        strip.append_tabbed_stack(&[w2, w3, w4], w3);
+
+        let shown: Vec<Entity> = visible_windows(&strip).collect();
+        assert_eq!(shown, vec![w1, w3]);
+
+        // Switching the active tab updates the overview's single card for that column.
+        assert!(strip.set_active_tab(w2));
+        let shown: Vec<Entity> = visible_windows(&strip).collect();
+        assert_eq!(shown, vec![w1, w2]);
+
+        // Toggling tabbed display off exposes all three stack members vertically.
+        assert_eq!(strip.toggle_tabbed_display(w2), Some(false));
+        let shown: Vec<Entity> = visible_windows(&strip).collect();
+        assert_eq!(shown, vec![w1, w2, w3, w4]);
     }
 }

@@ -170,7 +170,7 @@ struct Search {
 }
 
 /// Where a search refresh puts the selection.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, PartialEq, Eq, Debug)]
 enum SearchPick {
     /// The focused window (search just started, or the query is empty):
     /// already in view, so nothing scrolls.
@@ -1408,8 +1408,21 @@ fn overview_key(
         return KeyAction::Move(direction);
     }
     let Some(search) = search.as_mut() else {
-        if !keys.command && !keys.control && text == "/" {
+        if keys.command || keys.control {
+            return KeyAction::None;
+        }
+        if text == "/" {
             *search = Some(Search::default());
+            return KeyAction::Query;
+        }
+        // Typing a name starts a search with it. Only letters and digits:
+        // punctuation and Option's symbols aren't how a name starts.
+        if !keys.option && !text.is_empty() && text.chars().all(char::is_alphanumeric) {
+            *search = Some(Search {
+                query: text.to_owned(),
+                pick: SearchPick::Best,
+                ..Search::default()
+            });
             return KeyAction::Query;
         }
         return KeyAction::None;

@@ -104,6 +104,30 @@ fn assert_laptop_switched_to_second_row(world: &mut World) {
 }
 
 #[test]
+fn typing_a_letter_starts_a_search_with_it() {
+    let none = KeyModifiers {
+        shift: false,
+        command: false,
+        control: false,
+        option: false,
+    };
+    let shift = KeyModifiers {
+        shift: true,
+        ..none
+    };
+    let mut state: Option<Search> = None;
+    assert_eq!(overview_key(&mut state, 5, "G", shift), KeyAction::Query);
+    assert_eq!(overview_key(&mut state, 34, "i", none), KeyAction::Query);
+    let search = state.as_ref().expect("searching");
+    assert_eq!(search.query, "Gi");
+    assert_eq!(search.pick, SearchPick::Best, "jumps to the best match");
+
+    let mut state: Option<Search> = None;
+    assert_eq!(overview_key(&mut state, 18, "1", none), KeyAction::Query);
+    assert_eq!(state.as_ref().map(|s| s.query.as_str()), Some("1"));
+}
+
+#[test]
 fn overview_keys_search_edit_and_move() {
     const NONE: KeyModifiers = KeyModifiers {
         shift: false,
@@ -138,10 +162,14 @@ fn overview_keys_search_edit_and_move() {
         key(&mut state, 126, "\u{F700}", NONE),
         KeyAction::Move(Direction::Up)
     );
-    // Only `/` starts a search; Tab and text do nothing until then.
-    assert_eq!(key(&mut state, 0, "a", NONE), KeyAction::None);
+    // `/` starts an empty search; Tab, punctuation, shortcuts and
+    // Option's symbols do nothing until then.
     assert_eq!(key(&mut state, 48, "\t", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 47, ".", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 0, "a", CMD), KeyAction::None);
+    assert_eq!(key(&mut state, 0, "å", OPT), KeyAction::None);
     assert_eq!(key(&mut state, 44, "/", CMD), KeyAction::None);
+    assert!(state.is_none());
     assert_eq!(key(&mut state, 44, "/", NONE), KeyAction::Query);
     // Once searching, `/` is text (URLs have it).
     for text in ["g", "h", "/"] {

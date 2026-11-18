@@ -148,8 +148,11 @@ fn session_flag(
 /// Evaluates a `CGSessionCopyCurrentDictionary` dictionary: requires an active
 /// console login and returns `Ok(true)` when the screen is locked (§2.3).
 pub fn parse_session_locked(dict: &CFDictionary<CFString, CFType>) -> Result<bool, SpaceError> {
+    // `<CoreGraphics/CGSession.h>` defines `kCGSessionOnConsoleKey` as
+    // `"kCGSSessionOnConsoleKey"` (two `S`s) and `kCGSessionLoginDoneKey` as
+    // `"kCGSessionLoginDoneKey"` (one `S`).
     let on_console = session_flag(dict, "kCGSSessionOnConsoleKey")?.unwrap_or(false);
-    let login_done = session_flag(dict, "kCGSSessionLoginDoneKey")?.unwrap_or(false);
+    let login_done = session_flag(dict, "kCGSessionLoginDoneKey")?.unwrap_or(false);
     if !on_console || !login_done {
         return Err(SpaceError::new(
             SpaceErrorKind::NoGuiSession,
@@ -832,9 +835,12 @@ mod tests {
     }
 
     #[test]
-    fn parse_session_locked_handles_booleans_numbers_and_fails_closed_on_strings() {
+    fn parse_session_locked_matches_core_graphics_session_keys() {
+        // `<CoreGraphics/CGSession.h>` defines:
+        //   `#define kCGSessionOnConsoleKey "kCGSSessionOnConsoleKey"` (two `S`s)
+        //   `#define kCGSessionLoginDoneKey "kCGSessionLoginDoneKey"`  (one `S`)
         let k_console = CFString::from_static_str("kCGSSessionOnConsoleKey");
-        let k_login = CFString::from_static_str("kCGSSessionLoginDoneKey");
+        let k_login = CFString::from_static_str("kCGSessionLoginDoneKey");
         let k_locked = CFString::from_static_str("CGSSessionScreenIsLocked");
 
         let t: &CFType = unsafe { kCFBooleanTrue.unwrap() }.as_ref();
@@ -842,7 +848,7 @@ mod tests {
         let one = CFNumber::new_i64(1);
         let bad = CFString::from_static_str("yes");
 
-        // Unlocked session (lock key absent).
+        // Unlocked session using real CoreGraphics session keys.
         let unlocked = CFDictionary::from_slices(&[&*k_console, &*k_login], &[t, t]);
         assert_eq!(parse_session_locked(&unlocked), Ok(false));
 
@@ -870,5 +876,17 @@ mod tests {
             parse_session_locked(&off_console).unwrap_err().kind,
             SpaceErrorKind::NoGuiSession
         );
+
+        // When running inside an active macOS GUI login session, live
+        // `CGSessionCopyCurrentDictionary()` must succeed without `NoGuiSession`.
+        if let Some(live) = CGSessionCopyCurrentDictionary() {
+            let live_dict = unsafe { live.cast_unchecked::<CFString, CFType>() };
+            if session_flag(live_dict, "kCGSSessionOnConsoleKey") == Ok(Some(true)) {
+                assert!(
+                    parse_session_locked(live_dict).is_ok(),
+                    "active console login session must not fail with NoGuiSession"
+                );
+            }
+        }
     }
 }

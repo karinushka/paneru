@@ -77,6 +77,10 @@ impl MockState {
         self.inner.force_write().defer_desktop_ops = defer;
     }
 
+    pub(crate) fn set_screen_locked(&self, locked: bool) {
+        self.inner.force_write().screen_locked = locked;
+    }
+
     pub(crate) fn flush_deferred_desktop_ops(&self) {
         let ops = std::mem::take(&mut self.inner.force_write().deferred_desktop_ops);
         for op in ops {

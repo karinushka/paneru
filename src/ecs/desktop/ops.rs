@@ -6,7 +6,7 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, Without};
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, SystemParam};
+use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut, SystemParam};
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
@@ -20,8 +20,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, OpenedFrom, Position, SelectedVirtualMarker,
-    SpawnCommandsExt as _, Window,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, OpenedFrom, Position,
+    SelectedVirtualMarker, SpawnCommandsExt as _, Unmanaged, Window,
 };
 use crate::events::Event;
 use crate::manager::Display;
@@ -50,7 +50,7 @@ pub(super) struct DesktopOpWorld<'w, 's> {
     pub(super) strips: DesktopStrips<'w, 's>,
     pub(super) windows: Windows<'w, 's>,
     pub(super) opened_from: Query<'w, 's, &'static OpenedFrom>,
-    pub(super) focus_history: Option<Res<'w, FocusHistory>>,
+    pub(super) focus_history: Option<ResMut<'w, FocusHistory>>,
     pub(super) pending: ResMut<'w, PendingDesktopOps>,
     pub(super) census: ResMut<'w, DesktopCensus>,
     pub(super) commands: Commands<'w, 's>,
@@ -164,23 +164,33 @@ pub(super) fn preferred_focus_on_space(
     focus_history.and_then(|h| h.last_floating(raw))
 }
 
+/// Records the active native Space's remembered window in [`FocusHistory`]
+/// before switching away. Never inserts `PreviousStripPosition` onto an active
+/// or native-Desktop strip: `PreviousStripPosition` belongs solely to parked
+/// off-screen virtual workspace rows, and its presence causes
+/// `reshuffle_layout_strip` / `ensure_visible_in_strip` to treat the strip as
+/// newly activating and skip scrolling windows into view.
 pub(super) fn save_active_strip_focus(
     strips: &DesktopStrips,
     focused_entity: Option<Entity>,
-    commands: &mut Commands,
+    windows: &Windows,
+    focus_history: Option<&mut FocusHistory>,
 ) {
-    if let Some((entity, strip, pos, _, _, _)) =
-        strips.iter().find(|(_, _, _, _, active, _)| *active)
-    {
-        let focus = focused_entity
-            .filter(|&e| strip.contains(e))
-            .or_else(|| strip.first());
-        if let Ok(mut ec) = commands.get_entity(entity) {
-            ec.try_insert(PreviousStripPosition {
-                origin: pos.0,
-                focus,
-            });
+    let Some(history) = focus_history else {
+        return;
+    };
+    let Some((_, strip, _, _, _, _)) = strips.iter().find(|(_, _, _, _, active, _)| *active) else {
+        return;
+    };
+    if let Some(entity) = focused_entity {
+        let unmanaged = windows.get_managed(entity).and_then(|(_, _, u)| u);
+        if strip.contains(entity) || matches!(unmanaged, Some(Unmanaged::Floating)) {
+            history.record(strip.id(), entity, unmanaged);
+            return;
         }
+    }
+    if let Some(first) = strip.first() {
+        history.record(strip.id(), first, None);
     }
 }
 
@@ -256,11 +266,13 @@ fn validate_window_move(
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dispatch_focus_space(
     target: &SpaceRecord,
     census: &SpaceCensus,
     active_disp_id: CGDirectDisplayID,
     preferred_window: Option<Entity>,
+    departure_focus: Option<Entity>,
     bridge: &mut DesktopBridge,
     world: &mut DesktopOpWorld,
 ) -> bool {
@@ -278,6 +290,12 @@ fn dispatch_focus_space(
         }
         return false;
     }
+    save_active_strip_focus(
+        &world.strips,
+        departure_focus,
+        &world.windows,
+        world.focus_history.as_deref_mut(),
+    );
     if target.display_id != active_disp_id
         && let Some((disp_entity, _, _)) = world
             .displays
@@ -316,7 +334,6 @@ fn handle_focus(target: &DesktopTarget, bridge: &mut DesktopBridge, world: &mut 
         return;
     };
     let focused_entity = world.windows.focused().map(|(_, e)| e);
-    save_active_strip_focus(&world.strips, focused_entity, &mut world.commands);
     let fullscreen_owner = match dest.kind {
         SpaceKind::Fullscreen {
             owner_wid: Some(owner),
@@ -329,6 +346,7 @@ fn handle_focus(target: &DesktopTarget, bridge: &mut DesktopBridge, world: &mut 
         &census,
         active_disp_id,
         fullscreen_owner,
+        focused_entity,
         bridge,
         world,
     );
@@ -453,11 +471,11 @@ fn handle_move_window(
 
     if already_sole {
         if matches!(move_focus, MoveFocus::Follow) {
-            save_active_strip_focus(&world.strips, Some(focused_entity), &mut world.commands);
             dispatch_focus_space(
                 dest,
                 &census,
                 active_disp_id,
+                Some(focused_entity),
                 Some(focused_entity),
                 bridge,
                 world,
@@ -474,7 +492,14 @@ fn handle_move_window(
         return;
     }
 
-    let (_, heir) = relocate_tiled_group_to_space(focused_entity, dest.id, dest.display_id, world);
+    let (moved, heir) =
+        relocate_tiled_group_to_space(focused_entity, dest.id, dest.display_id, world);
+    if let Some(history) = world.focus_history.as_deref_mut() {
+        for entity in moved {
+            history.forget(entity);
+        }
+        history.forget(focused_entity);
+    }
 
     finish_move_window(
         move_focus,
@@ -487,6 +512,25 @@ fn handle_move_window(
         bridge,
         world,
     );
+}
+
+fn focus_heir_on_active_strip(
+    focused_entity: Entity,
+    heir: Option<Entity>,
+    world: &mut DesktopOpWorld,
+) {
+    let next_focus = heir.or_else(|| {
+        world
+            .strips
+            .iter()
+            .find(|(_, _, _, _, active, _)| *active)
+            .and_then(|(_, s, _, _, _, _)| s.first())
+    });
+    if let Some(next_entity) = next_focus {
+        world.commands.focus_entity(next_entity, true);
+    } else if let Ok(mut ec) = world.commands.get_entity(focused_entity) {
+        ec.try_remove::<FocusedMarker>();
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -511,26 +555,15 @@ fn finish_move_window(
                 },
                 None,
             ));
-            let next_focus = heir.or_else(|| {
-                world
-                    .strips
-                    .iter()
-                    .find(|(_, _, _, _, active, _)| *active)
-                    .and_then(|(_, s, _, _, _, _)| s.first())
-            });
-            if let Some(next_entity) = next_focus {
-                world.commands.focus_entity(next_entity, true);
-            } else if let Ok(mut ec) = world.commands.get_entity(focused_entity) {
-                ec.try_remove::<crate::ecs::FocusedMarker>();
-            }
+            focus_heir_on_active_strip(focused_entity, heir, world);
         }
         MoveFocus::Follow => {
-            save_active_strip_focus(&world.strips, heir, &mut world.commands);
             if !dispatch_focus_space(
                 dest,
                 census,
                 active_disp_id,
                 Some(focused_entity),
+                heir,
                 bridge,
                 world,
             ) {
@@ -542,6 +575,7 @@ fn finish_move_window(
                     },
                     None,
                 ));
+                focus_heir_on_active_strip(focused_entity, heir, world);
             }
         }
     }

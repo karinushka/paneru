@@ -42,7 +42,12 @@ pub(super) fn handle_create(focus: bool, bridge: &mut DesktopBridge, world: &mut
     }
     if focus {
         let focused_entity = world.windows.focused().map(|(_, e)| e);
-        save_active_strip_focus(&world.strips, focused_entity, &mut world.commands);
+        save_active_strip_focus(
+            &world.strips,
+            focused_entity,
+            &world.windows,
+            world.focus_history.as_deref_mut(),
+        );
     }
     world.pending.push(PendingDesktopOp::new(
         format!("create desktop {new_id}"),

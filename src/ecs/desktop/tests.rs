@@ -914,3 +914,136 @@ fn activation_popup_formats_single_and_multi_desktop_labels() {
         })
         .run(commands);
 }
+
+fn assert_active_strip_scrolled_cleanly(world: &mut bevy::ecs::world::World, space_id: u64) {
+    use crate::ecs::workspace::PreviousStripPosition;
+    use crate::ecs::{Position, RepositionMarker};
+
+    let mut q = world.query::<(
+        &LayoutStrip,
+        &Position,
+        Option<&RepositionMarker>,
+        Has<ActiveWorkspaceMarker>,
+        Has<PreviousStripPosition>,
+    )>();
+    let (strip, pos, repo, _, has_prev) = q
+        .iter(world)
+        .find(|(_, _, _, active, _)| *active)
+        .expect("active strip exists");
+    assert_eq!(strip.id(), space_id);
+    assert!(
+        !has_prev,
+        "active desktop strip must never carry PreviousStripPosition"
+    );
+    let target_x = repo.map_or(pos.0.x, |r| r.0.x);
+    assert!(
+        target_x < 0,
+        "focusing offscreen window must scroll active strip left, got target_x={target_x}"
+    );
+}
+
+#[test]
+fn desktop_focus_does_not_poison_active_strip_reshuffle() {
+    use crate::commands::Operation;
+
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 900, 900);
+        })
+        .with_workspace_window(11, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 900, 900);
+        })
+        .with_workspace_window(12, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 900, 900);
+        });
+
+    let commands = vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 1,
+            display: None,
+        })),
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        tick(),
+    ];
+
+    harness
+        .on_iteration(4, |world, _| {
+            assert_active_strip_scrolled_cleanly(world, TEST_WORKSPACE_ID);
+        })
+        .run(commands);
+}
+
+#[test]
+fn failed_and_roundtrip_desktop_ops_keep_focus_reshuffle_working() {
+    use crate::commands::Operation;
+
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 600, 700);
+        })
+        .with_workspace_window(11, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 600, 700);
+        })
+        .with_workspace_window(12, TEST_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(0, 0, 600, 700);
+        })
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness.mock_state.set_screen_locked(true);
+
+    let focus_east = || Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    };
+    let focus_west = || Event::Command {
+        command: Command::Window(Operation::Focus(Direction::West)),
+    };
+
+    let commands = vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })),
+        desktop_cmd(DesktopOperation::MoveWindow {
+            target: DesktopTarget::Number {
+                number: 2,
+                display: None,
+            },
+            move_focus: MoveFocus::Follow,
+        }),
+        desktop_cmd(DesktopOperation::Create { focus: true }),
+        focus_east(),
+        focus_east(),
+        tick(),
+        focus_west(),
+        focus_west(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 1,
+            display: None,
+        })),
+        focus_east(),
+        focus_east(),
+        tick(),
+    ];
+
+    harness
+        .on_iteration(6, |world, state| {
+            assert_active_strip_scrolled_cleanly(world, TEST_WORKSPACE_ID);
+            state.set_screen_locked(false);
+        })
+        .on_iteration(13, |world, _| {
+            assert_active_strip_scrolled_cleanly(world, TEST_WORKSPACE_ID);
+        })
+        .run(commands);
+}

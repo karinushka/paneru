@@ -1031,6 +1031,7 @@ impl OverviewManager {
             }
         }
         CATransaction::commit();
+        CATransaction::flush();
         if !closing {
             self.ensure_live_synced();
         }
@@ -1152,6 +1153,9 @@ impl OverviewManager {
             }
         }
         CATransaction::commit();
+        // Hand the morph animations to the render server before `sync_live` or
+        // the next focus keybind's synchronous AX calls run on the main thread.
+        CATransaction::flush();
         self.visible = layouts
             .iter()
             .map(|layout| visible_set(layout, self.live_margin))

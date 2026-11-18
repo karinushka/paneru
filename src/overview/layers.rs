@@ -188,6 +188,9 @@ pub(super) struct Animated {
     /// Corner radius in bounds space when fully open; grows in like `ring`
     /// so the full-size frame at progress 0 has square corners.
     pub(super) corner: f64,
+    /// Monotonic counter giving each additive morph animation a unique key on
+    /// `layer` so rapid consecutive morphs compose rather than overwrite.
+    morph_seq: u64,
 }
 
 impl Animated {
@@ -214,6 +217,7 @@ impl Animated {
             base,
             ring: 0.0,
             corner: 0.0,
+            morph_seq: 0,
         }
     }
 
@@ -277,7 +281,8 @@ impl Animated {
             ),
         ];
         for anim in &anims {
-            self.layer.addAnimation_forKey(anim, None);
+            let key = anim.keyPath();
+            self.layer.addAnimation_forKey(anim, key.as_deref());
         }
         if (opacity.0 - opacity.1).abs() > f64::EPSILON {
             let fade = spring_anim(
@@ -286,7 +291,8 @@ impl Animated {
                 &ns_number(opacity.1),
                 spring,
             );
-            self.layer.addAnimation_forKey(&fade, None);
+            let key = fade.keyPath();
+            self.layer.addAnimation_forKey(&fade, key.as_deref());
         }
     }
 
@@ -313,15 +319,304 @@ impl Animated {
 
     /// Moves the open (and rest) frame to new targets, springing from where
     /// it is now. Assumes the overview is fully open.
+    ///
+    /// Layers additive `CASpringAnimation`s (`delta → 0`) onto the updated
+    /// model target instead of calling `removeAllAnimations()`, so repeated
+    /// focus steps while an earlier slide is still in flight keep their live
+    /// position and velocity rather than snapping to the previous target.
     pub(super) fn morph(&mut self, rest: Rect, overview: Rect, spring: &Spring) {
         let from = self.overview;
         self.rest = rest;
         self.overview = overview;
         if from != overview {
-            let o = self.opacity_at(1.0);
-            self.spring_between(&from, &overview, (o, o), spring);
+            self.apply(&overview, self.opacity_at(1.0));
+            self.morph_seq += 1;
+            let seq = self.morph_seq;
+            let (ca, cb) = (centre(&from), centre(&overview));
+            let (dx, dy) = (ca.x - cb.x, ca.y - cb.y);
+            if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
+                let anim = spring_anim(
+                    "position",
+                    &ns_value_point(CGPoint::new(dx, dy)),
+                    &ns_value_point(CGPoint::new(0.0, 0.0)),
+                    spring,
+                );
+                anim.setAdditive(true);
+                let key = NSString::from_str(&format!("paneru.morph.{seq:08}.position"));
+                self.layer.addAnimation_forKey(&anim, Some(&key));
+            }
+            for (axis, delta) in [
+                ("x", (from.w - overview.w) / self.base.0),
+                ("y", (from.h - overview.h) / self.base.1),
+            ] {
+                if delta.abs() > f64::EPSILON {
+                    let anim = spring_anim(
+                        &format!("transform.scale.{axis}"),
+                        &ns_number(delta),
+                        &ns_number(0.0),
+                        spring,
+                    );
+                    anim.setAdditive(true);
+                    let key = NSString::from_str(&format!("paneru.morph.{seq:08}.scale.{axis}"));
+                    self.layer.addAnimation_forKey(&anim, Some(&key));
+                }
+            }
         }
         self.layer.setBorderWidth(self.ring);
         self.layer.setCornerRadius(self.corner);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+    use crate::overview::SPRING_RESPONSE;
+
+    #[derive(Clone, Copy, PartialEq, Eq, Hash)]
+    struct AnimIdentity {
+        from_x: u64,
+        from_y: u64,
+        to_x: u64,
+        to_y: u64,
+    }
+
+    /// Tracks when each `CAAnimation` currently attached to a `CALayer` began,
+    /// mirroring `CARenderServer` stamping `beginTime` on `addAnimation:forKey:`.
+    #[derive(Default)]
+    struct AnimationClock {
+        started: HashMap<String, (AnimIdentity, f64)>,
+    }
+
+    impl AnimationClock {
+        fn sync(&mut self, layer: &CALayer, now: f64) {
+            let mut live = HashMap::new();
+            let Some(keys) = layer.animationKeys() else {
+                self.started.clear();
+                return;
+            };
+            for key in &keys {
+                let Some(anim) = (unsafe { layer.animationForKey(&key) }) else {
+                    continue;
+                };
+                let Ok(spring) = anim.downcast::<CASpringAnimation>() else {
+                    continue;
+                };
+                let id = anim_identity(&spring);
+                let name = key.to_string();
+                let start = match self.started.get(&name) {
+                    Some((prev_id, t0)) if *prev_id == id => *t0,
+                    _ => now,
+                };
+                live.insert(name, (id, start));
+            }
+            self.started = live;
+        }
+
+        /// Evaluates the composite presentation `(frame_x, vx, width)` of `card`
+        /// at `now` using Core Animation's render-server composition rules
+        /// (model value + active animations in key order).
+        fn sample(&self, card: &Animated, now: f64) -> (f64, f64, f64) {
+            let mut cx = card.layer.position().x;
+            let mut vx = 0.0;
+            let sx_key = NSString::from_str("transform.scale.x");
+            let model_sx: f64 = unsafe {
+                let num: Retained<AnyObject> = msg_send![&card.layer, valueForKeyPath: &*sx_key];
+                msg_send![&*num, doubleValue]
+            };
+            let mut sx = model_sx;
+
+            if let Some(keys) = card.layer.animationKeys() {
+                let mut names: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+                names.sort();
+                for name in names {
+                    let Some((_, start)) = self.started.get(&name) else {
+                        continue;
+                    };
+                    let dt = now - start;
+                    let Some(anim) =
+                        (unsafe { card.layer.animationForKey(&NSString::from_str(&name)) })
+                    else {
+                        continue;
+                    };
+                    let Ok(spring_anim) = anim.downcast::<CASpringAnimation>() else {
+                        continue;
+                    };
+                    if dt < 0.0 || dt >= spring_anim.duration() {
+                        continue;
+                    }
+                    let Some(key_path) = spring_anim.keyPath() else {
+                        continue;
+                    };
+                    let omega = spring_anim.stiffness().sqrt();
+                    let Some((from, to)) = endpoints(&spring_anim) else {
+                        continue;
+                    };
+                    let eval = |a: f64, b: f64| -> (f64, f64) {
+                        let s = Spring {
+                            from: a,
+                            to: b,
+                            velocity: spring_anim.initialVelocity() * (b - a),
+                            omega,
+                        };
+                        (s.value(dt), s.velocity_at(dt))
+                    };
+                    match key_path.to_string().as_str() {
+                        "position" => {
+                            let (px, pvx) = eval(from.0, to.0);
+                            if spring_anim.isAdditive() {
+                                cx += px;
+                                vx += pvx;
+                            } else {
+                                cx = px;
+                                vx = pvx;
+                            }
+                        }
+                        "transform.scale.x" => {
+                            let (psx, _) = eval(from.0, to.0);
+                            if spring_anim.isAdditive() {
+                                sx += psx;
+                            } else {
+                                sx = psx;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let width = card.base.0 * sx;
+            let frame_x = cx - width / 2.0;
+            (frame_x, vx, width)
+        }
+    }
+
+    fn endpoints(anim: &CASpringAnimation) -> Option<((f64, f64), (f64, f64))> {
+        let key_path = anim.keyPath()?.to_string();
+        let from = anim.fromValue()?;
+        let to = anim.toValue()?;
+        if key_path == "position" {
+            let fp: CGPoint = unsafe { msg_send![&*from, pointValue] };
+            let tp: CGPoint = unsafe { msg_send![&*to, pointValue] };
+            Some(((fp.x, fp.y), (tp.x, tp.y)))
+        } else {
+            let fv: f64 = unsafe { msg_send![&*from, doubleValue] };
+            let tv: f64 = unsafe { msg_send![&*to, doubleValue] };
+            Some(((fv, 0.0), (tv, 0.0)))
+        }
+    }
+
+    fn anim_identity(anim: &CASpringAnimation) -> AnimIdentity {
+        let ((fx, fy), (tx, ty)) = endpoints(anim).unwrap_or_default();
+        AnimIdentity {
+            from_x: fx.to_bits(),
+            from_y: fy.to_bits(),
+            to_x: tx.to_bits(),
+            to_y: ty.to_bits(),
+        }
+    }
+
+    #[test]
+    fn repeated_morphs_preserve_in_flight_position_and_velocity() {
+        use objc2_quartz_core::CATransaction;
+
+        // Hold an explicit outer `CATransaction` open for the test's duration:
+        // on a headless worker thread (no `NSWindow` / `CAContext`), committing
+        // or background-flushing the root transaction immediately discards
+        // `removedOnCompletion` animations because there is no render context.
+        CATransaction::begin();
+        CATransaction::setDisableActions(true);
+        scopeguard::defer! {
+            CATransaction::commit();
+        }
+
+        let rest = Rect::new(0.0, 0.0, 1200.0, 800.0);
+        let open_0 = Rect::new(1000.0, 100.0, 600.0, 400.0);
+        let mut card = Animated::new(CALayer::new(), rest, open_0, (1.0, 1.0));
+        card.set(1.0);
+
+        let spring = Spring::new(0.0, 1.0, 0.0, SPRING_RESPONSE);
+        let mut clock = AnimationClock::default();
+        let step = |card: &mut Animated, clock: &mut AnimationClock, target: Rect, now: f64| {
+            CATransaction::begin();
+            CATransaction::setDisableActions(true);
+            card.morph(rest, target, &spring);
+            CATransaction::commit();
+            clock.sync(&card.layer, now);
+        };
+
+        // 1st focus change at t = 0ms: strip slides left by 400pt (1000 -> 600).
+        let open_1 = Rect::new(600.0, 100.0, 600.0, 400.0);
+        step(&mut card, &mut clock, open_1, 0.0);
+
+        let (x_start, vx_start, _) = clock.sample(&card, 0.0);
+        assert!(
+            (x_start - 1000.0).abs() < 1e-6 && vx_start.abs() < 1e-6,
+            "first morph must start smoothly from 1000.0, got x={x_start}, vx={vx_start}"
+        );
+
+        // 60ms into the slide, the card is mid-flight with substantial leftward velocity.
+        let (x_mid_1, vx_mid_1, _) = clock.sample(&card, 0.06);
+        assert!(
+            x_mid_1 > 750.0 && x_mid_1 < 900.0 && vx_mid_1 < -2000.0,
+            "card should be mid-slide at t=60ms, got x={x_mid_1}, vx={vx_mid_1}"
+        );
+
+        // 2nd focus change in the same direction at t = 60ms (600 -> 200):
+        // must NOT snap forward to 600.0 or zero out velocity!
+        let open_2 = Rect::new(200.0, 100.0, 600.0, 400.0);
+        step(&mut card, &mut clock, open_2, 0.06);
+
+        let (x_after_2, vx_after_2, _) = clock.sample(&card, 0.06);
+        assert!(
+            (x_after_2 - x_mid_1).abs() < 1e-6,
+            "2nd morph jumped position instantaneously from {x_mid_1:.2} to {x_after_2:.2}"
+        );
+        assert!(
+            (vx_after_2 - vx_mid_1).abs() < 1e-6,
+            "2nd morph reset velocity from {vx_mid_1:.1} to {vx_after_2:.1}"
+        );
+
+        // 3rd focus change in the same direction at t = 120ms (200 -> -200)
+        // plus a width change (600 -> 450) to verify scale continuity too.
+        let (x_mid_2, vx_mid_2, w_mid_2) = clock.sample(&card, 0.12);
+        let open_3 = Rect::new(-200.0, 100.0, 450.0, 300.0);
+        step(&mut card, &mut clock, open_3, 0.12);
+
+        let (x_after_3, vx_after_3, w_after_3) = clock.sample(&card, 0.12);
+        assert!(
+            (x_after_3 - x_mid_2).abs() < 1e-6,
+            "3rd morph jumped position instantaneously from {x_mid_2:.2} to {x_after_3:.2}"
+        );
+        assert!(
+            (vx_after_3 - vx_mid_2).abs() < 1e-6,
+            "3rd morph reset velocity from {vx_mid_2:.1} to {vx_after_3:.1}"
+        );
+        assert!(
+            (w_after_3 - w_mid_2).abs() < 1e-6,
+            "3rd morph jumped width from {w_mid_2:.2} to {w_after_3:.2}"
+        );
+
+        // Once all additive springs finish, the card rests at the final target.
+        let settled_t = 0.12 + spring.visible_duration() + 0.01;
+        let (x_end, vx_end, w_end) = clock.sample(&card, settled_t);
+        assert!(
+            (x_end - (-200.0)).abs() < 1e-6 && vx_end.abs() < 1e-6 && (w_end - 450.0).abs() < 1e-6,
+            "settled card should rest at (-200, w=450), got x={x_end}, vx={vx_end}, w={w_end}"
+        );
+
+        // Reversing direction mid-flight (e.g. focus east then focus west 50ms
+        // later) also preserves position and velocity without snapping.
+        let open_4 = Rect::new(200.0, 100.0, 450.0, 300.0);
+        step(&mut card, &mut clock, open_4, settled_t);
+        let rev_t = settled_t + 0.05;
+        let (x_before_rev, vx_before_rev, _) = clock.sample(&card, rev_t);
+        step(&mut card, &mut clock, open_3, rev_t);
+        let (x_after_rev, vx_after_rev, _) = clock.sample(&card, rev_t);
+        assert!(
+            (x_after_rev - x_before_rev).abs() < 1e-6
+                && (vx_after_rev - vx_before_rev).abs() < 1e-6,
+            "direction reversal jumped from ({x_before_rev:.2}, {vx_before_rev:.1}) to ({x_after_rev:.2}, {vx_after_rev:.1})"
+        );
     }
 }

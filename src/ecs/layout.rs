@@ -408,6 +408,9 @@ pub struct LayoutStrip {
     /// or none of a Stack's members are keys, all with the same value.
     /// Independent of native-OS tabs (`Column::Tabs`, `tabbed()`).
     tabbed_stacks: EntityHashMap<Entity>,
+    /// Existing window whose visual x position must survive the next layout
+    /// pass. Insertions to its left rebase the strip by the exact slot delta.
+    pending_anchor: Option<Entity>,
 }
 
 impl LayoutStrip {
@@ -417,6 +420,7 @@ impl LayoutStrip {
             virtual_index,
             columns: VecDeque::new(),
             tabbed_stacks: EntityHashMap::default(),
+            pending_anchor: None,
         }
     }
 
@@ -428,6 +432,7 @@ impl LayoutStrip {
             virtual_index: 0,
             columns,
             tabbed_stacks: EntityHashMap::default(),
+            pending_anchor: None,
         }
     }
 
@@ -478,6 +483,17 @@ impl LayoutStrip {
         } else {
             self.columns.insert(index, Column::Single(entity));
         }
+    }
+
+    /// Inserts a new column while keeping `anchor` at the same visual x when
+    /// the insertion lands to its left. The layout pass consumes the anchor.
+    pub fn insert_at_preserving(&mut self, index: usize, entity: Entity, anchor: Option<Entity>) {
+        let insertion = index.min(self.len());
+        self.pending_anchor = anchor.filter(|anchor| {
+            self.index_of(*anchor)
+                .is_ok_and(|anchor_index| insertion <= anchor_index)
+        });
+        self.insert_at(insertion, entity);
     }
 
     /// Appends a window ID as a `Single` panel to the end of the pane.
@@ -629,6 +645,9 @@ impl LayoutStrip {
     ///
     /// * `entity` - Entity of the window to remove.
     pub fn remove(&mut self, entity: Entity) {
+        if self.pending_anchor == Some(entity) {
+            self.pending_anchor = None;
+        }
         let removed = self
             .index_of(entity)
             .ok()
@@ -1506,48 +1525,58 @@ fn stack_item_has_changed_window(item: &StackItem, changed_entities: &EntityHash
 /// re-calculates the logical positions of all the windows in the layout strip.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn layout_strip_changed(
-    changed_strips: Populated<(&LayoutStrip, &ChildOf), Changed<LayoutStrip>>,
+    changed_strips: Populated<(&mut LayoutStrip, &mut Position, &ChildOf), Changed<LayoutStrip>>,
     mut windows: WindowFrames,
     displays: DisplayViewports,
     config: Res<Config>,
 ) {
-    let get_window_frame = |entity| {
-        windows
-            .get(entity)
-            .map(|(position, bounds, _, resize)| {
-                let size = resize.map_or(bounds.0, |resize| resize.0);
-                IRect::from_corners(position.0, position.0 + size)
-            })
-            .ok()
-    };
-
-    let changed = changed_strips
-        .into_iter()
-        .filter_map(|(layout_strip, child_of)| {
-            displays
-                .get(child_of.parent())
-                .map(|(display, dock)| {
-                    let height = display.actual_display_bounds(dock, &config).height();
-                    layout_strip.relative_positions(height, &get_window_frame)
+    for (mut layout_strip, mut strip_position, child_of) in changed_strips {
+        let anchor = layout_strip.bypass_change_detection().pending_anchor.take();
+        let old_anchor_x =
+            anchor.and_then(|entity| windows.get(entity).ok().map(|(position, ..)| position.0.x));
+        let Ok((display, dock)) = displays.get(child_of.parent()) else {
+            continue;
+        };
+        let height = display.actual_display_bounds(dock, &config).height();
+        let get_window_frame = |entity| {
+            windows
+                .get(entity)
+                .map(|(position, bounds, _, resize)| {
+                    let size = resize.map_or(bounds.0, |resize| resize.0);
+                    IRect::from_corners(position.0, position.0 + size)
                 })
                 .ok()
-        })
-        .flatten()
-        .collect::<Vec<_>>();
+        };
+        let changed = layout_strip
+            .relative_positions(height, &get_window_frame)
+            .collect::<Vec<_>>();
 
-    for (entity, frame) in changed {
-        if let Ok((_, mut bounds, mut layout_position, resize)) = windows.get_mut(entity) {
-            if layout_position.0 == frame.min {
-                layout_position.set_changed();
-            } else {
-                layout_position.0 = frame.min;
-            }
-            if let Some(mut resize) = resize {
-                if resize.0 != frame.size() {
-                    resize.0 = frame.size();
+        // The anchor has to still be a member of this strip: one that left
+        // (removed, or moved to another strip by `extract_windows_into`)
+        // produces no frame in `changed`, the zip below fails, and the rebase
+        // silently does nothing rather than shifting by a stale position.
+        if let Some((old_x, new_x)) = old_anchor_x.zip(anchor.and_then(|anchor| {
+            changed
+                .iter()
+                .find_map(|(entity, frame)| (*entity == anchor).then_some(frame.min.x))
+        })) {
+            strip_position.0.x += old_x - new_x;
+        }
+
+        for (entity, frame) in changed {
+            if let Ok((_, mut bounds, mut layout_position, resize)) = windows.get_mut(entity) {
+                if layout_position.0 == frame.min {
+                    layout_position.set_changed();
+                } else {
+                    layout_position.0 = frame.min;
                 }
-            } else if bounds.0 != frame.size() {
-                bounds.0 = frame.size();
+                if let Some(mut resize) = resize {
+                    if resize.0 != frame.size() {
+                        resize.0 = frame.size();
+                    }
+                } else if bounds.0 != frame.size() {
+                    bounds.0 = frame.size();
+                }
             }
         }
     }
@@ -2589,6 +2618,38 @@ mod tests {
         // e3 (single) gets full viewport height.
         let e3_frame = out.iter().find(|(e, _)| *e == entities[3]).unwrap().1;
         assert_eq!(e3_frame.height(), 600);
+    }
+
+    #[test]
+    fn insert_at_preserving_anchors_only_left_of_focus() {
+        let mut world = World::new();
+        let entities = world.spawn_batch(vec![(), (), ()]).collect::<Vec<Entity>>();
+        let new = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        for &entity in &entities {
+            strip.append(entity);
+        }
+
+        // An insertion at or left of the focused column pushes the focus
+        // right; record it so the layout pass can rebase the strip instead.
+        strip.insert_at_preserving(1, new, Some(entities[1]));
+        assert_eq!(strip.pending_anchor, Some(entities[1]));
+
+        strip.remove(new);
+        strip.insert_at_preserving(0, new, Some(entities[1]));
+        assert_eq!(strip.pending_anchor, Some(entities[1]));
+
+        // An insertion strictly right of the focus leaves its slot alone, so
+        // no anchor is recorded and behavior matches a plain `insert_at`.
+        strip.remove(new);
+        strip.insert_at_preserving(2, new, Some(entities[1]));
+        assert_eq!(strip.pending_anchor, None);
+
+        // The anchor cannot outlive the window it belongs to.
+        strip.insert_at_preserving(0, new, Some(entities[1]));
+        strip.remove(entities[1]);
+        assert_eq!(strip.pending_anchor, None);
     }
 
     #[test]

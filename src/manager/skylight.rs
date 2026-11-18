@@ -100,6 +100,17 @@ unsafe extern "C" {
     /// extern `CFStringRef` SLSCopyBestManagedDisplayForRect(int cid, `CGRect` rect);
     // pub fn SLSCopyBestManagedDisplayForRect(cid: ConnID, frame: CGRect) -> CFStringRef;
 
+    /// Copies the managed space IDs (`u64` `CFNumber`s) hosting the given windows (`SInt32` `CFNumber`s).
+    ///
+    /// # Original signature
+    /// extern `CFArrayRef` SLSCopySpacesForWindows(int cid, int selector, `CFArrayRef` `window_list`);
+    #[allow(dead_code, reason = "called via DesktopBridgeOS")]
+    pub fn SLSCopySpacesForWindows(
+        cid: ConnID,
+        selector: i32,
+        window_list: *const CFArray,
+    ) -> *mut CFArray<CFNumber>;
+
     /// Creates a `CFUUIDRef` from a `CGDirectDisplayID`.
     ///
     /// # Arguments

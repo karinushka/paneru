@@ -8,8 +8,8 @@ use derive_more::{DerefMut, with_trait::Deref};
 use mockall::automock;
 use notify::{RecursiveMode, Watcher};
 use objc2_core_foundation::{
-    CFArray, CFBoolean, CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString,
-    CFType, CGPoint, CGRect, CGSize, kCFBooleanTrue,
+    CFDictionary, CFMutableData, CFNumber, CFNumberType, CFRetained, CFString, CFType, CGPoint,
+    CGRect, CGSize, kCFBooleanTrue,
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
@@ -37,9 +37,9 @@ pub use process::{Process, ProcessApi};
 pub use skylight::AXUIElementCopyAttributeValue;
 use skylight::{
     _AXUIElementCreateWithRemoteToken, SLSConnectionGetPID, SLSCopyActiveMenuBarDisplayIdentifier,
-    SLSCopyAssociatedWindows, SLSCopyManagedDisplaySpaces, SLSCopyWindowsWithOptionsAndTags,
-    SLSFindWindowAndOwner, SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation,
-    SLSGetDisplayMenubarHeight, SLSGetSpaceManagementMode, SLSGetWindowOwner, SLSMainConnectionID,
+    SLSCopyAssociatedWindows, SLSCopyWindowsWithOptionsAndTags, SLSFindWindowAndOwner,
+    SLSGetConnectionIDForPSN, SLSGetCurrentCursorLocation, SLSGetDisplayMenubarHeight,
+    SLSGetSpaceManagementMode, SLSGetWindowOwner, SLSMainConnectionID,
     SLSManagedDisplayGetCurrentSpace, SLSSpaceGetType, SLSWindowIsOrderedIn,
     SLSWindowIteratorAdvance, SLSWindowIteratorGetAttributes, SLSWindowIteratorGetParentID,
     SLSWindowIteratorGetTags, SLSWindowIteratorGetWindowID, SLSWindowQueryResultCopyWindows,
@@ -60,6 +60,7 @@ pub(crate) mod app;
 mod display;
 mod process;
 mod skylight;
+pub mod spaces;
 mod windows;
 
 pub type Origin = IVec2;
@@ -248,70 +249,6 @@ impl WindowManagerOS {
         }
     }
 
-    /// Retrieves a list of space IDs for a given display UUID.
-    /// It queries the `SkyLight` API for managed display spaces and filters by the provided UUID.
-    ///
-    /// # Arguments
-    ///
-    /// * `uuid` - A reference to the `CFString` representing the display's UUID.
-    ///
-    /// # Returns
-    ///
-    /// `Ok(Vec<u64>)` with the list of space IDs if successful, otherwise `Err(Error)` if the spaces cannot be retrieved or the display is not found.
-    fn display_space_list(&self, uuid: &CFString) -> Result<Vec<WorkspaceId>> {
-        let display_spaces = NonNull::new(unsafe { SLSCopyManagedDisplaySpaces(self.main_cid) })
-            .map(|ptr| unsafe { CFRetained::from_raw(ptr) })
-            .ok_or(Error::PermissionDenied(format!(
-                "can not copy managed display spaces for {}.",
-                self.main_cid
-            )))?;
-        let uuid = uuid.to_string();
-
-        let display = display_spaces.iter().find(|display| {
-            let identifier = display
-                .get(&CFString::from_static_str("Display Identifier"))
-                .map(|name| name.to_string());
-            identifier.is_some_and(|identifier| {
-                // FIXME: Sometimes the main display simply has the name 'Main'.
-                identifier == "Main" || identifier == uuid
-            })
-        });
-        let Some(display) = display else {
-            return Err(Error::PermissionDenied(format!(
-                "could not get any displays for {}",
-                self.main_cid
-            )));
-        };
-        debug!("found display with uuid '{uuid}'");
-
-        let display = unsafe {
-            display.cast_unchecked::<CFString, CFArray<CFDictionary<CFString, CFNumber>>>()
-        };
-        let Some(spaces) = display.get(&CFString::from_static_str("Spaces")) else {
-            return Err(Error::PermissionDenied(format!(
-                "could not get any spaces for display '{uuid}'",
-            )));
-        };
-
-        let spaces = spaces
-            .iter()
-            .filter_map(|space| {
-                space
-                    .get(&CFString::from_static_str("id64"))
-                    .and_then(|id| id.as_i64().and_then(|value| u64::try_from(value).ok()))
-            })
-            .collect::<Vec<WorkspaceId>>();
-        debug!(
-            "spaces [{}]",
-            spaces
-                .iter()
-                .map(|id| format!("{id}"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        );
-        Ok(spaces)
-    }
-
     /// Retrieves the UUID of the active menu bar display.
     /// This typically corresponds to the display where the primary menu bar is located.
     ///
@@ -391,6 +328,9 @@ impl WindowManagerApi for WindowManagerOS {
             CGGetActiveDisplayList(count, displays.as_mut_ptr(), &raw mut count);
             displays.set_len(count.try_into().unwrap());
         }
+        let census = spaces::bridge::read_managed_display_spaces(self.main_cid)
+            .inspect_err(|err| warn!("unable to read managed display spaces: {err}"))
+            .ok();
         displays
             .into_iter()
             .filter_map(|id| {
@@ -398,9 +338,10 @@ impl WindowManagerApi for WindowManagerOS {
                 let mut menubar_height: u32 = 0;
                 unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
                 debug!("menubar height: {menubar_height}");
-                let workspaces = Display::uuid_from_id(id)
-                    .and_then(|uuid| self.display_space_list(uuid.as_ref()))
-                    .ok()?;
+                let workspaces: Vec<WorkspaceId> = census
+                    .as_ref()
+                    .and_then(|c| c.display(id))
+                    .map(|d| d.spaces.iter().map(|s| s.id.get()).collect())?;
 
                 Some((
                     Display::new(id, irect_from(bounds), menubar_height.cast_signed()),
@@ -935,14 +876,7 @@ pub fn check_ax_privilege() -> bool {
 /// Whether the login session's screen is locked. While it is, Accessibility
 /// answers for no application's windows, so a scan then finds none.
 pub fn screen_is_locked() -> bool {
-    let Some(session) = objc2_core_graphics::CGSessionCopyCurrentDictionary() else {
-        return false;
-    };
-    let session = unsafe { session.cast_unchecked::<CFString, CFType>() };
-    session
-        .get(&CFString::from_static_str("CGSSessionScreenIsLocked"))
-        .and_then(|value| value.downcast_ref::<CFBoolean>().map(CFBoolean::value))
-        .unwrap_or(false)
+    spaces::bridge::current_session_screen_locked()
 }
 
 /// Requests Accessibility privileges once through the native macOS prompt.

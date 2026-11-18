@@ -4,7 +4,7 @@
 use std::collections::{HashSet, VecDeque};
 use std::time::Duration;
 
-use bevy::app::{App, Plugin, PreUpdate, Update};
+use bevy::app::{App, Plugin, PostUpdate, PreUpdate, Update};
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::message::MessageReader;
@@ -12,7 +12,7 @@ use bevy::ecs::query::{Added, Has, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::SystemCondition as _;
-use bevy::ecs::schedule::common_conditions::on_message;
+use bevy::ecs::schedule::common_conditions::{not, on_message, resource_changed, resource_exists};
 use bevy::ecs::system::{
     Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemParam,
 };
@@ -22,8 +22,8 @@ use tracing::{debug, warn};
 
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, PreUpdateSet, SelectedVirtualMarker, SendMessageTrigger,
-    SpawnCommandsExt as _, Unmanaged, UpdateSet,
+    ActiveWorkspaceMarker, FocusedMarker, Initializing, PostUpdateSet, PreUpdateSet,
+    SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt as _, Unmanaged, UpdateSet,
 };
 use crate::events::Event;
 use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId};
@@ -32,6 +32,11 @@ use crate::platform::{WinID, WorkspaceId};
 
 pub(crate) mod lifecycle;
 pub(crate) mod ops;
+pub(crate) mod pin;
+
+#[cfg(test)]
+pub use pin::PinnedDesktopWindow;
+pub use pin::SentToInactiveDesktop;
 
 /// Maximum wall/virtual time a dispatched `WMBridge` mutation waits for OS
 /// census/membership confirmation before expiring (§2.4).
@@ -103,6 +108,8 @@ pub enum ConfirmCondition {
         windows: Vec<WinID>,
         expected: HashSet<SpaceId>,
     },
+    PerWindowMemberships(Vec<(WinID, HashSet<SpaceId>)>),
+    AllSpacesSubset(Vec<(WinID, CGDirectDisplayID)>),
     DisplayOrder {
         display_id: CGDirectDisplayID,
         expected: Vec<SpaceId>,
@@ -129,6 +136,8 @@ pub enum PostConfirmAction {
     },
     /// Ensure ECS strips and `FocusHistory` for a destroyed Space are cleaned up.
     DespawnDestroyedSpace(SpaceId),
+    /// Clear `StickyWindowMarker` on windows whose `0x800` tag cleared after `assign none`.
+    ReconcileStickyMarkers(Vec<WinID>),
     /// Second leg of a non-adjacent Desktop swap (§5.10).
     SecondSwapStep {
         space_id: SpaceId,
@@ -210,9 +219,23 @@ impl Plugin for DesktopEventsPlugin {
                 (
                     confirm_desktop_ops.run_if(has_pending_ops),
                     sync_sticky_windows,
+                    pin::join_pinned_windows_to_new_desktops
+                        .run_if(resource_changed::<DesktopCensus>),
                 )
                     .in_set(UpdateSet::Events)
                     .before(crate::ecs::workspace::workspace_change_handler),
+            )
+            .add_systems(
+                Update,
+                pin::apply_window_desktop_rules
+                    .in_set(UpdateSet::Spawn)
+                    .after(super::triggers::apply_window_defaults)
+                    .before(super::triggers::apply_window_positions)
+                    .run_if(not(resource_exists::<Initializing>)),
+            )
+            .add_systems(
+                PostUpdate,
+                pin::cleanup_sent_to_inactive_markers.in_set(PostUpdateSet::Bookkeeping),
             );
     }
 }
@@ -288,6 +311,27 @@ fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Option
                 &actual == expected
             })
         }),
+        ConfirmCondition::PerWindowMemberships(pairs) => pairs.iter().all(|(wid, expected)| {
+            bridge.spaces_for_window(*wid).is_ok_and(|now| {
+                let actual: HashSet<SpaceId> = now.into_iter().collect();
+                &actual == expected
+            })
+        }),
+        ConfirmCondition::AllSpacesSubset(items) => items.iter().all(|&(wid, disp_id)| {
+            let Some(disp) = census.display(disp_id) else {
+                return false;
+            };
+            let desktops: HashSet<SpaceId> = disp
+                .spaces
+                .iter()
+                .filter(|s| s.kind.is_desktop())
+                .map(|s| s.id)
+                .collect();
+            bridge.spaces_for_window(wid).is_ok_and(|now| {
+                let actual: HashSet<SpaceId> = now.into_iter().collect();
+                desktops.is_subset(&actual)
+            })
+        }),
         ConfirmCondition::DisplayOrder {
             display_id,
             expected,
@@ -318,7 +362,7 @@ struct ConfirmFocusTargets<'w, 's> {
             Has<SelectedVirtualMarker>,
         ),
     >,
-    windows: Query<'w, 's, (Entity, Has<FocusedMarker>), With<Window>>,
+    windows: Query<'w, 's, (Entity, &'static Window, Has<FocusedMarker>)>,
 }
 
 type UnmarkedAddedWindows<'w, 's> = Populated<
@@ -371,7 +415,7 @@ fn activate_space_in_ecs(
         preferred_window
     };
     if let Some(win_entity) = focus_target {
-        if let Ok((_, true)) = targets.windows.get(win_entity)
+        if let Ok((_, _, true)) = targets.windows.get(win_entity)
             && let Ok(mut ec) = commands.get_entity(win_entity)
         {
             ec.try_remove::<FocusedMarker>();
@@ -488,6 +532,17 @@ fn run_post_confirm(
                 commands.trigger(SendMessageTrigger(Event::SpaceDestroyed {
                     space_id: raw_id,
                 }));
+            }
+            None
+        }
+        PostConfirmAction::ReconcileStickyMarkers(wids) => {
+            for (entity, win, _) in &targets.windows {
+                if wids.contains(&win.id())
+                    && bridge.window_is_sticky(win.id()) == Some(false)
+                    && let Ok(mut ec) = commands.get_entity(entity)
+                {
+                    ec.try_remove::<StickyWindowMarker>();
+                }
             }
             None
         }

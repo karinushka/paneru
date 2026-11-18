@@ -1382,6 +1382,7 @@ pub(super) fn apply_window_positions(
     initializing: Option<Res<Initializing>>,
     restore: Option<Res<crate::ecs::restore::SessionRestore>>,
     restoration: Option<Res<PaneruState>>,
+    sent_hidden: Query<(), With<crate::ecs::desktop::SentToInactiveDesktop>>,
     mut ctx: WindowCtx,
 ) {
     for entity in added {
@@ -1429,7 +1430,7 @@ pub(super) fn apply_window_positions(
             }
             // As for a tiled window below: the window may have taken focus
             // before Paneru tracked its app, so no focus event will follow.
-            if initializing.is_none() && !properties.dont_focus() {
+            if initializing.is_none() && !properties.dont_focus() && !sent_hidden.contains(entity) {
                 debug!("Synthesizing WindowFocused for newly spawned floating window {entity}");
                 ctx.commands
                     .trigger(SendMessageTrigger(Event::WindowFocused {
@@ -1439,11 +1440,14 @@ pub(super) fn apply_window_positions(
             continue;
         }
 
-        // During startup, the window is already inserted into some strip by finish_setup.
-        let allready_inserted = workspaces
+        // During startup, the window is already inserted into some strip by finish_setup
+        // (or placed on an inactive Desktop strip by `apply_window_desktop_rules`).
+        let existing_strip_active = workspaces
             .iter()
-            .any(|(_, strip, _, _)| strip.contains(entity));
-        let mut on_hidden_space = false;
+            .find_map(|(_, strip, active, _)| strip.contains(entity).then_some(active));
+        let allready_inserted = existing_strip_active.is_some();
+        let mut on_hidden_space =
+            existing_strip_active == Some(false) || sent_hidden.contains(entity);
         if initializing.is_none()
             && !allready_inserted
             && let Some((target, is_active)) = home_strip(

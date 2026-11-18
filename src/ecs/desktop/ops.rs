@@ -592,10 +592,14 @@ pub(super) fn desktop_command_handler(
             DesktopOperation::Swap(target) => {
                 super::lifecycle::handle_swap(target, &mut bridge, &mut world);
             }
-            DesktopOperation::Pin(_)
-            | DesktopOperation::Unpin
-            | DesktopOperation::Assign { .. } => {
-                debug!("desktop operation {op:?} queued for pinning/assign commit");
+            DesktopOperation::Pin(target) => {
+                super::pin::handle_pin(target, &mut bridge, &mut world);
+            }
+            DesktopOperation::Unpin => {
+                super::pin::handle_unpin(&mut bridge, &mut world);
+            }
+            DesktopOperation::Assign { target, pid } => {
+                super::pin::handle_assign(target, *pid, &mut bridge, &mut world);
             }
         }
     }

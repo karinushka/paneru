@@ -6,11 +6,15 @@ use bevy::math::IRect;
 
 use super::{
     ConfirmCondition, DESKTOP_CONFIRM_BUDGET, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
-    PostConfirmAction, StickyWindowMarker,
+    PinnedDesktopWindow, PostConfirmAction, StickyWindowMarker,
 };
-use crate::commands::{Command, DesktopOperation, DesktopTarget, Direction, MoveFocus};
+use crate::commands::{
+    Command, DesktopAssignTarget, DesktopOperation, DesktopPinTarget, DesktopTarget, Direction,
+    MoveFocus,
+};
+use crate::config::Config;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
+use crate::ecs::{ActiveWorkspaceMarker, SelectedVirtualMarker, SpawnWindowTrigger, Unmanaged};
 use crate::events::Event;
 use crate::manager::spaces::{DesktopBridge, SpaceId};
 use crate::manager::{Display, Window};
@@ -627,6 +631,235 @@ fn desktop_reorder_and_swap_permute_display_spaces_including_non_adjacent_two_st
         .on_iteration(3, move |world, _| {
             assert_eq!(space_order(world), vec![6, 8, 7, TEST_WORKSPACE_ID]);
             assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .run(commands);
+}
+
+#[test]
+fn desktop_pin_all_auto_joins_future_desktops_and_unpin_collapses() {
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(11, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(),                                                    // 0: focus window 10
+        tick(),                                                    // 1: settle focus on 10
+        desktop_cmd(DesktopOperation::Pin(DesktopPinTarget::All)), // 2: pin 10 to all Desktops
+        desktop_cmd(DesktopOperation::Create { focus: false }),    // 3: create Desktop 3
+        tick(), // 4: auto-join pinned window 10 onto Desktop 3
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })), // 5: switch to Desktop 2
+        tick(), // 6: focus floating pinned window 10 on Desktop 2
+        desktop_cmd(DesktopOperation::Unpin), // 7: collapse 10 onto Desktop 2
+    ];
+
+    harness
+        .on_iteration(0, |_world, state| {
+            state.focus_window(10);
+        })
+        .on_iteration(2, move |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert_eq!(
+                world.get::<PinnedDesktopWindow>(e10).copied(),
+                Some(PinnedDesktopWindow::AllDesktops { display_id: 1 })
+            );
+            assert!(world.get::<StickyWindowMarker>(e10).is_some());
+            assert!(matches!(
+                world.get::<Unmanaged>(e10),
+                Some(Unmanaged::Floating)
+            ));
+            crate::assert_not_on_workspace!(world, 10, TEST_WORKSPACE_ID);
+            let memberships = world
+                .non_send::<DesktopBridge>()
+                .spaces_for_window(10)
+                .unwrap();
+            assert_eq!(
+                memberships,
+                vec![
+                    SpaceId::new(TEST_WORKSPACE_ID).unwrap(),
+                    SpaceId::new(desktop_2).unwrap(),
+                ]
+            );
+        })
+        .on_iteration(4, move |world, _| {
+            let third_sid = world
+                .resource::<DesktopCensus>()
+                .0
+                .display(1)
+                .unwrap()
+                .desktop_by_number(3)
+                .unwrap()
+                .id;
+            let memberships = world
+                .non_send::<DesktopBridge>()
+                .spaces_for_window(10)
+                .unwrap();
+            assert!(
+                memberships.contains(&third_sid),
+                "AllDesktops pinned window must automatically join newly created Desktop"
+            );
+        })
+        .on_iteration(5, |_world, state| {
+            state.focus_window(10);
+        })
+        .on_iteration(7, move |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert!(world.get::<PinnedDesktopWindow>(e10).is_none());
+            assert!(world.get::<StickyWindowMarker>(e10).is_none());
+            assert_eq!(
+                world
+                    .non_send::<DesktopBridge>()
+                    .spaces_for_window(10)
+                    .unwrap(),
+                vec![SpaceId::new(desktop_2).unwrap()],
+                "unpin collapses memberships to the active Desktop"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn desktop_assign_all_and_clear_toggle_process_wide_sticky_assignment() {
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(), // 0: focus 10
+        tick(), // 1: settle focus
+        desktop_cmd(DesktopOperation::Assign {
+            target: DesktopAssignTarget::All,
+            pid: None,
+        }), // 2: assign pid to All Desktops
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })), // 3: switch to Desktop 2
+        tick(), // 4: focus 10 on Desktop 2
+        desktop_cmd(DesktopOperation::Assign {
+            target: DesktopAssignTarget::None,
+            pid: None,
+        }), // 5: clear assignment -> collapses onto active Desktop 2
+    ];
+
+    harness
+        .on_iteration(0, |_world, state| {
+            state.focus_window(10);
+        })
+        .on_iteration(2, move |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert!(world.get::<StickyWindowMarker>(e10).is_some());
+            assert!(matches!(
+                world.get::<Unmanaged>(e10),
+                Some(Unmanaged::Floating)
+            ));
+            let bridge = world.non_send::<DesktopBridge>();
+            assert_eq!(bridge.window_is_sticky(10), Some(true));
+            assert_eq!(
+                bridge.spaces_for_window(10).unwrap(),
+                vec![
+                    SpaceId::new(TEST_WORKSPACE_ID).unwrap(),
+                    SpaceId::new(desktop_2).unwrap(),
+                ]
+            );
+        })
+        .on_iteration(3, |_world, state| {
+            state.focus_window(10);
+        })
+        .on_iteration(5, move |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert!(
+                world.get::<StickyWindowMarker>(e10).is_none(),
+                "clearing process assignment clears StickyWindowMarker"
+            );
+            let bridge = world.non_send::<DesktopBridge>();
+            assert_eq!(bridge.window_is_sticky(10), Some(false));
+            assert_eq!(
+                bridge.spaces_for_window(10).unwrap(),
+                vec![SpaceId::new(desktop_2).unwrap()]
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn window_desktop_rules_send_or_pin_newly_spawned_windows() {
+    let desktop_2 = 6u64;
+    let cfg = Config::try_from(
+        r#"
+[windows.slack]
+title = "Slack"
+desktop = 2
+
+[windows.pip]
+title = "PiP"
+desktop = "all"
+"#,
+    )
+    .unwrap();
+    let harness =
+        TestHarness::new()
+            .with_config(cfg)
+            .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(), // 0: spawn Slack (80) and PiP (81) at runtime
+        tick(), // 1: verify placement
+    ];
+
+    harness
+        .on_iteration(0, |world, state| {
+            let w_slack = state.spawn_window(
+                crate::tests::TEST_PROCESS_ID,
+                TEST_WORKSPACE_ID,
+                80,
+                IRect::new(0, 0, 400, 400),
+            );
+            state.update_window(80, |d| d.title = "Slack".to_string());
+            let w_pip = state.spawn_window(
+                crate::tests::TEST_PROCESS_ID,
+                TEST_WORKSPACE_ID,
+                81,
+                IRect::new(50, 50, 350, 250),
+            );
+            state.update_window(81, |d| d.title = "PiP".to_string());
+            world.trigger(SpawnWindowTrigger(vec![w_slack, w_pip]));
+        })
+        .on_iteration(1, move |world, _| {
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_not_on_workspace!(world, 80, TEST_WORKSPACE_ID);
+            crate::assert_on_workspace!(world, 80, desktop_2);
+            crate::assert_not_on_workspace!(world, 81, TEST_WORKSPACE_ID);
+            crate::assert_not_on_workspace!(world, 81, desktop_2);
+
+            let e_pip = find_window_entity(81, world);
+            assert_eq!(
+                world.get::<PinnedDesktopWindow>(e_pip).copied(),
+                Some(PinnedDesktopWindow::AllDesktops { display_id: 1 })
+            );
+            assert!(matches!(
+                world.get::<Unmanaged>(e_pip),
+                Some(Unmanaged::Floating)
+            ));
+
+            let bridge = world.non_send::<DesktopBridge>();
+            assert_eq!(
+                bridge.spaces_for_window(80).unwrap(),
+                vec![SpaceId::new(desktop_2).unwrap()]
+            );
+            assert_eq!(
+                bridge.spaces_for_window(81).unwrap(),
+                vec![
+                    SpaceId::new(TEST_WORKSPACE_ID).unwrap(),
+                    SpaceId::new(desktop_2).unwrap(),
+                ]
+            );
         })
         .run(commands);
 }

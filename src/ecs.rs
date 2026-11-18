@@ -1112,10 +1112,17 @@ impl WindowProperties {
     }
 
     pub fn floating(&self) -> bool {
+        if matches!(self.desktop(), Some(crate::config::DesktopRuleTarget::All)) {
+            return true;
+        }
         self.params
             .iter()
             .find_map(|props| props.floating)
             .unwrap_or(false)
+    }
+
+    pub fn desktop(&self) -> Option<crate::config::DesktopRuleTarget> {
+        self.params.iter().find_map(|props| props.desktop)
     }
 
     pub fn insertion(&self) -> Option<usize> {

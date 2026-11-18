@@ -62,6 +62,7 @@ pub fn window_rule_snippet(dialect: SnippetDialect, subject: &RuleSubject<'_>) -
             lines.push("# floating = true".to_owned());
             lines.push("# manage = true".to_owned());
             lines.push("# width = 0.5".to_owned());
+            lines.push("# desktop = 2".to_owned());
         }
         SnippetDialect::Lua => {
             lines.push("windows = {".to_owned());
@@ -87,6 +88,7 @@ pub fn window_rule_snippet(dialect: SnippetDialect, subject: &RuleSubject<'_>) -
             lines.push("    -- floating = true,".to_owned());
             lines.push("    -- manage = true,".to_owned());
             lines.push("    -- width = 0.5,".to_owned());
+            lines.push("    -- desktop = 2,".to_owned());
             lines.push("  },".to_owned());
             lines.push("}".to_owned());
         }
@@ -223,6 +225,7 @@ mod tests {
                 "# floating = true\n",
                 "# manage = true\n",
                 "# width = 0.5\n",
+                "# desktop = 2\n",
             )
         );
     }
@@ -247,6 +250,7 @@ mod tests {
                 "    -- floating = true,\n",
                 "    -- manage = true,\n",
                 "    -- width = 0.5,\n",
+                "    -- desktop = 2,\n",
                 "  },\n",
                 "}\n",
             )

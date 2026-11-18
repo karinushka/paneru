@@ -1615,6 +1615,100 @@ width = 0.5
     assert_eq!(width.ratio(Some(0.25)), 0.5);
 }
 
+#[test]
+fn test_window_desktop_rule_config() {
+    let config = Config::try_from(
+        r#"
+[windows.slack]
+title = "Slack"
+desktop = 2
+
+[windows.pip]
+title = "PiP"
+desktop = "all"
+"#,
+    )
+    .expect("desktop window rules parse");
+
+    let slack = config.find_window_properties("Slack", "", None, None);
+    assert_eq!(
+        slack[0].desktop,
+        Some(DesktopRuleTarget::Number(
+            std::num::NonZeroU32::new(2).unwrap()
+        ))
+    );
+    let pip = config.find_window_properties("PiP", "", None, None);
+    assert_eq!(pip[0].desktop, Some(DesktopRuleTarget::All));
+
+    assert!(
+        Config::try_from("[windows.bad]\ntitle = \".*\"\ndesktop = 0\n").is_err(),
+        "desktop = 0 must be rejected"
+    );
+    assert!(
+        Config::try_from("[windows.bad]\ntitle = \".*\"\ndesktop = \"current\"\n").is_err(),
+        "unknown desktop string must be rejected"
+    );
+}
+
+/// Target Desktop placement in a `[windows.<rule>]` entry (`desktop = 2` or `desktop = "all"`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DesktopRuleTarget {
+    Number(std::num::NonZeroU32),
+    All,
+}
+
+impl<'de> Deserialize<'de> for DesktopRuleTarget {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct DesktopRuleVisitor;
+
+        impl de::Visitor<'_> for DesktopRuleVisitor {
+            type Value = DesktopRuleTarget;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a 1-based desktop integer (>= 1) or \"all\"")
+            }
+
+            fn visit_u64<E: de::Error>(self, v: u64) -> std::result::Result<Self::Value, E> {
+                u32::try_from(v)
+                    .ok()
+                    .and_then(std::num::NonZeroU32::new)
+                    .map(DesktopRuleTarget::Number)
+                    .ok_or_else(|| E::custom("desktop number must be >= 1"))
+            }
+
+            fn visit_i64<E: de::Error>(self, v: i64) -> std::result::Result<Self::Value, E> {
+                u64::try_from(v)
+                    .ok()
+                    .ok_or_else(|| E::custom("desktop number must be >= 1"))
+                    .and_then(|u| self.visit_u64(u))
+            }
+
+            fn visit_f64<E: de::Error>(self, v: f64) -> std::result::Result<Self::Value, E> {
+                if v.is_finite() && v >= 1.0 && v.fract() == 0.0 && v <= f64::from(u32::MAX) {
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    self.visit_u64(v as u64)
+                } else {
+                    Err(E::custom("desktop number must be an integer >= 1"))
+                }
+            }
+
+            fn visit_str<E: de::Error>(self, v: &str) -> std::result::Result<Self::Value, E> {
+                match v {
+                    "all" => Ok(DesktopRuleTarget::All),
+                    _ => Err(E::custom(format!(
+                        "invalid desktop rule {v:?}: expected >= 1 or \"all\""
+                    ))),
+                }
+            }
+        }
+
+        deserializer.deserialize_any(DesktopRuleVisitor)
+    }
+}
+
 /// `WindowParams` defines rules and properties for specific windows based on their title or bundle ID.
 /// These parameters can override default window management behavior, such as forcing a window to float or setting its initial index.
 #[derive(Clone, Debug, Deserialize)]
@@ -1636,6 +1730,8 @@ pub struct WindowParams {
     pub manage: Option<bool>,
     /// An optional preferred index for the window's position in the window strip.
     pub index: Option<usize>,
+    /// Native macOS Desktop placement when the window spawns (`2` or `"all"`).
+    pub desktop: Option<DesktopRuleTarget>,
     pub vertical_padding: Option<i32>,
     pub horizontal_padding: Option<i32>,
     pub dont_focus: Option<bool>,
@@ -1670,6 +1766,7 @@ impl WindowParams {
             floating: None,
             manage: None,
             index: None,
+            desktop: None,
             vertical_padding: None,
             horizontal_padding: None,
             dont_focus: None,
@@ -2550,6 +2647,7 @@ fn test_grid_ratios() {
         floating: None,
         manage: None,
         index: None,
+        desktop: None,
         vertical_padding: None,
         horizontal_padding: None,
         dont_focus: None,

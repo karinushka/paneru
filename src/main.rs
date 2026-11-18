@@ -174,6 +174,11 @@ pub enum QueryCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Prints the native macOS Desktops / Spaces list across displays.
+    Desktops {
+        #[arg(long)]
+        json: bool,
+    },
     /// Prints the active focus/workspace state.
     Active {
         #[arg(long)]
@@ -322,6 +327,7 @@ impl QueryCmd {
         match self {
             QueryCmd::State { json: _ } => StateQueryKind::State,
             QueryCmd::VirtualWorkspaces { json: _ } => StateQueryKind::VirtualWorkspaces,
+            QueryCmd::Desktops { json: _ } => StateQueryKind::Desktops,
             QueryCmd::Active { json: _ } => StateQueryKind::Active,
             QueryCmd::OnScreen { json: _ } => StateQueryKind::OnScreen,
         }

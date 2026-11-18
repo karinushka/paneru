@@ -82,7 +82,7 @@ pub use crate::types::script_state::WriteOutcome;
 use crate::types::script_state::ScriptStateWrite;
 use crate::types::script_value::ScriptValue;
 use crate::types::state::{
-    ActiveState, QueryState, StateQueryKind, VirtualWorkspaceState, WindowState,
+    ActiveState, DesktopState, QueryState, StateQueryKind, VirtualWorkspaceState, WindowState,
 };
 use crate::types::windowset::{LayoutOp, WindowSet};
 
@@ -133,6 +133,7 @@ pub enum Response {
 pub enum QueryPayload {
     State(Box<QueryState>),
     VirtualWorkspaces(Vec<VirtualWorkspaceState>),
+    Desktops(Vec<DesktopState>),
     Active(Box<ActiveState>),
     OnScreen(Vec<WindowState>),
 }
@@ -148,6 +149,7 @@ impl QueryPayload {
         match self {
             Self::State(state) => serde_json::to_value(state),
             Self::VirtualWorkspaces(rows) => serde_json::to_value(rows),
+            Self::Desktops(desktops) => serde_json::to_value(desktops),
             Self::Active(active) => serde_json::to_value(active),
             Self::OnScreen(windows) => serde_json::to_value(windows),
         }
@@ -185,6 +187,7 @@ mod tests {
             Direction::East,
         ))));
         round_trip(&Request::Query(StateQueryKind::Active));
+        round_trip(&Request::Query(StateQueryKind::Desktops));
         round_trip(&Request::WindowSet);
         round_trip(&Request::WindowSetApply(vec![LayoutOp::Focus(7)]));
         round_trip(&Request::Subscribe);
@@ -202,6 +205,7 @@ mod tests {
         round_trip(&Response::Query(
             QueryPayload::VirtualWorkspaces(Vec::new()),
         ));
+        round_trip(&Response::Query(QueryPayload::Desktops(Vec::new())));
         round_trip(&Response::Query(QueryPayload::OnScreen(Vec::new())));
         round_trip(&Response::ScriptState(ScriptStateResponse::Value(Some(
             ScriptValue::Str("hello".to_string()),

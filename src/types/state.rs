@@ -17,6 +17,8 @@ pub enum StateQueryKind {
     State,
     /// Just the virtual workspace rows.
     VirtualWorkspaces,
+    /// Just the native macOS Spaces / Desktops across displays.
+    Desktops,
     /// Just the active display/workspace/focus state.
     Active,
     /// Just the windows currently visible on screen.
@@ -25,9 +27,10 @@ pub enum StateQueryKind {
 
 impl StateQueryKind {
     /// Every query kind, in the order the CLI lists them.
-    pub const ALL: [StateQueryKind; 4] = [
+    pub const ALL: [StateQueryKind; 5] = [
         StateQueryKind::State,
         StateQueryKind::VirtualWorkspaces,
+        StateQueryKind::Desktops,
         StateQueryKind::Active,
         StateQueryKind::OnScreen,
     ];
@@ -36,10 +39,11 @@ impl StateQueryKind {
     /// paired with the kind it queries. Both Lua hosts (the embedded runtime and
     /// the loadable client module) iterate this so the shorthand name and the
     /// kind it maps to are defined exactly once.
-    pub const SHORTHANDS: [(&'static str, StateQueryKind); 4] = [
+    pub const SHORTHANDS: [(&'static str, StateQueryKind); 5] = [
         ("query_state", StateQueryKind::State),
         ("query_active", StateQueryKind::Active),
         ("query_workspaces", StateQueryKind::VirtualWorkspaces),
+        ("query_desktops", StateQueryKind::Desktops),
         ("query_on_screen", StateQueryKind::OnScreen),
     ];
 
@@ -49,6 +53,7 @@ impl StateQueryKind {
         match self {
             StateQueryKind::State => "state",
             StateQueryKind::VirtualWorkspaces => "virtual-workspaces",
+            StateQueryKind::Desktops => "desktops",
             StateQueryKind::Active => "active",
             StateQueryKind::OnScreen => "on-screen",
         }
@@ -78,6 +83,31 @@ pub struct QueryState {
     pub timestamp: u64,
     pub active: ActiveState,
     pub virtual_workspaces: Vec<VirtualWorkspaceState>,
+    #[serde(default)]
+    pub desktops: Vec<DesktopState>,
+}
+
+/// Classification of a native macOS Space in [`DesktopState`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopKindState {
+    Desktop,
+    Fullscreen,
+    Other(i32),
+}
+
+/// One native macOS Space / Desktop in `SLSCopyManagedDisplaySpaces` order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DesktopState {
+    pub space_id: u64,
+    pub uuid: String,
+    pub display_id: u32,
+    /// 1-based Desktop number on `display_id` for ordinary Desktops (`None` for Fullscreen).
+    pub number: Option<u32>,
+    /// 0-based Space index within `display_id` across all managed Spaces.
+    pub space_index: u32,
+    pub kind: DesktopKindState,
+    pub active: bool,
 }
 
 /// The active display, workspace and focused window.
@@ -85,6 +115,8 @@ pub struct QueryState {
 pub struct ActiveState {
     pub display_id: Option<u32>,
     pub native_workspace_id: Option<u64>,
+    #[serde(default)]
+    pub desktop_number: Option<u32>,
     pub virtual_workspace_number: Option<u32>,
     pub focused_window_id: Option<i32>,
     pub focused_bundle_id: Option<String>,
@@ -183,6 +215,7 @@ impl QueryState {
         match kind {
             StateQueryKind::State => serde_json::to_string(self),
             StateQueryKind::VirtualWorkspaces => serde_json::to_string(&self.virtual_workspaces),
+            StateQueryKind::Desktops => serde_json::to_string(&self.desktops),
             StateQueryKind::Active => serde_json::to_string(&self.active),
             StateQueryKind::OnScreen => serde_json::to_string(&self.on_screen()),
         }
@@ -200,6 +233,7 @@ impl QueryState {
             StateQueryKind::VirtualWorkspaces => {
                 QueryPayload::VirtualWorkspaces(self.virtual_workspaces.clone())
             }
+            StateQueryKind::Desktops => QueryPayload::Desktops(self.desktops.clone()),
             StateQueryKind::Active => QueryPayload::Active(Box::new(self.active.clone())),
             StateQueryKind::OnScreen => {
                 QueryPayload::OnScreen(self.on_screen().into_iter().cloned().collect())
@@ -220,6 +254,7 @@ impl QueryState {
         match kind {
             StateQueryKind::State => serde_json::to_value(self),
             StateQueryKind::VirtualWorkspaces => serde_json::to_value(&self.virtual_workspaces),
+            StateQueryKind::Desktops => serde_json::to_value(&self.desktops),
             StateQueryKind::Active => serde_json::to_value(&self.active),
             StateQueryKind::OnScreen => serde_json::to_value(self.on_screen()),
         }
@@ -259,6 +294,11 @@ pub enum StateEvent {
     /// Display configuration changed. `display_id` is `null` for a global
     /// change Paneru cannot pin to one display.
     DisplayChanged { display_id: Option<u32> },
+    /// Native macOS Desktops changed (active Space switch, create, destroy, or reorder).
+    DesktopsChanged {
+        desktops: Vec<DesktopState>,
+        active: ActiveState,
+    },
 }
 
 impl StateEvent {
@@ -283,12 +323,7 @@ mod tests {
 
     #[test]
     fn query_kinds_round_trip_through_their_tokens() {
-        for kind in [
-            StateQueryKind::State,
-            StateQueryKind::VirtualWorkspaces,
-            StateQueryKind::Active,
-            StateQueryKind::OnScreen,
-        ] {
+        for kind in StateQueryKind::ALL {
             assert_eq!(StateQueryKind::parse(kind.token()), Some(kind));
         }
         assert_eq!(StateQueryKind::parse("nonsense"), None);
@@ -415,6 +450,7 @@ mod tests {
                     window(3, 100, true),
                 ],
             }],
+            desktops: Vec::new(),
         };
 
         let visible: Vec<i32> = state

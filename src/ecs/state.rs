@@ -127,9 +127,9 @@ pub struct SavedWindow {
 // These wire-format types live in the shared `paneru_shared_types` crate;
 // aliased here to the names the rest of the daemon already uses.
 pub use crate::types::state::{
-    ActiveState as PaneruActiveState, Frame, QueryState as PaneruQueryState, StateEvent,
-    StateQueryKind, VirtualWorkspaceState as PaneruVirtualWorkspaceState,
-    WindowState as PaneruWindowState,
+    ActiveState as PaneruActiveState, DesktopKindState, DesktopState as PaneruDesktopState, Frame,
+    QueryState as PaneruQueryState, StateEvent, StateQueryKind,
+    VirtualWorkspaceState as PaneruVirtualWorkspaceState, WindowState as PaneruWindowState,
 };
 
 /// Each tiled window's column in the strip and row within that column, both
@@ -444,6 +444,7 @@ pub struct QueryStateParams<'w, 's> {
     apps: Query<'w, 's, &'static Application>,
     window_manager: Res<'w, WindowManager>,
     config: Res<'w, Config>,
+    desktop_census: Option<Res<'w, crate::ecs::desktop::DesktopCensus>>,
 }
 
 impl QueryStateParams<'_, '_> {
@@ -453,21 +454,58 @@ impl QueryStateParams<'_, '_> {
         &self.windows
     }
 
+    pub fn desktop_census_changed(&self) -> bool {
+        self.desktop_census
+            .as_ref()
+            .is_some_and(bevy::ecs::change_detection::DetectChanges::is_changed)
+    }
+
     /// Builds the state document from the current world.
     ///
     /// # Errors
     ///
     /// Returns an error if the window manager cannot enumerate a workspace.
     pub fn extract(&self) -> crate::errors::Result<PaneruQueryState> {
-        PaneruQueryState::extract(
+        let mut doc = PaneruQueryState::extract(
             &self.workspaces,
             &self.displays,
             &self.windows,
             &self.apps,
             &self.window_manager,
             &self.config,
-        )
+        )?;
+        if let Some(census) = self.desktop_census.as_deref() {
+            doc.active.desktop_number = doc
+                .active
+                .native_workspace_id
+                .and_then(|ws| census.desktop_number(ws));
+            doc.desktops = extract_desktop_states(&census.0);
+        }
+        Ok(doc)
     }
+}
+
+fn extract_desktop_states(census: &crate::manager::spaces::SpaceCensus) -> Vec<PaneruDesktopState> {
+    use crate::manager::spaces::SpaceKind;
+    census
+        .displays
+        .iter()
+        .flat_map(|disp| {
+            disp.spaces.iter().map(move |rec| PaneruDesktopState {
+                space_id: rec.id.get(),
+                uuid: rec.uuid.clone(),
+                display_id: rec.display_id,
+                number: rec.desktop_number,
+                space_index: u32::try_from(rec.space_index).unwrap_or(u32::MAX),
+                kind: match rec.kind {
+                    SpaceKind::Desktop => DesktopKindState::Desktop,
+                    SpaceKind::Fullscreen { .. } => DesktopKindState::Fullscreen,
+                    SpaceKind::Other(raw) => DesktopKindState::Other(raw),
+                },
+                active: rec.active,
+            })
+        })
+        .collect()
 }
 
 /// Reads the layout as the tree a script transforms. Unlike
@@ -843,6 +881,7 @@ impl QueryState for PaneruQueryState {
             timestamp: now_timestamp(),
             active,
             virtual_workspaces,
+            desktops: Vec::new(),
         })
     }
 }

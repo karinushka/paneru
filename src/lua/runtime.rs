@@ -699,6 +699,7 @@ mod tests {
                     tabbed: false,
                 }],
             }],
+            desktops: Vec::new(),
         }
     }
 

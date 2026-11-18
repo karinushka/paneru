@@ -54,7 +54,8 @@ use regex::Regex;
 use serde::Deserialize;
 
 use crate::types::commands::{
-    Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection, parse_command,
+    Command, DesktopAssignTarget, DesktopOperation, DesktopPinTarget, DesktopTarget, Direction,
+    MouseMove, MoveFocus, Operation, ResizeDirection, parse_command,
 };
 
 /// Issues a [`Command`]. The only thing the two hosts differ by.
@@ -78,6 +79,7 @@ pub fn install(lua: &Lua, paneru: &Table, dispatch: &Dispatch) -> Result<()> {
 
     paneru.set("window", window_table(lua, dispatch)?)?;
     paneru.set("workspace", workspace_table(lua, dispatch)?)?;
+    paneru.set("desktop", desktop_table(lua, dispatch)?)?;
 
     let mouse = lua.create_table()?;
     mouse.set(
@@ -258,6 +260,266 @@ fn workspace_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
     )?;
 
     Ok(workspace)
+}
+
+/// Builds the `paneru.desktop` sub-table for native macOS Spaces / Desktops.
+fn desktop_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
+    let desktop = lua.create_table()?;
+
+    desktop.set(
+        "focus",
+        desktop_target_verb(lua, dispatch, "desktop.focus", DesktopOperation::Focus)?,
+    )?;
+    desktop.set(
+        "reorder",
+        desktop_target_verb(lua, dispatch, "desktop.reorder", DesktopOperation::Reorder)?,
+    )?;
+    desktop.set(
+        "swap",
+        desktop_target_verb(lua, dispatch, "desktop.swap", DesktopOperation::Swap)?,
+    )?;
+
+    let move_window = {
+        let dispatch = Rc::clone(dispatch);
+        lua.create_function(move |lua, opts: Value| {
+            let parsed = DesktopOpts::read(lua, &opts)?;
+            let move_focus = MoveFocus::follows(parsed.follow.unwrap_or(true));
+            let target = parsed.require_target("desktop.move_window")?;
+            dispatch(
+                lua,
+                Command::Desktop(DesktopOperation::MoveWindow { target, move_focus }),
+            )
+        })?
+    };
+    desktop.set("move_window", move_window)?;
+
+    let send_window = {
+        let dispatch = Rc::clone(dispatch);
+        lua.create_function(move |lua, opts: Value| {
+            let target = DesktopOpts::read(lua, &opts)?.require_target("desktop.send_window")?;
+            dispatch(
+                lua,
+                Command::Desktop(DesktopOperation::MoveWindow {
+                    target,
+                    move_focus: MoveFocus::Stay,
+                }),
+            )
+        })?
+    };
+    desktop.set("send_window", send_window)?;
+
+    desktop.set("create", desktop_create_verb(lua, dispatch)?)?;
+    desktop.set("destroy", desktop_destroy_verb(lua, dispatch)?)?;
+    desktop.set("pin", desktop_pin_verb(lua, dispatch)?)?;
+    desktop.set(
+        "unpin",
+        verb(lua, dispatch, Command::Desktop(DesktopOperation::Unpin))?,
+    )?;
+    desktop.set("assign", desktop_assign_verb(lua, dispatch)?)?;
+
+    Ok(desktop)
+}
+
+fn desktop_target_verb(
+    lua: &Lua,
+    dispatch: &Dispatch,
+    what: &'static str,
+    op: impl Fn(DesktopTarget) -> DesktopOperation + 'static,
+) -> Result<Function> {
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        let target = DesktopOpts::read(lua, &opts)?.require_target(what)?;
+        dispatch(lua, Command::Desktop(op(target)))
+    })
+}
+
+fn desktop_create_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
+    #[derive(Default, Deserialize)]
+    #[serde(default, deny_unknown_fields)]
+    struct CreateOpts {
+        focus: Option<bool>,
+    }
+
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        let focus = match opts {
+            Value::Nil => false,
+            Value::Boolean(b) => b,
+            Value::Table(_) => lua.from_value::<CreateOpts>(opts)?.focus.unwrap_or(false),
+            other => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "desktop.create expects nil, boolean or {{ focus = bool }}, got {}",
+                    other.type_name()
+                )));
+            }
+        };
+        dispatch(lua, Command::Desktop(DesktopOperation::Create { focus }))
+    })
+}
+
+fn desktop_destroy_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        let parsed = DesktopOpts::read(lua, &opts)?;
+        let empty_only = parsed.empty_only.unwrap_or(false);
+        let target = parsed.optional_target()?;
+        dispatch(
+            lua,
+            Command::Desktop(DesktopOperation::Destroy { target, empty_only }),
+        )
+    })
+}
+
+fn desktop_pin_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        let pin = match &opts {
+            Value::Nil => DesktopPinTarget::All,
+            Value::String(s) if s.to_str()? == "all" => DesktopPinTarget::All,
+            _ => {
+                let parsed = DesktopOpts::read(lua, &opts)?;
+                if parsed.mode.as_deref() == Some("all") {
+                    DesktopPinTarget::All
+                } else {
+                    DesktopPinTarget::Desktop(parsed.require_target("desktop.pin")?)
+                }
+            }
+        };
+        dispatch(lua, Command::Desktop(DesktopOperation::Pin(pin)))
+    })
+}
+
+fn desktop_assign_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
+    let dispatch = Rc::clone(dispatch);
+    lua.create_function(move |lua, opts: Value| {
+        if let Value::String(s) = &opts {
+            let s = s.to_str()?;
+            let target = match &*s {
+                "all" => Some(DesktopAssignTarget::All),
+                "this" => Some(DesktopAssignTarget::This),
+                "none" => Some(DesktopAssignTarget::None),
+                _ => None,
+            };
+            if let Some(target) = target {
+                return dispatch(
+                    lua,
+                    Command::Desktop(DesktopOperation::Assign { target, pid: None }),
+                );
+            }
+        }
+        let parsed = DesktopOpts::read(lua, &opts)?;
+        let pid = parsed.pid;
+        if let Some(p) = pid
+            && p <= 0
+        {
+            return Err(mlua::Error::RuntimeError(
+                "desktop.assign: pid must be positive".into(),
+            ));
+        }
+        let target = match parsed.mode.as_deref() {
+            Some("all") => DesktopAssignTarget::All,
+            Some("this") => DesktopAssignTarget::This,
+            Some("none") => DesktopAssignTarget::None,
+            Some(other) => {
+                return Err(mlua::Error::RuntimeError(format!(
+                    "desktop.assign: unknown mode '{other}'"
+                )));
+            }
+            None => DesktopAssignTarget::Desktop(parsed.require_target("desktop.assign")?),
+        };
+        dispatch(
+            lua,
+            Command::Desktop(DesktopOperation::Assign { target, pid }),
+        )
+    })
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DesktopOpts {
+    direction: Option<String>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
+    follow: Option<bool>,
+    empty_only: Option<bool>,
+    mode: Option<String>,
+    pid: Option<i32>,
+}
+
+impl DesktopOpts {
+    fn read(lua: &Lua, value: &Value) -> Result<Self> {
+        match value {
+            Value::Nil => Ok(Self::default()),
+            Value::Table(_) => lua.from_value(value.clone()),
+            Value::Integer(n) => {
+                let num = u32::try_from(*n).ok().filter(|&v| v >= 1).ok_or_else(|| {
+                    mlua::Error::RuntimeError("desktop numbers start at 1".into())
+                })?;
+                Ok(Self {
+                    number: Some(num),
+                    ..Self::default()
+                })
+            }
+            Value::Number(f) => {
+                if !f.is_finite() || *f < 1.0 || f.fract() != 0.0 || *f > f64::from(u32::MAX) {
+                    return Err(mlua::Error::RuntimeError(
+                        "desktop numbers must be positive integers".into(),
+                    ));
+                }
+                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                Ok(Self {
+                    number: Some(*f as u32),
+                    ..Self::default()
+                })
+            }
+            Value::String(s) => Ok(Self {
+                direction: Some(s.to_str()?.to_string()),
+                ..Self::default()
+            }),
+            other => Err(mlua::Error::RuntimeError(format!(
+                "expected desktop number, direction string, or options table, got {}",
+                other.type_name()
+            ))),
+        }
+    }
+
+    fn optional_target(&self) -> Result<Option<DesktopTarget>> {
+        if let Some(sid) = self.space_id {
+            if sid == 0 {
+                return Err(mlua::Error::RuntimeError("space_id must be >= 1".into()));
+            }
+            return Ok(Some(DesktopTarget::SpaceId(sid)));
+        }
+        if let Some(num) = self.number {
+            if num == 0 {
+                return Err(mlua::Error::RuntimeError(
+                    "desktop numbers start at 1".into(),
+                ));
+            }
+            return Ok(Some(DesktopTarget::Number {
+                number: num,
+                display: self.display,
+            }));
+        }
+        if let Some(dir_str) = &self.direction {
+            let direction = Direction::parse(dir_str)
+                .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
+            return Ok(Some(DesktopTarget::Direction {
+                direction,
+                display: self.display,
+            }));
+        }
+        Ok(None)
+    }
+
+    fn require_target(&self, what: &str) -> Result<DesktopTarget> {
+        self.optional_target()?.ok_or_else(|| {
+            mlua::Error::RuntimeError(format!(
+                "{what} expects a desktop number, direction, or {{ number/direction/space_id = ... }}"
+            ))
+        })
+    }
 }
 
 /// Virtual-workspace verbs come in two shapes: a position selects a numbered
@@ -550,5 +812,126 @@ mod tests {
                 Command::Window(Operation::ToNextDisplay(MoveFocus::Stay)),
             ])
         );
+    }
+
+    #[test]
+    fn desktop_navigation_and_lifecycle_verbs_build_typed_commands() {
+        let commands = run(r#"
+            paneru.desktop.focus("east")
+            paneru.desktop.focus(2)
+            paneru.desktop.focus({ number = 3, display = 2 })
+            paneru.desktop.focus({ space_id = 42 })
+            paneru.desktop.move_window({ number = 2, follow = true })
+            paneru.desktop.send_window("west")
+            paneru.desktop.create()
+            paneru.desktop.create({ focus = true })
+            paneru.desktop.destroy()
+            paneru.desktop.destroy({ number = 2, empty_only = true })
+            paneru.desktop.reorder("east")
+            paneru.desktop.swap(1)
+        "#)
+        .unwrap();
+
+        assert_eq!(
+            debug(&commands),
+            debug(&[
+                Command::Desktop(DesktopOperation::Focus(DesktopTarget::Direction {
+                    direction: Direction::East,
+                    display: None,
+                })),
+                Command::Desktop(DesktopOperation::Focus(DesktopTarget::Number {
+                    number: 2,
+                    display: None,
+                })),
+                Command::Desktop(DesktopOperation::Focus(DesktopTarget::Number {
+                    number: 3,
+                    display: Some(2),
+                })),
+                Command::Desktop(DesktopOperation::Focus(DesktopTarget::SpaceId(42))),
+                Command::Desktop(DesktopOperation::MoveWindow {
+                    target: DesktopTarget::Number {
+                        number: 2,
+                        display: None,
+                    },
+                    move_focus: MoveFocus::Follow,
+                }),
+                Command::Desktop(DesktopOperation::MoveWindow {
+                    target: DesktopTarget::Direction {
+                        direction: Direction::West,
+                        display: None,
+                    },
+                    move_focus: MoveFocus::Stay,
+                }),
+                Command::Desktop(DesktopOperation::Create { focus: false }),
+                Command::Desktop(DesktopOperation::Create { focus: true }),
+                Command::Desktop(DesktopOperation::Destroy {
+                    target: None,
+                    empty_only: false,
+                }),
+                Command::Desktop(DesktopOperation::Destroy {
+                    target: Some(DesktopTarget::Number {
+                        number: 2,
+                        display: None,
+                    }),
+                    empty_only: true,
+                }),
+                Command::Desktop(DesktopOperation::Reorder(DesktopTarget::Direction {
+                    direction: Direction::East,
+                    display: None,
+                })),
+                Command::Desktop(DesktopOperation::Swap(DesktopTarget::Number {
+                    number: 1,
+                    display: None,
+                })),
+            ])
+        );
+    }
+
+    #[test]
+    fn desktop_pin_and_assign_verbs_build_typed_commands() {
+        let commands = run(r#"
+            paneru.desktop.pin("all")
+            paneru.desktop.pin(2)
+            paneru.desktop.unpin()
+            paneru.desktop.assign("all")
+            paneru.desktop.assign("none")
+            paneru.desktop.assign({ number = 2, pid = 777 })
+        "#)
+        .unwrap();
+
+        assert_eq!(
+            debug(&commands),
+            debug(&[
+                Command::Desktop(DesktopOperation::Pin(DesktopPinTarget::All)),
+                Command::Desktop(DesktopOperation::Pin(DesktopPinTarget::Desktop(
+                    DesktopTarget::Number {
+                        number: 2,
+                        display: None,
+                    },
+                ))),
+                Command::Desktop(DesktopOperation::Unpin),
+                Command::Desktop(DesktopOperation::Assign {
+                    target: DesktopAssignTarget::All,
+                    pid: None,
+                }),
+                Command::Desktop(DesktopOperation::Assign {
+                    target: DesktopAssignTarget::None,
+                    pid: None,
+                }),
+                Command::Desktop(DesktopOperation::Assign {
+                    target: DesktopAssignTarget::Desktop(DesktopTarget::Number {
+                        number: 2,
+                        display: None,
+                    }),
+                    pid: Some(777),
+                }),
+            ])
+        );
+
+        assert!(run("paneru.desktop.focus(0)").is_err());
+        assert!(run("paneru.desktop.focus({})").is_err());
+        assert!(run(r#"paneru.desktop.focus("sideways")"#).is_err());
+        assert!(run("paneru.desktop.assign({ mode = 'bogus' })").is_err());
+        assert!(run("paneru.desktop.assign({ mode = 'all', pid = 0 })").is_err());
     }
 }

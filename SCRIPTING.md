@@ -164,7 +164,9 @@ end)
 | `application_hidden` | An application became hidden | `type`, `pid` |
 | `mouse_down` / `mouse_up` / `mouse_dragged` / `mouse_moved` | Mouse actions | `type`, `x`, `y`, `modifiers` |
 | `space_changed` | Active workspace changed | `type` |
-| `space_created` / `space_destroyed` | Virtual workspace added or removed | `type`, `space_id` |
+| `space_current_changed` | Active native Space changed on a display | `type`, `space_id` |
+| `space_membership_changed` | Window-to-Space membership updated | `type` |
+| `space_created` / `space_destroyed` | Native Space added or removed | `type`, `space_id` |
 
 ---
 
@@ -190,6 +192,7 @@ end)
 | `paneru.query_state()` | the complete state document |
 | `paneru.query_active()` | the active display, workspace and focused window |
 | `paneru.query_workspaces()` | the virtual workspace rows |
+| `paneru.query_desktops()` | the native macOS Desktops / Spaces across displays |
 | `paneru.query_on_screen()` | the windows currently visible |
 
 These are spelled exactly as in the loadable client module (`require("paneru")`, implemented in [`src/lua/client.rs`](src/lua/client.rs)), so a helper that reads state works unchanged in either host. The payloads are documented in [`QUERY_AND_SUBSCRIBE_FORMAT.md`](QUERY_AND_SUBSCRIBE_FORMAT.md).
@@ -298,6 +301,22 @@ Each method returns a new window set:
 
 ```lua
 ws:float(id, { x = 0.1, y = 0.05, width = 0.8, height = 0.5 })
+```
+
+### Native macOS Desktops (`paneru.desktop`)
+
+Imperative native macOS Space / Desktop operations are exposed under `paneru.desktop` in both `init.lua` and the external `require("paneru")` client module:
+
+```lua
+paneru.desktop.focus("east")                          -- or 2, or { number = 2, display = 1 }, or { space_id = 42 }
+paneru.desktop.move_window({ number = 2, follow = true })
+paneru.desktop.send_window(2)                         -- shorthand for follow = false
+paneru.desktop.create({ focus = true })
+paneru.desktop.destroy({ number = nil, empty_only = false })
+paneru.desktop.reorder("east")                        -- or 3
+paneru.desktop.swap(1)
+paneru.desktop.pin("all")                             -- or 2; paneru.desktop.unpin()
+paneru.desktop.assign("all")                          -- "all" | "this" | "none" | 2 | { number = 2, pid = 1234 }
 ```
 
 ---

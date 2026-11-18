@@ -1603,8 +1603,8 @@ fn test_native_space_switch_flashes_workspace_number() {
         .on_iteration(1, |world, _state| {
             let mut messages = world.query::<&crate::ecs::FlashMessage>();
             assert!(
-                messages.iter(world).any(|message| message.0 == "1"),
-                "switching macOS Spaces should flash the selected virtual workspace number"
+                messages.iter(world).any(|message| message.0 == "Desktop 2"),
+                "switching macOS Spaces when multiple Desktops exist should flash the destination Desktop"
             );
         })
         .run(vec![

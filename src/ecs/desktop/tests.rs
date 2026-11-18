@@ -863,3 +863,54 @@ desktop = "all"
         })
         .run(commands);
 }
+
+#[test]
+fn activation_popup_formats_single_and_multi_desktop_labels() {
+    use crate::ecs::FlashMessage;
+    use crate::ecs::workspace::format_activation_popup_label;
+
+    assert_eq!(format_activation_popup_label(0, 1, 1, Some(1), false), "1");
+    assert_eq!(format_activation_popup_label(1, 2, 1, Some(1), false), "2");
+    assert_eq!(
+        format_activation_popup_label(0, 1, 2, Some(2), false),
+        "Desktop 2"
+    );
+    assert_eq!(
+        format_activation_popup_label(1, 3, 2, Some(2), false),
+        "2 · 2"
+    );
+    assert_eq!(
+        format_activation_popup_label(0, 1, 3, None, true),
+        "Fullscreen"
+    );
+
+    let desktop_2 = 6u64;
+    let cfg = Config::try_from("[decorations.popup]\nenabled = true\n").unwrap();
+    let harness = TestHarness::new()
+        .with_config(cfg)
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })),
+    ];
+
+    harness
+        .on_iteration(1, |world, _| {
+            let messages: Vec<String> = world
+                .query::<&FlashMessage>()
+                .iter(world)
+                .map(|m| m.0.clone())
+                .collect();
+            assert!(
+                messages.iter().any(|m| m == "Desktop 2"),
+                "expected 'Desktop 2' flash popup, got {messages:?}"
+            );
+        })
+        .run(commands);
+}

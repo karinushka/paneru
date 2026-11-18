@@ -961,12 +961,44 @@ fn cleanup_active_workspace_marker(
     });
 }
 
+#[derive(SystemParam)]
+struct FlashPopupContext<'w> {
+    window_manager: Res<'w, WindowManager>,
+    config: Res<'w, Config>,
+    census: Option<Res<'w, crate::ecs::desktop::DesktopCensus>>,
+}
+
+#[must_use]
+pub(crate) fn format_activation_popup_label(
+    virtual_index: u32,
+    virtual_row_count: usize,
+    display_space_count: usize,
+    desktop_number: Option<u32>,
+    is_fullscreen: bool,
+) -> String {
+    let v = virtual_index + 1;
+    if display_space_count <= 1 {
+        return v.to_string();
+    }
+    if is_fullscreen {
+        return "Fullscreen".to_string();
+    }
+    if let Some(d) = desktop_number {
+        if virtual_row_count > 1 {
+            format!("{d} · {v}")
+        } else {
+            format!("Desktop {d}")
+        }
+    } else {
+        v.to_string()
+    }
+}
+
 fn flash_workspace_on_activation(
     active_display: Single<Entity, With<ActiveDisplayMarker>>,
     displays: Query<(Entity, &Display)>,
     strips: PopupStrips,
-    window_manager: Res<WindowManager>,
-    config: Res<Config>,
+    ctx: FlashPopupContext,
     mut previous_by_display: Local<EntityHashMap<Entity>>,
     mut commands: Commands,
 ) {
@@ -975,7 +1007,7 @@ fn flash_workspace_on_activation(
         if previous_by_display.contains_key(&display_entity) {
             continue;
         }
-        let Ok(space_id) = window_manager.active_display_space(display.id()) else {
+        let Ok(space_id) = ctx.window_manager.active_display_space(display.id()) else {
             continue;
         };
         let selected = strips
@@ -1012,8 +1044,31 @@ fn flash_workspace_on_activation(
         }
         return;
     }
-    if switched && config.workspace_popup_status() {
-        commands.flash_message(format!("{}", strip.virtual_index + 1), 1.0);
+    if switched && ctx.config.workspace_popup_status() {
+        let virtual_row_count = strips
+            .iter()
+            .filter(|(_, other, _, _, _, _)| other.id() == strip.id())
+            .count();
+        let display_id = displays.get(*active_display).ok().map(|(_, d)| d.id());
+        let (display_space_count, desktop_number, is_fullscreen) = match (&ctx.census, display_id) {
+            (Some(census), Some(disp_id)) => {
+                let total_spaces = census.0.display(disp_id).map_or(0, |d| d.spaces.len());
+                (
+                    total_spaces,
+                    census.desktop_number(strip.id()),
+                    census.is_fullscreen(strip.id()),
+                )
+            }
+            _ => (0, None, false),
+        };
+        let label = format_activation_popup_label(
+            strip.virtual_index,
+            virtual_row_count,
+            display_space_count,
+            desktop_number,
+            is_fullscreen,
+        );
+        commands.flash_message(label, 1.0);
     }
 }
 

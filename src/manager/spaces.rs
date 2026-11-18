@@ -1,11 +1,6 @@
 //! Native macOS Space census domain model, `DesktopBridge` abstraction, and
 //! deterministic in-memory `FakeDesktopBridge` for headless ECS testing.
 
-#![allow(
-    dead_code,
-    reason = "bridge trait and domain helpers are wired into ECS desktop systems across the commit stack"
-)]
-
 pub mod bridge;
 
 #[cfg(test)]
@@ -120,12 +115,6 @@ pub struct DisplaySpaces {
 }
 
 impl DisplaySpaces {
-    /// Active `SpaceRecord` on this display.
-    #[must_use]
-    pub fn active_space(&self) -> Option<&SpaceRecord> {
-        self.spaces.iter().find(|s| s.active)
-    }
-
     /// Number of ordinary `SpaceKind::Desktop` Spaces on this display.
     #[must_use]
     pub fn desktop_count(&self) -> usize {
@@ -303,17 +292,7 @@ pub enum SpaceErrorKind {
     SessionLocked,
     Unsupported,
     QueryFailed,
-    NotFound,
-    NotDesktop,
-    ActiveSpace,
-    LastDesktop,
-    SpaceNotEmpty,
-    UnsupportedWindow,
-    DifferentDisplays,
-    UnsupportedLayout,
     OperationFailed,
-    NotConfirmed,
-    StateChanged,
 }
 
 impl fmt::Display for SpaceErrorKind {
@@ -323,17 +302,7 @@ impl fmt::Display for SpaceErrorKind {
             Self::SessionLocked => "session_locked",
             Self::Unsupported => "unsupported",
             Self::QueryFailed => "query_failed",
-            Self::NotFound => "not_found",
-            Self::NotDesktop => "not_desktop",
-            Self::ActiveSpace => "active_space",
-            Self::LastDesktop => "last_desktop",
-            Self::SpaceNotEmpty => "space_not_empty",
-            Self::UnsupportedWindow => "unsupported_window",
-            Self::DifferentDisplays => "different_displays",
-            Self::UnsupportedLayout => "unsupported_layout",
             Self::OperationFailed => "operation_failed",
-            Self::NotConfirmed => "not_confirmed",
-            Self::StateChanged => "state_changed",
         };
         f.write_str(label)
     }
@@ -514,13 +483,6 @@ pub struct FakeDesktopBridge {
 
 #[cfg(test)]
 impl FakeDesktopBridge {
-    #[must_use]
-    pub fn new(state: FakeDesktopState) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(state)),
-        }
-    }
-
     #[must_use]
     pub fn state(&self) -> Arc<Mutex<FakeDesktopState>> {
         Arc::clone(&self.state)

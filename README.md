@@ -295,6 +295,16 @@ $ paneru send-cmd <command> [args...]
 | `window virtualmovenum <n>` | Move the window to numbered virtual workspace and follow it |
 | `window virtualsend <dir>` | Send the window to a virtual workspace but stay  |
 | `window virtualsendnum <n>` | Send the window to numbered virtual workspace but stay |
+| `desktop focus <dir\|n>`   | Instantly switch native macOS Desktop/Space without slide animations |
+| `desktop move <dir\|n>`    | Move focused window (or tab group) to target Desktop and follow it |
+| `desktop send <dir\|n>`    | Send focused window (or tab group) to target Desktop without switching |
+| `desktop create [focus]`   | Create a new native Desktop on the active display (optionally focusing it) |
+| `desktop destroy [dir\|n] [empty]` | Close current or target Desktop (migrating windows unless `empty`) |
+| `desktop reorder <dir\|n>` | Move active Desktop to display-local Desktop position |
+| `desktop swap <dir\|n>`    | Swap active Desktop with another Desktop on the same display |
+| `desktop pin <all\|dir\|n>` | Pin focused window across all or another Desktop (auto-floats) |
+| `desktop unpin`            | Collapse a pinned window back onto the active Desktop |
+| `desktop assign <all\|this\|none\|n>` | Ephemeral Dock-equivalent app Space assignment for focused app |
 | `window snap`              | Snap the focused window into the visible viewport |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `mouse display <id>`       | Warp the mouse pointer to display `<id>`         |
@@ -346,6 +356,7 @@ Paneru also exposes structured JSON state for scripts and status bars:
 ```shell
 $ paneru query state --json
 $ paneru query virtual-workspaces --json
+$ paneru query desktops --json
 $ paneru query active --json
 $ paneru subscribe --json
 ```

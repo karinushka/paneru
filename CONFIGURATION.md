@@ -361,6 +361,43 @@ $ paneru send-cmd window virtualsendnum 3
 See [QUERY_AND_SUBSCRIBE_FORMAT.md](QUERY_AND_SUBSCRIBE_FORMAT.md) for the
 structured `paneru query` responses and `paneru subscribe` event stream.
 
+### Native macOS Desktops (`desktop_*`)
+
+Paneru can also switch, create, close, reorder, and move/pin windows across native macOS Spaces (Mission Control Desktops) directly via `SkyLight` / `WMBridge`, bypassing macOS's slow slide animations.
+
+- **Display-local 1-based numbering:** `1..N` counts ordinary Desktops on the active display.
+- **Directional stepping (`west` / `east`):** `desktop_focus_west` and `desktop_focus_east` step across all managed Spaces on the display (including native Fullscreen Spaces, matching `Ctrl+Left/Right` without slide animations), clamping at display edges.
+- **Multi-Desktop pinning & sticky windows:** Windows carrying macOS's sticky bit (`0x800`), pinned via `desktop_pin_*`, assigned via `desktop_assign_all`, or matched by `[windows]` `desktop = "all"` automatically float (`Unmanaged::Floating`) so single-Desktop tiling strips never fight over their geometry.
+
+| Action | Description |
+| :--- | :--- |
+| `desktop_focus_west` / `_east` / `_first` / `_last` | Instant native Space switch on the active display (includes Fullscreen Spaces). |
+| `desktop_focus_<number>` | Instant switch to 1-based Desktop `<number>` on the active display. |
+| `desktop_move_west` / `_east` / `_<number>` | Move focused window (and its tab group) to target Desktop and follow it. Rescues unassociated guest windows out of single-owner Fullscreen Spaces. |
+| `desktop_send_west` / `_east` / `_<number>` | Send focused window (and its tab group) to target Desktop while staying on the current Desktop. |
+| `desktop_create` / `desktop_create_focus` | Append a new native Desktop on the active display (optionally switching to it). |
+| `desktop_destroy` / `desktop_destroy_empty` | Close the active Desktop (switching to an adjacent Desktop first and migrating windows unless `_empty` is used). |
+| `desktop_reorder_west` / `_east` / `_<number>` | Move the active Desktop to the target display-local Desktop index (when no Fullscreen Spaces are on the display). |
+| `desktop_swap_west` / `_east` / `_<number>` | Swap the active Desktop with another Desktop on the same display. |
+| `desktop_pin_all` / `desktop_pin_<number>` | Show the focused window across all Desktops (auto-joining future Desktops) or an additional Desktop. |
+| `desktop_unpin` | Collapse a pinned multi-Desktop window back onto the active Desktop. |
+| `desktop_assign_all` / `_this` / `_none` / `_<number>` | Ephemeral process-wide Space assignment (*Dock -> Options -> Assign To*) for the focused window's application. |
+
+**Example:**
+```toml
+[bindings]
+desktop_focus_west = "ctrl - leftarrow"
+desktop_focus_east = "ctrl - rightarrow"
+desktop_focus_1 = "ctrl - 1"
+desktop_focus_2 = "ctrl - 2"
+desktop_move_1 = "ctrl + shift - 1"
+desktop_move_2 = "ctrl + shift - 2"
+desktop_create_focus = "ctrl + alt - n"
+desktop_destroy = "ctrl + alt - w"
+desktop_pin_all = "ctrl + alt - p"
+desktop_unpin = "ctrl + alt + shift - p"
+```
+
 ---
 
 ## 6. Window Rules (`[windows]`)
@@ -377,6 +414,7 @@ accessibility role/subrole.
 | `floating` | Boolean | Force the window to be floating/unmanaged. |
 | `manage` | Boolean | Force Paneru to manage this app/window even if macOS reports the app as unobservable or the window has a non-standard role/subrole. |
 | `index` | Integer | Preferred position in the strip when spawned. |
+| `desktop` | Integer (`>= 1`) or `"all"` | Native macOS Desktop placement when spawned: sends the window to 1-based Desktop `N` on its display, or `"all"` to float and pin it across all current and future Desktops. |
 | `dont_focus` | Boolean | Prevent the window from taking focus when spawned. |
 | `width` | Positive Float or `"complement_focused"` | Initial width ratio for the window. Values above `1.0` create an oversized, horizontally scrollable window. `"complement_focused"` uses `1.0` minus the focused window's width ratio; if there is no focused window or it is at least 95% wide, the new window starts at full width. |
 | `grid` | String | placement for floating windows: `"cols:rows:x:y:w:h"`. |

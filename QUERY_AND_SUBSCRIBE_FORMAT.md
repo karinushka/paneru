@@ -22,6 +22,7 @@ line-delimited JSON, with one complete event object per line.
 ```shell
 paneru query state --json
 paneru query virtual-workspaces --json
+paneru query desktops --json
 paneru query active --json
 ```
 
@@ -117,6 +118,24 @@ Returns only the `virtual_workspaces` array from the complete state document.
 ]
 ```
 
+### `paneru query desktops --json`
+
+Returns the `desktops` array of native macOS Spaces across displays in Mission Control order (`number` is 1-based among ordinary Desktops on that display, or `null` for Fullscreen Spaces):
+
+```json
+[
+  {
+    "space_id": 4,
+    "uuid": "5B4E2D1A-...",
+    "display_id": 1,
+    "number": 1,
+    "space_index": 0,
+    "kind": "desktop",
+    "active": true
+  }
+]
+```
+
 ### `paneru query active --json`
 
 Returns only the active display, workspace, and focused-window state.
@@ -142,6 +161,7 @@ Returns only the active display, workspace, and focused-window state.
 | `active` | object | Current active display/native workspace/virtual workspace/focused window. |
 | `display_id` | number or null | CoreGraphics display id for the active display, when known. |
 | `native_workspace_id` | number or null | macOS Space id for the active native workspace, when known. |
+| `desktop_number` | number or null | One-based native Desktop number on the active display (`null` on Fullscreen Spaces). |
 | `virtual_workspace_number` | number or null | One-based Paneru virtual workspace number, when known. |
 | `focused_window_id` | number or null | Focused window id, when known. |
 | `focused_bundle_id` | string or null | Bundle id of the focused window's app, when known. |
@@ -224,6 +244,12 @@ Emitted when a window title changes.
 Emitted when display configuration changes. `display_id` can be `null` when the
 event is a global display-change notification and Paneru cannot resolve an
 active display id.
+
+```json
+{"event":"desktops_changed","desktops":[{"space_id":4,"uuid":"5B4E2D1A-...","display_id":1,"number":1,"space_index":0,"kind":"desktop","active":true}],"active":{"display_id":1,"native_workspace_id":4,"desktop_number":1,"virtual_workspace_number":1,"focused_window_id":321,"focused_bundle_id":"com.apple.Terminal","focused_app_name":"Terminal","focused_window_title":"paneru"}}
+```
+
+Emitted when the native macOS Space list or active Space changes (switching, creating, destroying, or reordering Desktops).
 
 ## Virtual Workspace Commands
 

@@ -50,10 +50,6 @@ pub const DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
 #[derive(Resource, Clone, Debug, Default, PartialEq, Eq)]
 pub struct DesktopCensus(pub SpaceCensus);
 
-#[allow(
-    dead_code,
-    reason = "helpers consumed across desktop commands, queries, and menubar in subsequent commits"
-)]
 impl DesktopCensus {
     #[must_use]
     pub fn display_for_space(&self, space_id: WorkspaceId) -> Option<CGDirectDisplayID> {

@@ -35,24 +35,41 @@ pub(super) fn fade_key() -> &'static NSString {
 /// How long the overlay takes to fade as a close lands.
 const FADE_SECS: f64 = 0.04;
 
+fn text_layer(
+    string: &str,
+    font: &NSFont,
+    size: f64,
+    alignment: &NSString,
+    scale: f64,
+) -> Retained<CATextLayer> {
+    let text = CATextLayer::new();
+    unsafe { text.setString(Some(&NSString::from_str(string))) };
+    // SAFETY: `NSFont` is toll-free bridged to `CTFont`, a CF object.
+    let ct_font = unsafe { &*(&raw const *font).cast::<objc2_core_foundation::CFType>() };
+    unsafe { text.setFont(Some(ct_font)) };
+    text.setFontSize(size);
+    text.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
+    text.setAlignmentMode(alignment);
+    text.setTruncationMode(unsafe { kCATruncationEnd });
+    text.setContentsScale(scale);
+    text
+}
+
 /// A row's workspace name, in `rect` (overview points): it stays put
 /// while the overview opens and only fades in.
 pub(super) fn row_label(virtual_index: u32, rect: &Rect, scale: f64) -> Animated {
-    let text = CATextLayer::new();
-    let name = NSString::from_str(&format!(
+    let name = format!(
         "Workspace {}",
         crate::menubar::virtual_workspace_label(virtual_index)
-    ));
-    unsafe { text.setString(Some(&name)) };
+    );
     let font = NSFont::boldSystemFontOfSize(LABEL_FONT_SIZE);
-    // SAFETY: NSFont is toll-free bridged to CTFont, a CF object.
-    let font = unsafe { &*Retained::as_ptr(&font).cast::<objc2_core_foundation::CFType>() };
-    unsafe { text.setFont(Some(font)) };
-    text.setFontSize(LABEL_FONT_SIZE);
-    text.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
-    text.setAlignmentMode(unsafe { kCAAlignmentLeft });
-    text.setTruncationMode(unsafe { kCATruncationEnd });
-    text.setContentsScale(scale);
+    let text = text_layer(
+        &name,
+        &font,
+        LABEL_FONT_SIZE,
+        unsafe { kCAAlignmentLeft },
+        scale,
+    );
     // Sit the text on the bottom of the band, just above the strip.
     let h = (LABEL_FONT_SIZE * 1.3).min(rect.h);
     let rect = Rect::new(rect.x + 4.0, rect.y + rect.h - h - 2.0, rect.w - 8.0, h);
@@ -90,17 +107,14 @@ pub(super) fn add_tile(
     let Some(title) = title.filter(|t| !t.is_empty()) else {
         return;
     };
-    let text = CATextLayer::new();
-    unsafe { text.setString(Some(&NSString::from_str(title))) };
     let font = NSFont::systemFontOfSize(TITLE_FONT_SIZE);
-    // SAFETY: NSFont is toll-free bridged to CTFont, a CF object.
-    let font = unsafe { &*Retained::as_ptr(&font).cast::<objc2_core_foundation::CFType>() };
-    unsafe { text.setFont(Some(font)) };
-    text.setFontSize(font_size);
-    text.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.85)));
-    text.setAlignmentMode(unsafe { kCAAlignmentCenter });
-    text.setTruncationMode(unsafe { kCATruncationEnd });
-    text.setContentsScale(scale);
+    let text = text_layer(
+        title,
+        &font,
+        font_size,
+        unsafe { kCAAlignmentCenter },
+        scale,
+    );
     let margin = card.open_points(12.0);
     text.setFrame(CGRect::new(
         CGPoint::new(margin, (top + icon_size + gap).min(h - text_h)),
@@ -114,7 +128,8 @@ pub(super) fn color(r: f64, g: f64, b: f64, a: f64) -> CFRetained<CGColor> {
 }
 
 fn centre(r: &Rect) -> CGPoint {
-    CGPoint::new(r.x + r.w / 2.0, r.y + r.h / 2.0)
+    let (x, y) = r.centre();
+    CGPoint::new(x, y)
 }
 
 fn ns_value_point(p: CGPoint) -> Retained<AnyObject> {

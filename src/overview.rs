@@ -44,6 +44,10 @@ impl Rect {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
 
+    pub const fn centre(&self) -> (f64, f64) {
+        (self.x + self.w / 2.0, self.y + self.h / 2.0)
+    }
+
     pub fn offset(&self, dx: f64, dy: f64) -> Self {
         Self::new(self.x + dx, self.y + dy, self.w, self.h)
     }
@@ -250,22 +254,22 @@ fn layout_floating_shelf<K: Clone>(
     let thumb_h = shelf_h * fit_k;
     let y = shelf_top + (shelf_h - thumb_h) / 2.0;
     let total_w = (natural_sum + gap_total) * fit_k;
-    let mut x = width - ribbon_pad - total_w;
+    let start_x = width - ribbon_pad - total_w;
     let placements = floating
         .iter()
         .zip(natural_widths)
-        .map(|(f, natural_w)| {
+        .scan(start_x, |x, (f, natural_w)| {
             let w = natural_w * fit_k;
-            let overview = Rect::new(x, y, w, thumb_h);
-            x += w + gap * fit_k;
-            WindowPlacement {
+            let overview = Rect::new(*x, y, w, thumb_h);
+            *x += w + gap * fit_k;
+            Some(WindowPlacement {
                 key: f.key.clone(),
                 window_id: f.window_id,
                 layout: f.frame,
                 rest: f.frame,
                 overview,
                 focused: f.focused,
-            }
+            })
         })
         .collect();
     let reserved_top = (shelf_top + shelf_h + metrics.section_gap * zoom).max(default_top);
@@ -403,7 +407,7 @@ impl<K> DisplayLayout<K> {
         };
         let (top, bottom) = self.margins;
         let middle = top + (self.size.1 - top - bottom) / 2.0;
-        let centre = |s: &StripPlacement<K>| s.viewport_overview.y + s.viewport_overview.h / 2.0;
+        let centre = |s: &StripPlacement<K>| s.viewport_overview.centre().1;
         let content_top = first.label.y;
         let content_bottom = last.viewport_overview.y + last.viewport_overview.h;
         let min = (content_top - top).min(centre(first) - middle).min(0.0);
@@ -467,9 +471,7 @@ impl<K> DisplayLayout<K> {
 pub fn middle_row<K>(layout: &DisplayLayout<K>) -> Option<usize> {
     let (top, bottom) = layout.margins;
     let middle = top + (layout.size.1 - top - bottom) / 2.0 + layout.scroll;
-    let distance = |s: &StripPlacement<K>| {
-        (s.viewport_overview.y + s.viewport_overview.h / 2.0 - middle).abs()
-    };
+    let distance = |s: &StripPlacement<K>| (s.viewport_overview.centre().1 - middle).abs();
     layout
         .strips
         .iter()
@@ -532,22 +534,26 @@ pub fn hit_test<K: Clone>(layout: &DisplayLayout<K>, x: f64, y: f64) -> Hit<K> {
         };
     }
     let y = y + layout.scroll;
-    for strip in &layout.strips {
-        if !strip.ribbon.contains(x, y) {
-            continue;
-        }
-        let hit = |w: &&WindowPlacement<K>| w.overview.contains(x - strip.pan, y);
-        if let Some(window) = strip.windows.iter().rev().find(hit) {
-            return Hit::Window {
-                key: window.key.clone(),
-                virtual_index: strip.virtual_index,
-            };
-        }
-        return Hit::Strip {
-            virtual_index: strip.virtual_index,
-        };
-    }
-    Hit::Background
+    layout
+        .strips
+        .iter()
+        .find(|strip| strip.ribbon.contains(x, y))
+        .map_or(Hit::Background, |strip| {
+            strip
+                .windows
+                .iter()
+                .rev()
+                .find(|w| w.overview.contains(x - strip.pan, y))
+                .map_or(
+                    Hit::Strip {
+                        virtual_index: strip.virtual_index,
+                    },
+                    |window| Hit::Window {
+                        key: window.key.clone(),
+                        virtual_index: strip.virtual_index,
+                    },
+                )
+        })
 }
 
 /// Windows whose card is on screen (or within `margin` of it, so cards just
@@ -617,12 +623,11 @@ pub fn reanchor<K: Clone + PartialEq>(
         };
         // Staying on the row that was open with nothing to scroll: the
         // windows go back exactly where they were taken from.
-        let unmoved = was_active && strip.active && (shift + pan).abs() < 0.5;
-        for window in &mut strip.windows {
-            if unmoved {
-                continue;
+        if !(was_active && strip.active && (shift + pan).abs() < 0.5) {
+            let dx = pan + shift;
+            for window in &mut strip.windows {
+                window.rest = window.layout.offset(dx, row_offset);
             }
-            window.rest = window.layout.offset(pan + shift, row_offset);
         }
     }
 }

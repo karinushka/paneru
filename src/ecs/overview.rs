@@ -9,6 +9,7 @@
 //! follows it (`overview_follow_layout`).
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -93,9 +94,10 @@ struct DisplayEntry {
     /// Where this display parks its hidden rows.
     parked: bevy::math::IVec2,
     /// `Unmanaged::Floating` window IDs that `WindowServer` reported as
-    /// off-Space or zero-alpha when the overview opened, so follow-up
-    /// relayouts (which avoid re-querying `WindowServer`) keep them hidden.
-    rejected_floating: HashSet<i32>,
+    /// off-Space or zero-alpha when the overview opened, shared across
+    /// displays and follow-up relayouts (which avoid re-querying
+    /// `WindowServer`) so parked popovers and off-space windows stay hidden.
+    rejected_floating: Arc<HashSet<i32>>,
 }
 
 struct Scrub {
@@ -683,8 +685,7 @@ fn commit(
             reanchor(&mut entry.layout, virtual_index, focus.as_ref());
         }
     }
-    let layouts: Vec<_> = active.displays.iter().map(|d| &d.layout).collect();
-    manager.retarget(&layouts);
+    restore_rests(&active.displays, manager);
 }
 
 /// The ECS half of [`commit`]: shows on each display the row the user left
@@ -699,75 +700,93 @@ fn write_back(
     pick: Option<&Pick>,
 ) -> (Vec<Option<Anchor>>, bool) {
     let focused = windows.focused().map(|(_, entity)| entity);
-    let mut anchors = Vec::new();
-    let mut wrote = false;
-    for (index, entry) in displays.iter().enumerate() {
-        let picked = pick.filter(|pick| pick.display == index);
-        let (shown, target) = close_rows(&entry.layout, picked);
-        wrote |= keep_pans(entry, index, strips, windows, commands);
-        let Some(target) = target else {
-            anchors.push(None);
-            continue;
-        };
-        let virtual_index = entry.layout.strips[target].virtual_index;
-        let holds_focus = holds_focus(entry, shown, strips);
-        let mut focus = picked.and_then(|pick| pick.focus);
-        let explicit_row = picked.and_then(|pick| pick.virtual_index).is_some();
-        if !explicit_row && Some(target) != shown {
-            if let (Some(old), Some(&new)) = (shown, entry.strips.get(target)) {
-                wrote = true;
-                debug!("overview: display {index} closes into row {virtual_index}");
-                if holds_focus && pick.is_none() {
-                    // paneru's own switch hides the old row and restores
-                    // the new one; focus goes to what is in the middle.
-                    if let Ok(mut strip) = commands.get_entity(new) {
-                        strip.try_insert(ActiveWorkspaceMarker);
-                    }
-                    focus = nearest_middle(&entry.layout, target);
-                    if let Some(key) = focus {
-                        commands.focus_entity(key, true);
-                    }
-                } else if holds_focus && picked.is_some() {
-                    // Picked a floating shelf card on this display after
-                    // scrolling to another row: activate the scrolled row,
-                    // leaving focus for the picked floating window.
-                    if let Ok(mut strip) = commands.get_entity(new) {
-                        strip.try_insert(ActiveWorkspaceMarker);
-                    }
-                } else if let (Some(&old_strip), Some(&old_origin), Some(&new_base)) = (
-                    entry.strips.get(old),
-                    entry.origins.get(old),
-                    entry.origins.get(target),
-                ) {
-                    #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
-                    let old_dx = entry.layout.pan_points(old).round() as i32;
-                    #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
-                    let new_dx = entry.layout.pan_points(target).round() as i32;
-                    let old_origin = old_origin + bevy::math::IVec2::new(old_dx, 0);
-                    let new_origin = new_base + bevy::math::IVec2::new(new_dx, 0);
-                    show_row(
-                        old_strip,
-                        old_origin,
-                        new,
-                        new_origin,
-                        entry.parked,
-                        commands,
-                    );
-                }
+    displays.iter().enumerate().fold(
+        (Vec::with_capacity(displays.len()), false),
+        |(mut anchors, wrote), (index, entry)| {
+            let (anchor, row_wrote) =
+                write_back_display(index, entry, focused, pick, strips, windows, commands);
+            anchors.push(anchor);
+            (anchors, wrote || row_wrote)
+        },
+    )
+}
+
+fn write_back_display(
+    index: usize,
+    entry: &DisplayEntry,
+    focused: Option<Entity>,
+    pick: Option<&Pick>,
+    strips: &StripQuery,
+    windows: &Windows,
+    commands: &mut Commands,
+) -> (Option<Anchor>, bool) {
+    let picked = pick.filter(|pick| pick.display == index);
+    let (shown, target) = close_rows(&entry.layout, picked);
+    let panned = keep_pans(entry, index, strips, windows, commands);
+    let Some(target) = target else {
+        return (None, panned);
+    };
+    let virtual_index = entry.layout.strips[target].virtual_index;
+    let holds_focus = holds_focus(entry, shown, strips);
+    let picked_focus = picked.and_then(|pick| pick.focus);
+    let explicit_row = picked.and_then(|pick| pick.virtual_index).is_some();
+    let (focus, switched) = if !explicit_row
+        && Some(target) != shown
+        && let (Some(old), Some(&new)) = (shown, entry.strips.get(target))
+    {
+        debug!("overview: display {index} closes into row {virtual_index}");
+        let focus = if holds_focus && pick.is_none() {
+            // paneru's own switch hides the old row and restores
+            // the new one; focus goes to what is in the middle.
+            if let Ok(mut strip) = commands.get_entity(new) {
+                strip.try_insert(ActiveWorkspaceMarker);
             }
-        } else if picked.is_none()
-            && pick.is_none()
-            && let Some(focus_entity) = focused
-            && let Some(key) = refocus(&entry.layout, focus_entity)
-        {
-            debug!("overview: focused window panned out of view, focusing {key}");
-            commands.focus_entity(key, true);
-            focus = Some(key);
-            wrote = true;
-        }
-        anchors.push(Some((virtual_index, focus)));
-    }
-    (anchors, wrote)
+            let middle = nearest_middle(&entry.layout, target);
+            if let Some(key) = middle {
+                commands.focus_entity(key, true);
+            }
+            middle
+        } else {
+            if holds_focus && picked.is_some() {
+                // Picked a floating shelf card on this display after
+                // scrolling to another row: activate the scrolled row,
+                // leaving focus for the picked floating window.
+                if let Ok(mut strip) = commands.get_entity(new) {
+                    strip.try_insert(ActiveWorkspaceMarker);
+                }
+            } else if let (Some(&old_strip), Some(&old_origin), Some(&new_base)) = (
+                entry.strips.get(old),
+                entry.origins.get(old),
+                entry.origins.get(target),
+            ) {
+                #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
+                let old_dx = entry.layout.pan_points(old).round() as i32;
+                #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
+                let new_dx = entry.layout.pan_points(target).round() as i32;
+                show_row(
+                    old_strip,
+                    old_origin + bevy::math::IVec2::new(old_dx, 0),
+                    new,
+                    new_base + bevy::math::IVec2::new(new_dx, 0),
+                    entry.parked,
+                    commands,
+                );
+            }
+            picked_focus
+        };
+        (focus, true)
+    } else if picked.is_none()
+        && pick.is_none()
+        && let Some(focus_entity) = focused
+        && let Some(key) = refocus(&entry.layout, focus_entity)
+    {
+        debug!("overview: focused window panned out of view, focusing {key}");
+        commands.focus_entity(key, true);
+        (Some(key), true)
+    } else {
+        (picked_focus, false)
+    };
+    (Some((virtual_index, focus)), panned || switched)
 }
 
 /// The row a display shows now, and the one it closes into: the picked
@@ -847,46 +866,48 @@ fn keep_pans(
     windows: &Windows,
     commands: &mut Commands,
 ) -> bool {
-    let mut wrote = false;
-    for (row, strip) in entry.layout.strips.iter().enumerate() {
-        #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
-        let dx = entry.layout.pan_points(row).round() as i32;
-        let (Some(&entity), Some(&origin)) = (entry.strips.get(row), entry.origins.get(row)) else {
-            continue;
-        };
-        if dx == 0 {
-            continue;
-        }
-        wrote = true;
-        let origin = origin + bevy::math::IVec2::new(dx, 0);
-        debug!(
-            "overview: keeping row {} of display {index} panned by {dx} at {origin}",
-            strip.virtual_index
-        );
-        if strip.active {
-            let signature = strips
-                .get(entity)
-                .ok()
-                .map(|strip| strip_signature(strip.1, windows));
-            if let Ok(mut strip_cmds) = commands.get_entity(entity) {
-                strip_cmds.try_insert(Position(origin));
-                strip_cmds.try_remove::<(RepositionMarker, Scrolling)>();
-                if let Some(signature) = signature {
-                    strip_cmds.try_insert(ManualStripOffset { signature });
+    entry
+        .layout
+        .strips
+        .iter()
+        .enumerate()
+        .filter_map(|(row, strip)| {
+            #[allow(clippy::cast_possible_truncation, reason = "on-screen points")]
+            let dx = entry.layout.pan_points(row).round() as i32;
+            (dx != 0)
+                .then(|| Some((strip, *entry.strips.get(row)?, *entry.origins.get(row)?, dx)))
+                .flatten()
+        })
+        .fold(false, |_, (strip, entity, base_origin, dx)| {
+            let origin = base_origin + bevy::math::IVec2::new(dx, 0);
+            debug!(
+                "overview: keeping row {} of display {index} panned by {dx} at {origin}",
+                strip.virtual_index
+            );
+            if strip.active {
+                let signature = strips
+                    .get(entity)
+                    .ok()
+                    .map(|strip| strip_signature(strip.1, windows));
+                if let Ok(mut strip_cmds) = commands.get_entity(entity) {
+                    strip_cmds.try_insert(Position(origin));
+                    strip_cmds.try_remove::<(RepositionMarker, Scrolling)>();
+                    if let Some(signature) = signature {
+                        strip_cmds.try_insert(ManualStripOffset { signature });
+                    }
+                }
+                spawn_snap_strip_guard(entity, commands);
+            } else {
+                let focus = strips
+                    .get(entity)
+                    .ok()
+                    .and_then(|s| s.4.and_then(|previous| previous.focus));
+                if let Ok(mut strip_cmds) = commands.get_entity(entity) {
+                    strip_cmds.try_insert(PreviousStripPosition { origin, focus });
                 }
             }
-            spawn_snap_strip_guard(entity, commands);
-        } else {
-            let focus = strips
-                .get(entity)
-                .ok()
-                .and_then(|s| s.4.and_then(|previous| previous.focus));
-            if let Ok(mut strip_cmds) = commands.get_entity(entity) {
-                strip_cmds.try_insert(PreviousStripPosition { origin, focus });
-            }
-        }
-    }
-    wrote
+            true
+        })
 }
 
 /// Switches a display that doesn't hold focus from row `old` to row `new`
@@ -943,8 +964,7 @@ fn nearest_middle(layout: &DisplayLayout<Entity>, row: usize) -> Option<Entity> 
     let (left, right) = layout.work_area;
     let middle = f64::midpoint(left, right);
     let distance = |w: &crate::overview::WindowPlacement<Entity>| {
-        let frame = w.layout.offset(pan, 0.0);
-        (frame.x + frame.w / 2.0 - middle).abs()
+        (w.layout.offset(pan, 0.0).centre().0 - middle).abs()
     };
     strip
         .windows
@@ -961,15 +981,11 @@ fn settle(
     target: f64,
     scrub_velocity: f64,
 ) {
-    let (from, velocity) = match &active.motion {
-        Motion::Scrub(scrub) => (scrub.progress, scrub_velocity),
-        Motion::Spring {
-            spring, started_at, ..
-        } => {
-            let t = started_at.elapsed().as_secs_f64();
-            (spring.value(t), spring.velocity_at(t))
-        }
-        Motion::Settled => (1.0, 0.0),
+    let (from, current_velocity) = active.current_progress_and_velocity();
+    let velocity = if matches!(active.motion, Motion::Scrub(_)) {
+        scrub_velocity
+    } else {
+        current_velocity
     };
     // A faster release settles a little quicker.
     let response = SPRING_RESPONSE * (1.0 - 0.25 * (velocity.abs() / 0.5).tanh());
@@ -1232,10 +1248,6 @@ fn gather_following(scene: &Scene, previous: &[DisplayEntry]) -> Vec<DisplayEntr
     gather_inner(scene, None, Some(previous))
 }
 
-#[allow(
-    clippy::too_many_lines,
-    reason = "one pass over displays, rows and windows"
-)]
 fn gather_inner(
     scene: &Scene,
     info: Option<&WindowServerInfo>,
@@ -1258,117 +1270,133 @@ fn gather_inner(
             )
         })
         .collect();
-    let mut entries = Vec::new();
-    for (display_entity, display, dock) in &scene.displays {
-        // The whole screen, menu bar included: the overview covers it, and
-        // the wallpaper and menu bar windows are matched to its corner.
-        let bounds = display.frame();
-        let viewport = display.actual_display_bounds(dock, &scene.config);
-        let size = (f64::from(bounds.width()), f64::from(bounds.height()));
-        let origin = (f64::from(bounds.min.x), f64::from(bounds.min.y));
-        let display_rect = Rect::new(origin.0, origin.1, size.0, size.1);
-        let local = move |r: Rect| r.offset(-origin.0, -origin.1);
+    let (mut floating_map, rejected_floating) =
+        floating_by_display(scene, info, previous, &display_rects);
 
-        // Every display joins, as in Mission Control. Only the focused
-        // display's row carries `ActiveWorkspaceMarker`; the others show
-        // their current space's selected row.
-        let display_id = display.id();
-        let workspace = scene
-            .strips
-            .iter()
-            .find(|s| s.5 && s.6.parent() == display_entity)
-            .map(|s| s.1.id())
-            .or_else(|| {
-                scene
-                    .window_manager
-                    .active_display_space(display_id)
-                    .inspect_err(|err| debug!("overview: space of display {display_id}: {err}"))
-                    .ok()
-            });
-        let Some(workspace) = workspace else {
-            continue;
-        };
-        let mut rows: Vec<_> = scene
-            .strips
-            .iter()
-            .filter(|s| s.6.parent() == display_entity && s.1.id() == workspace)
-            .collect();
-        rows.sort_by_key(|s| s.1.virtual_index);
-        let flags: Vec<_> = rows.iter().map(|s| (s.1.virtual_index, s.5, s.7)).collect();
-        let shown = shown_row(display_id, workspace, &flags);
+    scene
+        .displays
+        .iter()
+        .filter_map(|(display_entity, display, dock)| {
+            // The whole screen, menu bar included: the overview covers it, and
+            // the wallpaper and menu bar windows are matched to its corner.
+            let bounds = display.frame();
+            let viewport = display.actual_display_bounds(dock, &scene.config);
+            let size = (f64::from(bounds.width()), f64::from(bounds.height()));
+            let origin = (f64::from(bounds.min.x), f64::from(bounds.min.y));
+            let display_rect = Rect::new(origin.0, origin.1, size.0, size.1);
+            let local = move |r: Rect| r.offset(-origin.0, -origin.1);
 
-        let mut inputs = Vec::new();
-        let mut strip_entities = Vec::new();
-        let mut origins = Vec::new();
-        for (index, (entity, strip, position, reposition, previous, _, _, _)) in
-            rows.into_iter().enumerate()
-        {
-            let active = index == shown;
-            let strip_origin = if active {
-                shown_origin(
-                    scene,
-                    display,
-                    strip,
-                    reposition.map_or(position.0, |t| t.0),
-                )
-                .unwrap_or(viewport.min)
-            } else {
-                previous.map_or(viewport.min, |previous| previous.origin)
-            };
-            let windows: Vec<_> = visible_windows(strip)
-                .filter_map(|entity| {
-                    let (_, window, layout, bounds, unmanaged, focused, _) =
-                        scene.windows.get(entity).ok()?;
-                    if matches!(unmanaged, Some(Unmanaged::Floating)) {
-                        return None;
-                    }
-                    let min = layout.0 + strip_origin;
-                    let layout_frame = local(Rect::new(
-                        f64::from(min.x),
-                        f64::from(min.y),
-                        f64::from(bounds.0.x),
-                        f64::from(bounds.0.y),
-                    ));
-                    let real_frame = info
-                        .filter(|_| active)
-                        .and_then(|info| info.frames.get(&window.id()))
-                        .map(|frame| local(*frame));
-                    Some(WindowInput {
-                        key: entity,
-                        window_id: window.id(),
-                        layout_frame,
-                        real_frame,
-                        focused,
-                    })
-                })
+            // Every display joins, as in Mission Control. Only the focused
+            // display's row carries `ActiveWorkspaceMarker`; the others show
+            // their current space's selected row.
+            let display_id = display.id();
+            let workspace = scene
+                .strips
+                .iter()
+                .find(|s| s.5 && s.6.parent() == display_entity)
+                .map(|s| s.1.id())
+                .or_else(|| {
+                    scene
+                        .window_manager
+                        .active_display_space(display_id)
+                        .inspect_err(|err| debug!("overview: space of display {display_id}: {err}"))
+                        .ok()
+                })?;
+
+            let mut rows: Vec<_> = scene
+                .strips
+                .iter()
+                .filter(|s| s.6.parent() == display_entity && s.1.id() == workspace)
                 .collect();
-            inputs.push(StripInput {
-                virtual_index: strip.virtual_index,
-                active,
-                windows,
-            });
-            strip_entities.push(entity);
-            origins.push(strip_origin);
-        }
-        let prev_entry = previous.and_then(|list| list.iter().find(|e| e.display_id == display_id));
-        let (floating, rejected_floating) =
-            floating_windows(scene, info, prev_entry, display_id, &display_rects, local);
-        let mut layout = layout_display(size, &inputs, &floating, 1.0, &metrics);
-        layout.work_area = (
-            f64::from(viewport.min.x) - origin.0,
-            f64::from(viewport.max.x) - origin.0,
-        );
-        entries.push(DisplayEntry {
-            display_id,
-            cg_bounds: display_rect,
-            layout,
-            strips: strip_entities,
-            origins,
-            parked: display.bounds().max - PARKED_STRIP_SLIVER,
-            rejected_floating,
-        });
-    }
-    entries
+            rows.sort_by_key(|s| s.1.virtual_index);
+            let flags: Vec<_> = rows.iter().map(|s| (s.1.virtual_index, s.5, s.7)).collect();
+            let shown = shown_row(display_id, workspace, &flags);
+
+            let (inputs, (strip_entities, origins)): (Vec<_>, (Vec<_>, Vec<_>)) = rows
+                .into_iter()
+                .enumerate()
+                .map(
+                    |(index, (entity, strip, position, reposition, previous, _, _, _))| {
+                        let active = index == shown;
+                        let strip_origin = if active {
+                            shown_origin(
+                                scene,
+                                display,
+                                strip,
+                                reposition.map_or(position.0, |t| t.0),
+                            )
+                            .unwrap_or(viewport.min)
+                        } else {
+                            previous.map_or(viewport.min, |previous| previous.origin)
+                        };
+                        let windows =
+                            gather_strip_windows(scene, strip, strip_origin, active, info, local);
+                        (
+                            StripInput {
+                                virtual_index: strip.virtual_index,
+                                active,
+                                windows,
+                            },
+                            (entity, strip_origin),
+                        )
+                    },
+                )
+                .unzip();
+
+            let floating = floating_map.remove(&display_id).unwrap_or_default();
+            let mut layout = layout_display(size, &inputs, &floating, 1.0, &metrics);
+            layout.work_area = (
+                f64::from(viewport.min.x) - origin.0,
+                f64::from(viewport.max.x) - origin.0,
+            );
+            Some(DisplayEntry {
+                display_id,
+                cg_bounds: display_rect,
+                layout,
+                strips: strip_entities,
+                origins,
+                parked: display.bounds().max - PARKED_STRIP_SLIVER,
+                rejected_floating: Arc::clone(&rejected_floating),
+            })
+        })
+        .collect()
+}
+
+fn gather_strip_windows(
+    scene: &Scene,
+    strip: &LayoutStrip,
+    strip_origin: bevy::math::IVec2,
+    active: bool,
+    info: Option<&WindowServerInfo>,
+    local: impl Fn(Rect) -> Rect,
+) -> Vec<WindowInput<Entity>> {
+    visible_windows(strip)
+        .filter_map(|entity| {
+            let (_, window, layout, bounds, unmanaged, focused, _) =
+                scene.windows.get(entity).ok()?;
+            if matches!(unmanaged, Some(Unmanaged::Floating)) {
+                return None;
+            }
+            let min = layout.0 + strip_origin;
+            let layout_frame = local(Rect::new(
+                f64::from(min.x),
+                f64::from(min.y),
+                f64::from(bounds.0.x),
+                f64::from(bounds.0.y),
+            ));
+            let real_frame = info
+                .filter(|_| active)
+                .and_then(|info| info.frames.get(&window.id()))
+                .map(|frame| local(*frame));
+            Some(WindowInput {
+                key: entity,
+                window_id: window.id(),
+                layout_frame,
+                real_frame,
+                focused,
+            })
+        })
+        .collect()
 }
 
 /// Where the shown row really starts. Its origin, unless that is the parked
@@ -1446,89 +1474,121 @@ fn shown_row(
     shown
 }
 
-/// Floating windows on this display, sorted left-to-right by screen centre so
-/// visual shelf order matches `focus west` / `focus east`.
+type FloatingShelves = HashMap<u32, Vec<FloatingInput<Entity>>>;
+
+/// Partitions visible `Unmanaged::Floating` windows across displays in a single
+/// pass, sorting each display's shelf left-to-right by screen centre so visual
+/// shelf order matches `focus west` / `focus east`.
 ///
 /// On open (`info` is `Some`), `WindowServer`'s frame is preferred and only
 /// windows listed as on screen (this space) and actually drawing (not zero
-/// alpha) are shown; rejected IDs are returned so follow-up relayouts (`info`
-/// is `None`) keep parked popovers and off-space windows excluded.
-fn floating_windows(
+/// alpha) are shown; rejected IDs are shared via [`Arc`] so follow-up relayouts
+/// (`info` is `None`) keep parked popovers and off-space windows excluded
+/// without cloning the set.
+fn floating_by_display(
     scene: &Scene,
     info: Option<&WindowServerInfo>,
-    previous: Option<&DisplayEntry>,
-    display_id: u32,
+    previous: Option<&[DisplayEntry]>,
     all_displays: &[(u32, Rect)],
-    local: impl Fn(Rect) -> Rect,
-) -> (Vec<FloatingInput<Entity>>, HashSet<i32>) {
-    let display_origin = all_displays
-        .iter()
-        .find(|(id, _)| *id == display_id)
-        .map_or((0.0, 0.0), |(_, r)| (r.x, r.y));
-    let mut rejected = previous
-        .map(|prev| prev.rejected_floating.clone())
-        .unwrap_or_default();
-    let mut out: Vec<FloatingInput<Entity>> = scene
+) -> (FloatingShelves, Arc<HashSet<i32>>) {
+    let prev_rejected = previous
+        .and_then(|list| list.first())
+        .map(|entry| Arc::clone(&entry.rejected_floating));
+    let mut fresh_rejected = HashSet::new();
+    let mut by_display: FloatingShelves = HashMap::new();
+
+    for (entity, window, _, _, _, focused, _) in scene
         .windows
         .iter()
         .filter(|w| matches!(w.4, Some(Unmanaged::Floating)))
-        .filter_map(|(entity, window, _, _, _, focused, _)| {
-            let id = window.id();
-            let frame = if let Some(info) = info {
-                if info.invisible.contains(&id) {
-                    rejected.insert(id);
-                    return None;
-                }
-                let Some(frame) = info.frames.get(&id).copied() else {
-                    rejected.insert(id);
-                    return None;
-                };
-                frame
-            } else {
-                if rejected.contains(&id) {
-                    return None;
-                }
-                if let Some(prev_win) = previous
-                    .and_then(|prev| prev.layout.floating.iter().find(|w| w.window_id == id))
-                {
-                    prev_win.rest.offset(display_origin.0, display_origin.1)
-                } else {
-                    let f = window.frame();
-                    Rect::new(
-                        f64::from(f.min.x),
-                        f64::from(f.min.y),
-                        f64::from(f.width()),
-                        f64::from(f.height()),
-                    )
-                }
-            };
-            let best_display = all_displays
+    {
+        let id = window.id();
+        let Some(frame) = floating_global_frame(
+            id,
+            window,
+            info,
+            previous,
+            prev_rejected.as_deref(),
+            &mut fresh_rejected,
+        ) else {
+            continue;
+        };
+        if let Some((display_id, display_rect, _)) = all_displays
+            .iter()
+            .map(|&(disp_id, rect)| (disp_id, rect, rect.intersection_area(&frame)))
+            .filter(|(_, _, area)| *area > 0.0)
+            .max_by(|(_, _, a), (_, _, b)| a.total_cmp(b))
+        {
+            by_display
+                .entry(display_id)
+                .or_default()
+                .push(FloatingInput {
+                    key: entity,
+                    window_id: id,
+                    frame: frame.offset(-display_rect.x, -display_rect.y),
+                    focused,
+                });
+        }
+    }
+
+    for shelf in by_display.values_mut() {
+        shelf.sort_by(|a, b| {
+            let (ax, ay) = a.frame.centre();
+            let (bx, by) = b.frame.centre();
+            ax.total_cmp(&bx)
+                .then_with(|| ay.total_cmp(&by))
+                .then_with(|| a.window_id.cmp(&b.window_id))
+        });
+    }
+
+    let rejected = if info.is_some() {
+        Arc::new(fresh_rejected)
+    } else {
+        prev_rejected.unwrap_or_default()
+    };
+    (by_display, rejected)
+}
+
+fn floating_global_frame(
+    id: i32,
+    window: &Window,
+    info: Option<&WindowServerInfo>,
+    previous: Option<&[DisplayEntry]>,
+    prev_rejected: Option<&HashSet<i32>>,
+    fresh_rejected: &mut HashSet<i32>,
+) -> Option<Rect> {
+    if let Some(info) = info {
+        let frame = (!info.invisible.contains(&id))
+            .then(|| info.frames.get(&id).copied())
+            .flatten();
+        if frame.is_none() {
+            fresh_rejected.insert(id);
+        }
+        return frame;
+    }
+    if prev_rejected.is_some_and(|set| set.contains(&id)) {
+        return None;
+    }
+    previous
+        .into_iter()
+        .flatten()
+        .find_map(|entry| {
+            entry
+                .layout
+                .floating
                 .iter()
-                .map(|(id, rect)| (*id, rect.intersection_area(&frame)))
-                .filter(|(_, area)| *area > 0.0)
-                .max_by(|(_, a), (_, b)| a.total_cmp(b))
-                .map(|(id, _)| id);
-            if best_display != Some(display_id) {
-                return None;
-            }
-            Some(FloatingInput {
-                key: entity,
-                window_id: id,
-                frame: local(frame),
-                focused,
-            })
+                .find(|w| w.window_id == id)
+                .map(|w| w.rest.offset(entry.cg_bounds.x, entry.cg_bounds.y))
         })
-        .collect();
-    out.sort_by(|a, b| {
-        let ax = a.frame.x + a.frame.w / 2.0;
-        let bx = b.frame.x + b.frame.w / 2.0;
-        let ay = a.frame.y + a.frame.h / 2.0;
-        let by = b.frame.y + b.frame.h / 2.0;
-        ax.total_cmp(&bx)
-            .then_with(|| ay.total_cmp(&by))
-            .then_with(|| a.window_id.cmp(&b.window_id))
-    });
-    (out, rejected)
+        .or_else(|| {
+            let f = window.frame();
+            Some(Rect::new(
+                f64::from(f.min.x),
+                f64::from(f.min.y),
+                f64::from(f.width()),
+                f64::from(f.height()),
+            ))
+        })
 }
 
 enum ColumnWindows<'a> {

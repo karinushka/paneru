@@ -84,6 +84,11 @@ fn shares_finger<I>(fingers: &[Touch<I>], claimed: &[I], same: impl Fn(&I, &I) -
         .any(|finger| claimed.iter().any(|c| same(c, &finger.identity)))
 }
 
+fn same_touch_identity(a: &Retained<AnyObject>, b: &Retained<AnyObject>) -> bool {
+    // SAFETY: `NSTouch` identities conform to `NSObject` and answer `isEqual:`.
+    unsafe { msg_send![&**a, isEqual: &**b] }
+}
+
 impl Touch<Retained<AnyObject>> {
     /// Samples the whole set in one pass.
     fn sample(touches: &NSSet<NSTouch>) -> Vec<Self> {
@@ -690,10 +695,7 @@ impl InputHandler {
         if self.overview_released {
             // Swallowed while any finger of the overview's sequence is down.
             // Only fingers that are all new start a new sequence.
-            if !shares_finger(fingers, &self.overview_touches, |a, b| {
-                // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
-                unsafe { msg_send![&**a, isEqual: &**b] }
-            }) {
+            if !shares_finger(fingers, &self.overview_touches, same_touch_identity) {
                 self.overview_tracking = false;
                 self.overview_released = false;
                 self.overview_touches.clear();
@@ -714,10 +716,7 @@ impl InputHandler {
             }
             return Some(true);
         }
-        let movement = swipe_movement(&self.previous_touches, fingers, |previous, current| {
-            // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
-            unsafe { msg_send![&**previous, isEqual: &**current] }
-        });
+        let movement = swipe_movement(&self.previous_touches, fingers, same_touch_identity);
         let elapsed_secs = self
             .last_swipe_sample_timestamp
             .replace(timestamp)
@@ -834,10 +833,7 @@ impl InputHandler {
                 }
             }
 
-            let movement = swipe_movement(&self.previous_touches, &fingers, |previous, current| {
-                // SAFETY: NSTouch identities conform to NSObject and answer isEqual:.
-                unsafe { msg_send![&**previous, isEqual: &**current] }
-            });
+            let movement = swipe_movement(&self.previous_touches, &fingers, same_touch_identity);
             let elapsed_secs = self
                 .last_swipe_sample_timestamp
                 .replace(timestamp)
@@ -923,18 +919,12 @@ impl InputHandler {
         let keycode: Option<u8> = keycode.try_into().ok();
         if mask.is_empty()
             && crate::overview::OVERVIEW_ACCEPTS_KEYS.load(std::sync::atomic::Ordering::Relaxed)
+            && let Some(event) = keycode.and_then(|c| Event::from_overview_keycode(u16::from(c)))
         {
-            let overview_event = match keycode {
-                Some(53) => Some(Event::OverviewDismiss),
-                Some(36) => Some(Event::OverviewAccept),
-                _ => None,
-            };
-            if let Some(event) = overview_event {
-                return events
-                    .send(event)
-                    .inspect_err(|err| error!("Error sending overview key event: {err}"))
-                    .is_ok();
-            }
+            return events
+                .send(event)
+                .inspect_err(|err| error!("Error sending overview key event: {err}"))
+                .is_ok();
         }
 
         keycode

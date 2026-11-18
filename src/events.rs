@@ -300,6 +300,16 @@ impl Event {
         )
     }
 
+    /// Maps bare `Escape` (`0x35`) and `Return` (`0x24`) virtual keycodes to
+    /// their overview actions, shared by the `CGEvent` tap and `OverviewView`.
+    pub const fn from_overview_keycode(keycode: u16) -> Option<Self> {
+        match keycode {
+            0x35 => Some(Self::OverviewDismiss),
+            0x24 => Some(Self::OverviewAccept),
+            _ => None,
+        }
+    }
+
     /// Whether this event directly drives or wakes the workspace overview.
     pub fn is_overview(&self) -> bool {
         matches!(

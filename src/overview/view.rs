@@ -109,10 +109,8 @@ define_class!(
 
         #[unsafe(method(keyDown:))]
         fn key_down(&self, event: &NSEvent) {
-            match event.keyCode() {
-                53 => _ = self.ivars().sender.send(Event::OverviewDismiss),
-                36 => _ = self.ivars().sender.send(Event::OverviewAccept),
-                _ => {}
+            if let Some(overview_event) = Event::from_overview_keycode(event.keyCode()) {
+                _ = self.ivars().sender.send(overview_event);
             }
         }
     }
@@ -349,16 +347,16 @@ fn pan_frames(size: (f64, f64), pan: f64) -> (Rect, Rect) {
 /// its share: each display's best item first (by rank), then each one's
 /// second best, and so on.
 fn share<T>(per_display: impl Iterator<Item = Vec<(Rank, T)>>, max: usize) -> Vec<T> {
-    let mut picked: Vec<(usize, Rank, usize, T)> = Vec::new();
-    for (display, mut items) in per_display.enumerate() {
-        items.sort_by_key(|(rank, _)| *rank);
-        picked.extend(
+    let mut picked: Vec<_> = per_display
+        .enumerate()
+        .flat_map(|(display, mut items)| {
+            items.sort_by_key(|(rank, _)| *rank);
             items
                 .into_iter()
                 .enumerate()
-                .map(|(turn, (rank, item))| (turn, rank, display, item)),
-        );
-    }
+                .map(move |(turn, (rank, item))| (turn, rank, display, item))
+        })
+        .collect();
     picked.sort_by_key(|(turn, rank, display, _)| (*turn, *rank, *display));
     picked
         .into_iter()
@@ -530,14 +528,14 @@ impl OverviewManager {
                         blur: None,
                     };
                     let key = format!("desktop picture {path}");
-                    let index = self.target(screen.wallpaper, false, false, false, &key);
+                    let index = self.target(screen.wallpaper, false, false, false, None, &key);
                     jobs.push((Rank::Screen, index, shot));
                     let shot = Shot::File {
                         blur: Some((b.w, BACKDROP_BLUR)),
                         path,
                     };
                     let key = format!("{key} blurred");
-                    let index = self.target(screen.backdrop, false, false, false, &key);
+                    let index = self.target(screen.backdrop, false, false, false, None, &key);
                     jobs.push((Rank::Backdrop, index, shot));
                 }
             } else if let Some((id, _)) = wallpaper {
@@ -546,7 +544,7 @@ impl OverviewManager {
                     best: true,
                 };
                 let key = format!("wallpaper {id}");
-                let index = self.target(screen.wallpaper, false, true, false, &key);
+                let index = self.target(screen.wallpaper, false, true, false, None, &key);
                 jobs.push((Rank::Screen, index, shot));
                 let shot = Shot::Blurred {
                     id: *id,
@@ -554,13 +552,13 @@ impl OverviewManager {
                     radius: BACKDROP_BLUR,
                 };
                 let key = format!("wallpaper {id} blurred");
-                let index = self.target(screen.backdrop, false, true, false, &key);
+                let index = self.target(screen.backdrop, false, true, false, None, &key);
                 jobs.push((Rank::Backdrop, index, shot));
             }
             if let Some((_, rect)) = menubar.filter(|_| self.previews) {
                 let shot = Shot::Region { rect: *rect, below };
                 let key = format!("menu bar {},{}", rect.x, rect.y);
-                let index = self.target(screen.menubar, false, true, false, &key);
+                let index = self.target(screen.menubar, false, true, false, None, &key);
                 jobs.push((Rank::Row, index, shot));
             }
             let previews = self.previews;
@@ -568,10 +566,14 @@ impl OverviewManager {
                 let shot = card.shot();
                 let key = format!("window {}", card.window_id);
                 let fresh = card.rank.wants_fresh();
-                let index = self.target(vec![card.content.clone()], true, card.best, fresh, &key);
-                if let Some(target) = self.targets.last_mut().and_then(Option::as_mut) {
-                    target.window_id = Some(card.window_id);
-                }
+                let index = self.target(
+                    vec![card.content.clone()],
+                    true,
+                    card.best,
+                    fresh,
+                    Some(card.window_id),
+                    &key,
+                );
                 jobs.push((card.rank, index, shot));
             }
             self.visible
@@ -634,18 +636,14 @@ impl OverviewManager {
         clear: bool,
         gate: bool,
         fresh: bool,
+        window_id: Option<i32>,
         key: &str,
     ) -> usize {
         // A cached image goes in now, and then the capture no longer holds
         // the panels back, unless `fresh` asks for the real thing first.
         let cached = self.cache.get(key);
         if let Some(image) = cached {
-            for layer in &layers {
-                set_contents(layer, image);
-                if clear {
-                    layer.setBackgroundColor(None);
-                }
-            }
+            apply_target_image(&layers, image, clear);
         }
         let gate = gate && (cached.is_none() || fresh);
         self.outstanding += 1;
@@ -655,7 +653,7 @@ impl OverviewManager {
             clear_background: clear,
             gate,
             key: key.to_owned(),
-            window_id: None,
+            window_id,
         }));
         self.targets.len() - 1
     }
@@ -714,12 +712,7 @@ impl OverviewManager {
             };
             let live = target.window_id.is_some_and(|id| self.live.is_showing(id));
             if !live {
-                for layer in &target.layers {
-                    set_contents(layer, &image);
-                    if target.clear_background {
-                        layer.setBackgroundColor(None);
-                    }
-                }
+                apply_target_image(&target.layers, &image, target.clear_background);
             }
             self.cache.insert(target.key, image);
         }
@@ -1212,19 +1205,25 @@ impl OverviewManager {
     }
 }
 
+fn apply_target_image(layers: &[Retained<CALayer>], image: &CGImage, clear_background: bool) {
+    for layer in layers {
+        set_contents(layer, image);
+        if clear_background {
+            layer.setBackgroundColor(None);
+        }
+    }
+}
+
 /// Height of the display whose Cocoa frame sits at the origin; anchors the
 /// CG ↔ Cocoa Y flip.
 fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
     let screens = NSScreen::screens(mtm);
-    let mut fallback = None;
-    for screen in &screens {
-        let frame = screen.frame();
-        fallback.get_or_insert(frame.size.height);
-        if frame.origin.x == 0.0 && frame.origin.y == 0.0 {
-            return frame.size.height;
-        }
-    }
-    fallback.unwrap_or(0.0)
+    screens
+        .iter()
+        .map(|screen| screen.frame())
+        .find(|frame| frame.origin.x == 0.0 && frame.origin.y == 0.0)
+        .or_else(|| screens.iter().next().map(|screen| screen.frame()))
+        .map_or(0.0, |frame| frame.size.height)
 }
 
 #[cfg(test)]

@@ -50,6 +50,7 @@ impl NotifyHandler {
             KnownCGSEvent::SpaceCreated,
             KnownCGSEvent::SpaceCurrentChanged,
             KnownCGSEvent::SpaceDestroyed,
+            KnownCGSEvent::ManagedSpaceMembershipUpdated,
             KnownCGSEvent::SpaceWindowDestroyed,
         ];
         for event in events {
@@ -95,17 +96,28 @@ impl NotifyHandler {
             | KnownCGSEvent::SpaceDestroyed
             | KnownCGSEvent::SpaceCurrentChanged => {
                 if let Some(space_id) = from_bytes::<WorkspaceId>(data, len) {
-                    if matches!(event, KnownCGSEvent::SpaceDestroyed) {
-                        _ = self.events.send(Event::SpaceDestroyed { space_id });
-                    } else {
-                        let space_type = unsafe { SLSSpaceGetType(self.conn, space_id) };
-                        if space_type == 0 && matches!(event, KnownCGSEvent::SpaceCreated) {
-                            _ = self.events.send(Event::SpaceCreated { space_id });
-                        } else {
-                            debug!("{event} space = {space_id}, space_type = {space_type}");
+                    match event {
+                        KnownCGSEvent::SpaceDestroyed => {
+                            _ = self.events.send(Event::SpaceDestroyed { space_id });
                         }
+                        KnownCGSEvent::SpaceCurrentChanged if space_id != 0 => {
+                            _ = self.events.send(Event::SpaceCurrentChanged { space_id });
+                        }
+                        KnownCGSEvent::SpaceCreated => {
+                            let space_type = unsafe { SLSSpaceGetType(self.conn, space_id) };
+                            if space_type == 0 {
+                                _ = self.events.send(Event::SpaceCreated { space_id });
+                            } else {
+                                debug!("{event} space = {space_id}, space_type = {space_type}");
+                            }
+                        }
+                        _ => {}
                     }
                 }
+            }
+
+            KnownCGSEvent::ManagedSpaceMembershipUpdated => {
+                _ = self.events.send(Event::SpaceMembershipChanged);
             }
 
             KnownCGSEvent::SpaceWindowDestroyed => {

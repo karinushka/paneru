@@ -197,6 +197,10 @@ pub enum Event {
     SpaceCreated { space_id: WorkspaceId },
     /// A space has been destroyed.
     SpaceDestroyed { space_id: WorkspaceId },
+    /// The active space on a display changed (`CGS` 1329), carrying the new space ID.
+    SpaceCurrentChanged { space_id: WorkspaceId },
+    /// Space window memberships finished updating (`CGS` 1342).
+    SpaceMembershipChanged,
     /// The active space has changed.
     SpaceChanged,
 
@@ -334,6 +338,7 @@ impl Event {
         matches!(
             self,
             Event::SpaceChanged
+                | Event::SpaceCurrentChanged { .. }
                 | Event::SpaceDestroyed { .. }
                 | Event::DisplayAdded { .. }
                 | Event::DisplayRemoved { .. }

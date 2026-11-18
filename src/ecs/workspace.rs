@@ -9,7 +9,9 @@ use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Changed, Has, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::{not, resource_exists};
-use bevy::ecs::system::{Commands, Local, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::system::{
+    Commands, Local, NonSend, ParamSet, Populated, Query, Res, ResMut, Single, SystemParam,
+};
 use bevy::ecs::world::World;
 use bevy::time::common_conditions::on_timer;
 use std::collections::HashSet;
@@ -278,27 +280,122 @@ fn fullscreen_window_in_strip(
         })
 }
 
-#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-fn workspace_change_handler(
-    mut messages: MessageReader<Event>,
-    windows: Windows,
-    mut workspaces: Query<(
-        &mut LayoutStrip,
+type ChangeableWorkspaces<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut LayoutStrip,
         Entity,
         Has<ActiveWorkspaceMarker>,
         Has<SelectedVirtualMarker>,
-    )>,
-    active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
+        Option<&'static ChildOf>,
+    ),
+>;
+
+#[derive(SystemParam)]
+pub(crate) struct MovedWindowGuards<'w, 's> {
+    sticky_windows: Query<'w, 's, (), With<crate::ecs::desktop::StickyWindowMarker>>,
+    desktop_bridge: Option<NonSend<'w, crate::manager::spaces::DesktopBridge>>,
+    reconcile_state: Option<Res<'w, crate::ecs::display::DisplayReconcileState>>,
+}
+
+fn reconcile_secondary_displays(
+    displays: &Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    workspaces: &mut ChangeableWorkspaces,
+    windows: &Windows,
+    window_manager: &WindowManager,
+    commands: &mut Commands,
+) {
+    for (display, display_entity, is_active_display) in displays {
+        if is_active_display {
+            continue;
+        }
+        let Ok(sec_space_id) = window_manager.active_display_space(display.id()) else {
+            continue;
+        };
+        if workspaces
+            .iter()
+            .any(|(strip, _, _, selected, _)| strip.id() == sec_space_id && selected)
+        {
+            continue;
+        }
+        let fallback = workspaces
+            .iter()
+            .filter(|(strip, _, _, _, _)| strip.id() == sec_space_id)
+            .min_by_key(|(strip, _, _, _, _)| strip.virtual_index)
+            .map(|(_, entity, _, _, _)| entity);
+        if let Some(strip_entity) = fallback {
+            if let Ok(mut ec) = commands.get_entity(strip_entity) {
+                ec.try_insert(SelectedVirtualMarker);
+            }
+        } else if window_manager.is_fullscreen_space(display.id()) {
+            let prev_strip = workspaces
+                .iter()
+                .find(|(_, _, _, selected, child)| {
+                    *selected && child.is_some_and(|c| c.parent() == display_entity)
+                })
+                .map(|(_, entity, _, _, _)| entity);
+            if let Some(old_entity) = prev_strip
+                && let Ok((mut old_strip, _, _, _, _)) = workspaces.get_mut(old_entity)
+                && let Some(fs_win) =
+                    fullscreen_window_in_strip(sec_space_id, &old_strip, windows, window_manager)
+                && let Ok(original_index) = old_strip.index_of(fs_win)
+            {
+                let fs_marker = NativeFullscreenMarker {
+                    layout_strip: old_entity,
+                    workspace_id: old_strip.id(),
+                    index: original_index,
+                };
+                old_strip.remove(fs_win);
+                commands.spawn((
+                    Position(display.bounds().min),
+                    fs_marker,
+                    LayoutStrip::fullscreen(sec_space_id, fs_win),
+                    SelectedVirtualMarker,
+                    ChildOf(display_entity),
+                ));
+            }
+        }
+    }
+}
+
+#[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+pub(crate) fn workspace_change_handler(
+    mut messages: MessageReader<Event>,
+    windows: Windows,
+    mut workspaces: ChangeableWorkspaces,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    if !messages
-        .read()
-        .any(|event| matches!(event, Event::SpaceChanged))
-    {
+    let mut triggered = false;
+    for event in messages.read() {
+        match event {
+            Event::SpaceChanged => triggered = true,
+            Event::SpaceCurrentChanged { space_id } => {
+                debug!("space current changed: {space_id}");
+                triggered = true;
+            }
+            _ => {}
+        }
+    }
+    if !triggered {
         return;
     }
-    let (active_display, display_entity) = *active_display;
+
+    reconcile_secondary_displays(
+        &displays,
+        &mut workspaces,
+        &windows,
+        &window_manager,
+        &mut commands,
+    );
+
+    let Some((active_display, display_entity, _)) =
+        displays.iter().find(|(_, _, is_active)| *is_active)
+    else {
+        return;
+    };
 
     let Ok(workspace_id) = window_manager.active_display_space(active_display.id()) else {
         error!("Unable to get active workspace id!");
@@ -307,7 +404,7 @@ fn workspace_change_handler(
 
     let mut remove_from = None;
     let mut insert_into = None;
-    for (strip, entity, active, selected) in &workspaces {
+    for (strip, entity, active, selected, _) in &workspaces {
         if active && strip.id() == workspace_id {
             debug!("Workspace id {} already active", strip.id());
             return;
@@ -326,15 +423,15 @@ fn workspace_change_handler(
         // Fallback: find any strip for this workspace, preferably the one with virtual_index 0.
         insert_into = workspaces
             .iter()
-            .filter(|(strip, _, _, _)| strip.id() == workspace_id)
-            .min_by_key(|(strip, _, _, _)| strip.virtual_index)
-            .map(|(_, entity, _, _)| entity);
+            .filter(|(strip, _, _, _, _)| strip.id() == workspace_id)
+            .min_by_key(|(strip, _, _, _, _)| strip.virtual_index)
+            .map(|(_, entity, _, _, _)| entity);
     }
 
     if insert_into.is_none()
         && let Some(old_space) = remove_from
         && window_manager.is_fullscreen_space(active_display.id())
-        && let Ok((mut old_strip, old_strip_entity, _, _)) = workspaces.get_mut(old_space)
+        && let Ok((mut old_strip, old_strip_entity, _, _, _)) = workspaces.get_mut(old_space)
         && let Some(fullscreen_window) =
             fullscreen_window_in_strip(workspace_id, &old_strip, &windows, &window_manager)
         && let Ok(original_index) = old_strip.index_of(fullscreen_window)
@@ -383,8 +480,8 @@ pub(crate) fn detect_moved_windows(
         Option<&ChildOf>,
     )>,
     apps: Query<&mut Application>,
+    guards: MovedWindowGuards,
     window_manager: Res<WindowManager>,
-    reconcile_state: Option<Res<crate::ecs::display::DisplayReconcileState>>,
     mut ignored_windows: Local<HashSet<WinID>>,
     mut ctx: WindowCtx,
 ) {
@@ -450,19 +547,44 @@ pub(crate) fn detect_moved_windows(
         }
     }
 
-    if reconcile_state.is_some_and(|state| state.is_settling()) {
+    if guards
+        .reconcile_state
+        .is_some_and(|state| state.is_settling())
+    {
         return;
     }
 
+    let mut newly_sticky = Vec::new();
     let moved_set: bevy::ecs::entity::EntityHashSet = moved_windows
         .iter()
         .copied()
         .filter(|&entity| {
+            if guards.sticky_windows.contains(entity) {
+                return false;
+            }
+            if let Some((window, _, _)) = ctx.windows.get_managed(entity)
+                && guards
+                    .desktop_bridge
+                    .as_ref()
+                    .and_then(|bridge| bridge.window_is_sticky(window.id()))
+                    == Some(true)
+            {
+                newly_sticky.push(entity);
+                return false;
+            }
             !workspaces
                 .iter()
                 .any(|(strip, _, fullscreen, _)| fullscreen && strip.contains(entity))
         })
         .collect();
+    for entity in newly_sticky {
+        for (mut strip, _, _, _) in &mut workspaces {
+            strip.remove(entity);
+        }
+        if let Ok(mut ec) = ctx.commands.get_entity(entity) {
+            ec.try_insert((crate::ecs::desktop::StickyWindowMarker, Unmanaged::Floating));
+        }
+    }
     if moved_set.is_empty() {
         return;
     }
@@ -645,7 +767,9 @@ fn workspace_destroyed_handler(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 fn workspace_created_handler(
     mut messages: MessageReader<Event>,
-    active_display: Single<(&Display, Entity), With<ActiveDisplayMarker>>,
+    displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
+    census: Option<Res<crate::ecs::desktop::DesktopCensus>>,
+    window_manager: Res<WindowManager>,
     workspaces: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
@@ -658,11 +782,29 @@ fn workspace_created_handler(
             warn!("Workspace {space_id} already exists!");
             continue;
         }
-        debug!("Workspace create {space_id}");
-        let (active_display, display_entity) = *active_display;
+        let target_display_id = census
+            .as_ref()
+            .and_then(|c| c.display_for_space(*space_id))
+            .or_else(|| {
+                window_manager
+                    .present_displays()
+                    .into_iter()
+                    .find(|(_, spaces)| spaces.contains(space_id))
+                    .map(|(d, _)| d.id())
+            });
+        let owner = target_display_id
+            .and_then(|id| displays.iter().find(|(d, _, _)| d.id() == id))
+            .or_else(|| displays.iter().find(|(_, _, active)| *active));
+        let Some((target_disp, display_entity, _)) = owner else {
+            continue;
+        };
+        let disp_id = target_disp.id();
+        debug!("Workspace create {space_id} on display {disp_id}");
         let strip = LayoutStrip::new(*space_id, 0);
-        let origin = active_display.bounds().min;
-        commands.spawn_layout_strip(strip, origin, display_entity, false);
+        let origin = target_disp.bounds().min;
+        commands
+            .spawn_layout_strip(strip, origin, display_entity, false)
+            .insert(SelectedVirtualMarker);
     }
 }
 

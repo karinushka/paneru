@@ -104,7 +104,6 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopySpacesForWindows(int cid, int selector, `CFArrayRef` `window_list`);
-    #[allow(dead_code, reason = "called via DesktopBridgeOS")]
     pub fn SLSCopySpacesForWindows(
         cid: ConnID,
         selector: i32,

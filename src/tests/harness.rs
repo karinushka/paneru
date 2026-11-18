@@ -9,6 +9,7 @@ use tracing_subscriber::{EnvFilter, fmt, prelude::*};
 
 use crate::commands::register_commands;
 use crate::config::Config;
+use crate::ecs::desktop::DesktopEventsPlugin;
 use crate::ecs::display::DisplayEventsPlugin;
 use crate::ecs::focus::FocusEventsPlugin;
 use crate::ecs::layout::LayoutEventsPlugin;
@@ -76,6 +77,9 @@ impl TestHarness {
 
         let wm = mock_state.create_window_manager();
         world.insert_resource(WindowManager(Box::new(wm)));
+        world.insert_non_send(crate::manager::spaces::DesktopBridge(Box::new(
+            mock_state.create_desktop_bridge(),
+        )));
 
         Self {
             app,
@@ -275,6 +279,7 @@ fn setup_world() -> App {
         .insert_resource(Initializing)
         .add_plugins(MouseEventsPlugin)
         .add_plugins(ScrollEventsPlugin)
+        .add_plugins(DesktopEventsPlugin)
         .add_plugins(WorkspaceEventsPlugin)
         .add_plugins(LayoutEventsPlugin)
         .add_plugins(FocusEventsPlugin)
@@ -350,7 +355,7 @@ macro_rules! assert_focused {
 #[macro_export]
 macro_rules! assert_on_workspace {
     ($world:expr, $window_id:expr, $workspace_id:expr) => {{
-        let entity = $crate::tests::harness::find_window_entity($window_id, $world);
+        let entity = $crate::tests::find_window_entity($window_id, $world);
         let mut query = $world.query::<&$crate::ecs::layout::LayoutStrip>();
         let found = query
             .iter($world)
@@ -366,7 +371,7 @@ macro_rules! assert_on_workspace {
 #[macro_export]
 macro_rules! assert_not_on_workspace {
     ($world:expr, $window_id:expr, $workspace_id:expr) => {{
-        let entity = $crate::tests::harness::find_window_entity($window_id, $world);
+        let entity = $crate::tests::find_window_entity($window_id, $world);
         let mut query = $world.query::<&$crate::ecs::layout::LayoutStrip>();
         let found = query
             .iter($world)

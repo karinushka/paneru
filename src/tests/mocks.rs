@@ -56,6 +56,8 @@ pub(crate) struct MockWindowData {
     /// display's bottom edge and rejects height growth while parked off-screen,
     /// modelling macOS WindowServer/AppKit frame constraints.
     pub(crate) clamp_height_to_display: bool,
+    pub(crate) extra_workspaces: HashSet<WorkspaceId>,
+    pub(crate) sticky: bool,
 }
 
 impl Default for MockWindowData {
@@ -80,44 +82,55 @@ impl Default for MockWindowData {
             min_width: 0,
             max_width: 0,
             clamp_height_to_display: false,
+            extra_workspaces: HashSet::new(),
+            sticky: false,
         }
     }
 }
 
 /// Data for a mocked display.
-struct MockDisplayData {
-    id: u32,
-    bounds: IRect,
-    workspaces: Vec<WorkspaceId>,
+pub(super) struct MockDisplayData {
+    pub(super) id: u32,
+    pub(super) bounds: IRect,
+    pub(super) workspaces: Vec<WorkspaceId>,
+    pub(super) current_workspace: WorkspaceId,
 }
 
+pub(super) type DeferredDesktopMockOp = Box<dyn FnOnce(&MockState) + Send + Sync>;
+
 /// The internal state of our "Virtual macOS".
-struct MockStateInner {
-    apps: HashMap<Pid, MockAppData>,
-    windows: HashMap<WinID, MockWindowData>,
-    displays: HashMap<u32, MockDisplayData>,
-    fullscreen_spaces: HashSet<WorkspaceId>,
-    active_display_id: u32,
-    cursor_position: Origin,
-    event_queue: VecDeque<Event>,
+pub(super) struct MockStateInner {
+    pub(super) apps: HashMap<Pid, MockAppData>,
+    pub(super) windows: HashMap<WinID, MockWindowData>,
+    pub(super) displays: HashMap<u32, MockDisplayData>,
+    pub(super) fullscreen_spaces: HashSet<WorkspaceId>,
+    pub(super) fullscreen_owners: HashMap<WorkspaceId, WinID>,
+    pub(super) associated_windows: HashMap<WinID, Vec<WinID>>,
+    pub(super) active_display_id: u32,
+    pub(super) cursor_position: Origin,
+    pub(super) event_queue: VecDeque<Event>,
     /// Windows that are gone but which the app's AX window list still reports,
     /// modelling the lag real apps show right after a window closes.
-    stale_window_ids: HashMap<WinID, Pid>,
-    unordered_windows: HashSet<WinID>,
+    pub(super) stale_window_ids: HashMap<WinID, Pid>,
+    pub(super) unordered_windows: HashSet<WinID>,
     /// Windows the app keeps out of its accessibility window list while the
     /// window server still reports them on screen: a background native tab.
-    background_tabs: HashSet<WinID>,
+    pub(super) background_tabs: HashSet<WinID>,
     /// Windows raised without focus, in order, so a test can check what ends
     /// up in front of what.
-    raised: Vec<WinID>,
+    pub(super) raised: Vec<WinID>,
     /// How many times each app has been asked for its focused window or its
     /// window list, so a test can check who a lookup bothers.
-    app_reads: HashMap<Pid, usize>,
+    pub(super) app_reads: HashMap<Pid, usize>,
+    pub(super) next_space_id: WorkspaceId,
+    pub(super) screen_locked: bool,
+    pub(super) defer_desktop_ops: bool,
+    pub(super) deferred_desktop_ops: Vec<DeferredDesktopMockOp>,
 }
 
 #[derive(Clone)]
 pub struct MockState {
-    inner: Arc<RwLock<MockStateInner>>,
+    pub(super) inner: Arc<RwLock<MockStateInner>>,
 }
 
 impl MockState {
@@ -128,6 +141,8 @@ impl MockState {
                 windows: HashMap::new(),
                 displays: HashMap::new(),
                 fullscreen_spaces: HashSet::new(),
+                fullscreen_owners: HashMap::new(),
+                associated_windows: HashMap::new(),
                 active_display_id: 0,
                 cursor_position: Origin::ZERO,
                 event_queue: VecDeque::new(),
@@ -136,6 +151,10 @@ impl MockState {
                 background_tabs: HashSet::new(),
                 raised: Vec::new(),
                 app_reads: HashMap::new(),
+                next_space_id: 500,
+                screen_locked: false,
+                defer_desktop_ops: false,
+                deferred_desktop_ops: Vec::new(),
             })),
         }
     }
@@ -256,12 +275,14 @@ impl MockState {
         if inner.displays.is_empty() {
             inner.active_display_id = id;
         }
+        let current_workspace = workspaces.first().copied().unwrap_or(0);
         inner.displays.insert(
             id,
             MockDisplayData {
                 id,
                 bounds,
                 workspaces,
+                current_workspace,
             },
         );
     }
@@ -303,8 +324,10 @@ impl MockState {
                 .displays
                 .get_mut(&display_id)
                 .expect("finding display");
-            display.workspaces.retain(|id| *id != workspace_id);
-            display.workspaces.insert(0, workspace_id);
+            if !display.workspaces.contains(&workspace_id) {
+                display.workspaces.push(workspace_id);
+            }
+            display.current_workspace = workspace_id;
         }
         if fullscreen {
             inner.fullscreen_spaces.insert(workspace_id);
@@ -845,7 +868,8 @@ impl MockState {
                 .force_read()
                 .displays
                 .get(&id)
-                .map(|d| d.workspaces[0])
+                .map(|d| d.current_workspace)
+                .filter(|&ws| ws != 0)
                 .ok_or(Error::InvalidWindow)
         });
 
@@ -853,11 +877,9 @@ impl MockState {
         wm.expect_is_fullscreen_space()
             .returning(move |display_id| {
                 let inner = s.inner.force_read();
-                inner
-                    .displays
-                    .get(&display_id)
-                    .and_then(|display| display.workspaces.first())
-                    .is_some_and(|workspace_id| inner.fullscreen_spaces.contains(workspace_id))
+                inner.displays.get(&display_id).is_some_and(|display| {
+                    inner.fullscreen_spaces.contains(&display.current_workspace)
+                })
             });
 
         let s = self.clone();
@@ -887,8 +909,10 @@ impl MockState {
                     .windows
                     .values()
                     .filter_map(|w| {
-                        (w.pid == pid && spaces.contains(&w.workspace_id))
-                            .then_some(s.create_window(w.id))
+                        (w.pid == pid
+                            && (spaces.contains(&w.workspace_id)
+                                || w.extra_workspaces.iter().any(|ws| spaces.contains(ws))))
+                        .then_some(s.create_window(w.id))
                     })
                     .collect::<Vec<_>>();
                 windows.sort_unstable_by_key(|window| window.id());
@@ -903,7 +927,11 @@ impl MockState {
                     .force_read()
                     .windows
                     .values()
-                    .filter_map(|w| (w.workspace_id == workspace_id).then_some(w.id))
+                    .filter_map(|w| {
+                        (w.workspace_id == workspace_id
+                            || w.extra_workspaces.contains(&workspace_id))
+                        .then_some(w.id)
+                    })
                     .collect::<Vec<_>>();
                 // Sort the windows to keep the tests consistent
                 windows.sort_unstable();

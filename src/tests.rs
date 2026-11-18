@@ -1,4 +1,5 @@
 mod consume_expel;
+mod desktop_mock;
 mod display;
 mod focus_or_virtual;
 mod harness;

@@ -14,7 +14,7 @@ use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{
     CGImage, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
 };
-use objc2_foundation::{NSArray, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSRect, NSSize, NSString, ns_string};
 
 use super::Rect;
 use super::layers::{ICON_SIZE, ns_number};
@@ -102,11 +102,11 @@ fn cg_image(image: &NSImage) -> Option<CFRetained<CGImage>> {
 /// The desktop picture file of display `display_id`, if it has one (a
 /// solid colour or a dynamic wallpaper may not).
 pub(super) fn desktop_picture(mtm: MainThreadMarker, display_id: u32) -> Option<String> {
-    let key = NSString::from_str("NSScreenNumber");
+    let key = ns_string!("NSScreenNumber");
     let screen = NSScreen::screens(mtm).into_iter().find(|screen| {
         let description = screen.deviceDescription();
         let number: Option<Retained<AnyObject>> =
-            unsafe { msg_send![&*description, objectForKey: &*key] };
+            unsafe { msg_send![&*description, objectForKey: key] };
         number.is_some_and(|n| {
             let id: u32 = unsafe { msg_send![&*n, unsignedIntValue] };
             id == display_id
@@ -251,9 +251,8 @@ pub struct WindowServerInfo {
     pub(super) menubars: Vec<(i32, Rect)>,
 }
 
-fn get(dict: &AnyObject, key: &str) -> Option<Retained<AnyObject>> {
-    let key = NSString::from_str(key);
-    unsafe { msg_send![dict, objectForKey: &*key] }
+fn get(dict: &AnyObject, key: &NSString) -> Option<Retained<AnyObject>> {
+    unsafe { msg_send![dict, objectForKey: key] }
 }
 
 fn number(object: &AnyObject) -> f64 {
@@ -270,29 +269,35 @@ pub fn window_server_info() -> WindowServerInfo {
     // SAFETY: a CFArray of CFDictionary is toll-free bridged to NSArray.
     let array = unsafe { &*(&raw const *list).cast::<NSArray<AnyObject>>() };
     for entry in array {
-        let Some(id) = get(&entry, "kCGWindowNumber").map(|n| number(&n)) else {
+        let Some(id) = get(&entry, ns_string!("kCGWindowNumber")).map(|n| number(&n)) else {
             continue;
         };
-        let Some(bounds) = get(&entry, "kCGWindowBounds") else {
+        let Some(bounds) = get(&entry, ns_string!("kCGWindowBounds")) else {
             continue;
         };
         let field = |key| get(&bounds, key).map_or(0.0, |n| number(&n));
-        let frame = Rect::new(field("X"), field("Y"), field("Width"), field("Height"));
+        let frame = Rect::new(
+            field(ns_string!("X")),
+            field(ns_string!("Y")),
+            field(ns_string!("Width")),
+            field(ns_string!("Height")),
+        );
         #[allow(clippy::cast_possible_truncation)]
         let id = id as i32;
-        let text = |key| {
-            get(&entry, key)
-                .and_then(|s| s.downcast::<NSString>().ok())
-                .map(|s| s.to_string())
-                .unwrap_or_default()
-        };
-        let (owner, name) = (text("kCGWindowOwnerName"), text("kCGWindowName"));
-        if owner == "Dock" && name.starts_with("Wallpaper-") {
+        let text = |key| get(&entry, key).and_then(|s| s.downcast::<NSString>().ok());
+        let owner = text(ns_string!("kCGWindowOwnerName"));
+        if owner.as_deref() == Some(ns_string!("Dock"))
+            && text(ns_string!("kCGWindowName")).is_some_and(|name| unsafe {
+                msg_send![&*name, hasPrefix: ns_string!("Wallpaper-")]
+            })
+        {
             info.wallpapers.push((id, frame));
-        } else if owner == "Window Server" && name == "Menubar" {
+        } else if owner.as_deref() == Some(ns_string!("Window Server"))
+            && text(ns_string!("kCGWindowName")).as_deref() == Some(ns_string!("Menubar"))
+        {
             info.menubars.push((id, frame));
         } else {
-            let alpha = get(&entry, "kCGWindowAlpha").map_or(1.0, |n| number(&n));
+            let alpha = get(&entry, ns_string!("kCGWindowAlpha")).map_or(1.0, |n| number(&n));
             if alpha <= 0.0 || frame.w < 1.0 || frame.h < 1.0 {
                 info.invisible.insert(id);
             }
@@ -303,14 +308,12 @@ pub fn window_server_info() -> WindowServerInfo {
 }
 
 /// A Core Image filter by name with its inputs set.
-fn ci_filter(name: &str, inputs: &[(&str, &AnyObject)]) -> Option<Retained<AnyObject>> {
+fn ci_filter(name: &NSString, inputs: &[(&NSString, &AnyObject)]) -> Option<Retained<AnyObject>> {
     let class = AnyClass::get(c"CIFilter")?;
-    let name = NSString::from_str(name);
-    let filter: Option<Retained<AnyObject>> = unsafe { msg_send![class, filterWithName: &*name] };
+    let filter: Option<Retained<AnyObject>> = unsafe { msg_send![class, filterWithName: name] };
     let filter = filter?;
     for (key, value) in inputs {
-        let key = NSString::from_str(key);
-        let _: () = unsafe { msg_send![&*filter, setValue: *value, forKey: &*key] };
+        let _: () = unsafe { msg_send![&*filter, setValue: *value, forKey: *key] };
     }
     Some(filter)
 }
@@ -350,11 +353,11 @@ fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImag
         let scale = ns_number(SCALE);
         let aspect = ns_number(1.0);
         let small = ci_filter(
-            "CILanczosScaleTransform",
+            ns_string!("CILanczosScaleTransform"),
             &[
-                ("inputImage", &input),
-                ("inputScale", &scale),
-                ("inputAspectRatio", &aspect),
+                (ns_string!("inputImage"), &input),
+                (ns_string!("inputScale"), &scale),
+                (ns_string!("inputAspectRatio"), &aspect),
             ],
         )?;
         let small: Option<Retained<AnyObject>> = unsafe { msg_send![&*small, outputImage] };
@@ -363,8 +366,11 @@ fn blurred(image: &CGImage, width: f64, radius: f64) -> Option<CFRetained<CGImag
         let clamped: Retained<AnyObject> = unsafe { msg_send![&*small, imageByClampingToExtent] };
         let radius = ns_number(radius * pixels_per_point * SCALE);
         let blur = ci_filter(
-            "CIGaussianBlur",
-            &[("inputImage", &clamped), ("inputRadius", &radius)],
+            ns_string!("CIGaussianBlur"),
+            &[
+                (ns_string!("inputImage"), &clamped),
+                (ns_string!("inputRadius"), &radius),
+            ],
         )?;
         let output: Option<Retained<AnyObject>> = unsafe { msg_send![&*blur, outputImage] };
         let output = output?;

@@ -188,6 +188,10 @@ pub struct Live {
     pending: HashMap<i32, Wanted>,
     /// Identifies the current lookup; older ones are ignored.
     request: u64,
+    /// Whether `request` is still awaiting `SCShareableContent` completion, so
+    /// rapid relayouts of existing windows update `pending` in place instead
+    /// of cancelling and restarting the XPC lookup on every keypress.
+    in_flight: bool,
     tx: Sender<(u64, Option<SendShareableContent>)>,
     rx: Receiver<(u64, Option<SendShareableContent>)>,
     showing: Rc<RefCell<HashSet<i32>>>,
@@ -203,10 +207,18 @@ impl Live {
             stopping: Vec::new(),
             pending: HashMap::new(),
             request: 0,
+            in_flight: false,
             tx,
             rx,
             showing: Rc::new(RefCell::new(HashSet::new())),
         }
+    }
+
+    /// Forces the next [`Self::set`] with unstreamed windows to query
+    /// `SCShareableContent` afresh (called when windows were added or rebuilt).
+    pub fn invalidate_lookup(&mut self) {
+        self.in_flight = false;
+        self.request += 1;
     }
 
     /// Whether `window_id` already shows live frames.
@@ -232,14 +244,15 @@ impl Live {
         let keep: HashSet<i32> = wanted.iter().map(|w| w.window_id).collect();
         self.prune_stopped();
         let now = Instant::now();
-        for (id, stream) in std::mem::take(&mut self.streams) {
-            if keep.contains(&id) {
-                self.streams.insert(id, stream);
-            } else {
-                stream.stop();
-                self.stopping.push((now, stream));
-            }
-        }
+        self.stopping
+            .extend(
+                self.streams
+                    .extract_if(|id, _| !keep.contains(id))
+                    .map(|(_, stream)| {
+                        stream.stop();
+                        (now, stream)
+                    }),
+            );
         self.showing
             .borrow_mut()
             .retain(|id| self.streams.contains_key(id));
@@ -253,9 +266,15 @@ impl Live {
             }
         }
         if self.pending.is_empty() {
+            self.in_flight = false;
+            self.request += 1;
+            return;
+        }
+        if self.in_flight {
             return;
         }
         self.request += 1;
+        self.in_flight = true;
         let (request, tx, wake) = (self.request, self.tx.clone(), self.sender.clone());
         let handler = RcBlock::new(
             move |content: *mut SCShareableContent, error: *mut NSError| {
@@ -287,16 +306,17 @@ impl Live {
             if request != self.request {
                 continue;
             }
-            let pending = std::mem::take(&mut self.pending);
+            self.in_flight = false;
+            let mut pending = std::mem::take(&mut self.pending);
             let Some(SendShareableContent(content)) = content else {
                 continue;
             };
             let windows = unsafe { content.windows() };
             for window in &windows {
-                let Ok(id) = i32::try_from(unsafe { window.windowID() }) else {
-                    continue;
-                };
-                let Some(want) = pending.get(&id) else {
+                let Some((id, want)) = i32::try_from(unsafe { window.windowID() })
+                    .ok()
+                    .and_then(|id| pending.remove(&id).map(|want| (id, want)))
+                else {
                     continue;
                 };
                 let frame = unsafe { window.frame() };
@@ -306,12 +326,13 @@ impl Live {
                         &window,
                     )
                 };
-                if let Some(stream) = self.start(&filter, frame.size.width, frame.size.height, want)
+                if let Some(stream) =
+                    self.start(&filter, frame.size.width, frame.size.height, &want)
                 {
                     self.streams.insert(id, stream);
                 }
             }
-            for id in pending.keys().filter(|id| !self.streams.contains_key(id)) {
+            for id in pending.keys() {
                 debug!("overview: window {id} can't stream live");
             }
         }
@@ -383,6 +404,7 @@ impl Live {
         }
         self.pending.clear();
         self.showing.borrow_mut().clear();
+        self.in_flight = false;
         self.request += 1;
     }
 }

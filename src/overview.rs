@@ -710,14 +710,10 @@ impl Spring {
         const STEP: f64 = 1.0 / 240.0;
         const MAX_STEPS: u32 = 720;
         let left = VISIBLE_REMAINDER * (self.to - self.from).abs().max(f64::EPSILON);
-        let mut settled_step = 0;
-        for step in (0..MAX_STEPS).rev() {
-            let t = f64::from(step) * STEP;
-            if (self.value(t) - self.to).abs() >= left {
-                settled_step = step + 1;
-                break;
-            }
-        }
+        let settled_step = (0..MAX_STEPS)
+            .rev()
+            .find(|&step| (self.value(f64::from(step) * STEP) - self.to).abs() >= left)
+            .map_or(0, |step| step + 1);
         // A zero duration means Core Animation's default (0.25 s).
         (f64::from(settled_step) * STEP).max(1.0 / 120.0)
     }

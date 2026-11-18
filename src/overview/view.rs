@@ -40,7 +40,7 @@ use objc2_app_kit::{
 };
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::CGImage;
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSPoint, NSRect, NSSize};
 use objc2_quartz_core::{CALayer, CATransaction, kCAGravityResize, kCAGravityResizeAspectFill};
 use tracing::{debug, warn};
 
@@ -49,7 +49,7 @@ use super::capture::{
 };
 pub use super::capture::{WindowServerInfo, window_server_info};
 use super::layers::{
-    Animated, CARD_RADIUS, FADE_KEY, add_tile, color, fade_out_at_end, row_label, set_contents,
+    Animated, CARD_RADIUS, add_tile, color, fade_key, fade_out_at_end, row_label, set_contents,
 };
 use super::live::{Live, Wanted};
 use super::{DisplayLayout, Rect, Spring};
@@ -586,13 +586,13 @@ impl OverviewManager {
         CATransaction::commit();
 
         // Forget windows that are gone.
-        let live: std::collections::HashSet<_> = self
+        let live: HashSet<&str> = self
             .targets
             .iter()
             .flatten()
-            .map(|target| target.key.clone())
+            .map(|target| target.key.as_str())
             .collect();
-        self.cache.retain(|key, _| live.contains(key));
+        self.cache.retain(|key, _| live.contains(key.as_str()));
 
         // Most important first: the focused window and its neighbours, then
         // the screen, the rest of the row, and the hidden rows last.
@@ -613,6 +613,7 @@ impl OverviewManager {
         self.reveal_since = Some(Instant::now());
         self.live_due = None;
         self.live_synced = false;
+        self.live.invalidate_lookup();
         let built = started.elapsed();
         if progress > 0.0 {
             self.ensure_live_synced();
@@ -986,9 +987,7 @@ impl OverviewManager {
             layer.set(p);
         }
         for panel in &self.panels {
-            panel
-                .root
-                .removeAnimationForKey(&NSString::from_str(FADE_KEY));
+            panel.root.removeAnimationForKey(fade_key());
         }
         CATransaction::commit();
         // Push the frame to the render server now rather than at the end of
@@ -1007,18 +1006,16 @@ impl OverviewManager {
         let done = RcBlock::new(move || {
             _ = sender.send(Event::OverviewTransitionDone { generation });
         });
+        let closing = spring.to < 0.5;
+        let shown = spring.visible_duration();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         unsafe { CATransaction::setCompletionBlock(Some(&done)) };
         for layer in self.layers() {
-            layer.animate(spring);
+            layer.animate(spring, shown);
         }
-        let closing = spring.to < 0.5;
-        let shown = spring.visible_duration();
         for panel in &self.panels {
-            panel
-                .root
-                .removeAnimationForKey(&NSString::from_str(FADE_KEY));
+            panel.root.removeAnimationForKey(fade_key());
             if closing {
                 fade_out_at_end(&panel.root, shown);
             }
@@ -1125,24 +1122,30 @@ impl OverviewManager {
                 return false;
             }
         }
+        let duration = spring.visible_duration();
         CATransaction::begin();
         CATransaction::setDisableActions(true);
         for (panel, layout) in self.panels.iter_mut().zip(layouts) {
             let (rest, open) = container_frames(layout);
-            panel.container.morph(rest, open, spring);
+            panel.container.morph(rest, open, spring, duration);
             for (row, strip) in panel.rows.iter_mut().zip(&layout.strips) {
                 row.viewport.set_ring(false);
-                row.viewport
-                    .morph(strip.viewport_rest, strip.viewport_overview, spring);
+                row.viewport.morph(
+                    strip.viewport_rest,
+                    strip.viewport_overview,
+                    spring,
+                    duration,
+                );
                 let (rest, open) = pan_frames(layout.size, strip.pan);
-                row.pan.morph(rest, open, spring);
-                row.label.morph(strip.label, strip.label, spring);
+                row.pan.morph(rest, open, spring, duration);
+                row.label.morph(strip.label, strip.label, spring, duration);
             }
             for (card, (window, _, best, rank)) in panel.cards.iter_mut().zip(cards_of(layout)) {
                 card.best = best;
                 card.rank = rank;
                 card.animated.set_ring(window.focused);
-                card.animated.morph(window.rest, window.overview, spring);
+                card.animated
+                    .morph(window.rest, window.overview, spring, duration);
             }
         }
         CATransaction::commit();

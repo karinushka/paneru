@@ -7,7 +7,7 @@ use objc2::{class, msg_send};
 use objc2_app_kit::NSFont;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::NSString;
+use objc2_foundation::{NSString, ns_string};
 use objc2_quartz_core::{
     CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
     CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAFillModeForwards, kCAGravityResizeAspect,
@@ -28,7 +28,9 @@ const TITLE_FONT_SIZE: f64 = 12.0;
 /// Size of a row's label text, in points.
 const LABEL_FONT_SIZE: f64 = 15.0;
 
-pub(super) const FADE_KEY: &str = "paneru.fade";
+pub(super) fn fade_key() -> &'static NSString {
+    ns_string!("paneru.fade")
+}
 
 /// How long the overlay takes to fade as a close lands.
 const FADE_SECS: f64 = 0.04;
@@ -123,21 +125,21 @@ pub(super) fn ns_number(v: f64) -> Retained<AnyObject> {
     unsafe { msg_send![class!(NSNumber), numberWithDouble: v] }
 }
 
-fn set_key_path(layer: &CALayer, key: &str, value: f64) {
-    let key = NSString::from_str(key);
+fn set_key_path(layer: &CALayer, key: &NSString, value: f64) {
     let value = ns_number(value);
     unsafe {
-        let _: () = msg_send![layer, setValue: &*value, forKeyPath: &*key];
+        let _: () = msg_send![layer, setValue: &*value, forKeyPath: key];
     }
 }
 
 fn spring_anim(
-    key: &str,
+    key: &NSString,
     from: &AnyObject,
     to: &AnyObject,
     spring: &Spring,
+    duration: f64,
 ) -> Retained<CASpringAnimation> {
-    let anim = CASpringAnimation::animationWithKeyPath(Some(&NSString::from_str(key)));
+    let anim = CASpringAnimation::animationWithKeyPath(Some(key));
     anim.setMass(1.0);
     anim.setStiffness(spring.stiffness());
     anim.setDamping(spring.damping());
@@ -146,7 +148,7 @@ fn spring_anim(
         anim.setFromValue(Some(from));
         anim.setToValue(Some(to));
     }
-    anim.setDuration(spring.visible_duration());
+    anim.setDuration(duration);
     anim
 }
 
@@ -154,7 +156,7 @@ fn spring_anim(
 /// on the render server: the real windows show at the moment the close
 /// lands even when the main thread is too busy to take the overlay down.
 pub(super) fn fade_out_at_end(layer: &CALayer, secs: f64) {
-    let fade = CABasicAnimation::animationWithKeyPath(Some(&NSString::from_str("opacity")));
+    let fade = CABasicAnimation::animationWithKeyPath(Some(ns_string!("opacity")));
     unsafe {
         fade.setFromValue(Some(&ns_number(1.0)));
         fade.setToValue(Some(&ns_number(0.0)));
@@ -163,7 +165,7 @@ pub(super) fn fade_out_at_end(layer: &CALayer, secs: f64) {
     fade.setDuration(FADE_SECS.min(secs));
     fade.setFillMode(unsafe { kCAFillModeForwards });
     fade.setRemovedOnCompletion(false);
-    layer.addAnimation_forKey(&fade, Some(&NSString::from_str(FADE_KEY)));
+    layer.addAnimation_forKey(&fade, Some(fade_key()));
 }
 
 pub(super) fn set_contents(layer: &CALayer, image: &CGImage) {
@@ -244,8 +246,16 @@ impl Animated {
 
     fn apply(&self, f: &Rect, opacity: f64) {
         self.layer.setPosition(centre(f));
-        set_key_path(&self.layer, "transform.scale.x", f.w / self.base.0);
-        set_key_path(&self.layer, "transform.scale.y", f.h / self.base.1);
+        set_key_path(
+            &self.layer,
+            ns_string!("transform.scale.x"),
+            f.w / self.base.0,
+        );
+        set_key_path(
+            &self.layer,
+            ns_string!("transform.scale.y"),
+            f.h / self.base.1,
+        );
         #[allow(clippy::cast_possible_truncation)]
         self.layer.setOpacity(opacity as f32);
     }
@@ -257,27 +267,37 @@ impl Animated {
         self.layer.setCornerRadius(self.corner * p);
     }
 
-    fn spring_between(&self, a: &Rect, b: &Rect, opacity: (f64, f64), spring: &Spring) {
+    fn spring_between(
+        &self,
+        a: &Rect,
+        b: &Rect,
+        opacity: (f64, f64),
+        spring: &Spring,
+        duration: f64,
+    ) {
         self.layer.removeAllAnimations();
         self.apply(b, opacity.1);
         let anims = [
             spring_anim(
-                "position",
+                ns_string!("position"),
                 &ns_value_point(centre(a)),
                 &ns_value_point(centre(b)),
                 spring,
+                duration,
             ),
             spring_anim(
-                "transform.scale.x",
+                ns_string!("transform.scale.x"),
                 &ns_number(a.w / self.base.0),
                 &ns_number(b.w / self.base.0),
                 spring,
+                duration,
             ),
             spring_anim(
-                "transform.scale.y",
+                ns_string!("transform.scale.y"),
                 &ns_number(a.h / self.base.1),
                 &ns_number(b.h / self.base.1),
                 spring,
+                duration,
             ),
         ];
         for anim in &anims {
@@ -286,22 +306,26 @@ impl Animated {
         }
         if (opacity.0 - opacity.1).abs() > f64::EPSILON {
             let fade = spring_anim(
-                "opacity",
+                ns_string!("opacity"),
                 &ns_number(opacity.0),
                 &ns_number(opacity.1),
                 spring,
+                duration,
             );
             let key = fade.keyPath();
             self.layer.addAnimation_forKey(&fade, key.as_deref());
         }
     }
 
-    /// Springs from progress `spring.from` to `spring.to`.
-    pub(super) fn animate(&self, spring: &Spring) {
+    /// Springs from progress `spring.from` to `spring.to` over `duration` seconds.
+    pub(super) fn animate(&self, spring: &Spring, duration: f64) {
         let (a, b) = (self.frame(spring.from), self.frame(spring.to));
         let opacity = (self.opacity_at(spring.from), self.opacity_at(spring.to));
-        self.spring_between(&a, &b, opacity, spring);
-        for (key, full) in [("borderWidth", self.ring), ("cornerRadius", self.corner)] {
+        self.spring_between(&a, &b, opacity, spring, duration);
+        for (key, full) in [
+            (ns_string!("borderWidth"), self.ring),
+            (ns_string!("cornerRadius"), self.corner),
+        ] {
             if full <= 0.0 {
                 continue;
             }
@@ -312,8 +336,9 @@ impl Animated {
                 &ns_number(at(spring.from)),
                 &ns_number(at(spring.to)),
                 spring,
+                duration,
             );
-            self.layer.addAnimation_forKey(&grow, None);
+            self.layer.addAnimation_forKey(&grow, Some(key));
         }
     }
 
@@ -324,7 +349,7 @@ impl Animated {
     /// model target instead of calling `removeAllAnimations()`, so repeated
     /// focus steps while an earlier slide is still in flight keep their live
     /// position and velocity rather than snapping to the previous target.
-    pub(super) fn morph(&mut self, rest: Rect, overview: Rect, spring: &Spring) {
+    pub(super) fn morph(&mut self, rest: Rect, overview: Rect, spring: &Spring, duration: f64) {
         let from = self.overview;
         self.rest = rest;
         self.overview = overview;
@@ -336,25 +361,35 @@ impl Animated {
             let (dx, dy) = (ca.x - cb.x, ca.y - cb.y);
             if dx.abs() > f64::EPSILON || dy.abs() > f64::EPSILON {
                 let anim = spring_anim(
-                    "position",
+                    ns_string!("position"),
                     &ns_value_point(CGPoint::new(dx, dy)),
                     &ns_value_point(CGPoint::new(0.0, 0.0)),
                     spring,
+                    duration,
                 );
                 anim.setAdditive(true);
                 let key = NSString::from_str(&format!("paneru.morph.{seq:08}.position"));
                 self.layer.addAnimation_forKey(&anim, Some(&key));
             }
-            for (axis, delta) in [
-                ("x", (from.w - overview.w) / self.base.0),
-                ("y", (from.h - overview.h) / self.base.1),
+            for (key_path, axis, delta) in [
+                (
+                    ns_string!("transform.scale.x"),
+                    "x",
+                    (from.w - overview.w) / self.base.0,
+                ),
+                (
+                    ns_string!("transform.scale.y"),
+                    "y",
+                    (from.h - overview.h) / self.base.1,
+                ),
             ] {
                 if delta.abs() > f64::EPSILON {
                     let anim = spring_anim(
-                        &format!("transform.scale.{axis}"),
+                        key_path,
                         &ns_number(delta),
                         &ns_number(0.0),
                         spring,
+                        duration,
                     );
                     anim.setAdditive(true);
                     let key = NSString::from_str(&format!("paneru.morph.{seq:08}.scale.{axis}"));
@@ -533,14 +568,18 @@ mod tests {
         let rest = Rect::new(0.0, 0.0, 1200.0, 800.0);
         let open_0 = Rect::new(1000.0, 100.0, 600.0, 400.0);
         let mut card = Animated::new(CALayer::new(), rest, open_0, (1.0, 1.0));
+        // Freeze the test layer's media clock so OS scheduler preemption >363ms
+        // under heavy parallel test load never expires animations mid-assertion.
+        card.layer.setSpeed(0.0);
         card.set(1.0);
 
         let spring = Spring::new(0.0, 1.0, 0.0, SPRING_RESPONSE);
+        let duration = spring.visible_duration();
         let mut clock = AnimationClock::default();
         let step = |card: &mut Animated, clock: &mut AnimationClock, target: Rect, now: f64| {
             CATransaction::begin();
             CATransaction::setDisableActions(true);
-            card.morph(rest, target, &spring);
+            card.morph(rest, target, &spring, duration);
             CATransaction::commit();
             clock.sync(&card.layer, now);
         };

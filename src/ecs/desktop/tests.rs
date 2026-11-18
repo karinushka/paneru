@@ -460,3 +460,173 @@ fn fullscreen_guest_rescue_moves_unassociated_guest_and_refuses_owner_and_sheet(
         })
         .run(commands);
 }
+
+#[test]
+fn desktop_create_without_and_with_focus_spawns_desktops() {
+    let harness = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+
+    let commands = vec![
+        tick(),                                                 // 0: initial 1 desktop
+        desktop_cmd(DesktopOperation::Create { focus: false }), // 1: create background desktop
+        desktop_cmd(DesktopOperation::Create { focus: true }),  // 2: create & focus new desktop
+    ];
+
+    harness
+        .on_iteration(0, |world, _| {
+            assert_eq!(world.resource::<DesktopCensus>().desktop_count(1), 1);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .on_iteration(1, |world, _| {
+            assert_eq!(world.resource::<DesktopCensus>().desktop_count(1), 2);
+            assert_eq!(
+                active_space_id(world),
+                TEST_WORKSPACE_ID,
+                "create without focus keeps current desktop active"
+            );
+        })
+        .on_iteration(2, |world, _| {
+            let census = world.resource::<DesktopCensus>();
+            assert_eq!(census.desktop_count(1), 3);
+            let third_id = census
+                .0
+                .display(1)
+                .unwrap()
+                .desktop_by_number(3)
+                .unwrap()
+                .id
+                .get();
+            assert_eq!(
+                active_space_id(world),
+                third_id,
+                "create with focus activates the newly created desktop"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn desktop_destroy_handles_empty_only_active_close_migration_and_last_desktop_guard() {
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(), // 0: settle
+        desktop_cmd(DesktopOperation::Destroy {
+            target: Some(DesktopTarget::Number {
+                number: 2,
+                display: None,
+            }),
+            empty_only: true,
+        }), // 1: refused because window 20 is on Desktop 2
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })), // 2: switch to Desktop 2
+        desktop_cmd(DesktopOperation::Destroy {
+            target: None,
+            empty_only: false,
+        }), // 3: close active Desktop 2 -> switches to Desktop 1 & migrates window 20
+        tick(), // 4: allow SpaceDestroyed Bookkeeping to despawn vacated strip
+        desktop_cmd(DesktopOperation::Destroy {
+            target: None,
+            empty_only: false,
+        }), // 5: refused by LastDesktop guard
+    ];
+
+    harness
+        .on_iteration(1, |world, _| {
+            assert_eq!(
+                world.resource::<DesktopCensus>().desktop_count(1),
+                2,
+                "populated desktop must not be destroyed when empty_only = true"
+            );
+        })
+        .on_iteration(2, move |world, _| {
+            assert_eq!(active_space_id(world), desktop_2);
+        })
+        .on_iteration(4, move |world, _| {
+            assert_eq!(world.resource::<DesktopCensus>().desktop_count(1), 1);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_on_workspace!(world, 10, TEST_WORKSPACE_ID);
+            crate::assert_on_workspace!(world, 20, TEST_WORKSPACE_ID);
+            let sid_1 = SpaceId::new(TEST_WORKSPACE_ID).unwrap();
+            assert_eq!(
+                world
+                    .non_send::<DesktopBridge>()
+                    .spaces_for_window(20)
+                    .unwrap(),
+                [sid_1]
+            );
+            let lingering = world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .any(|s| s.id() == desktop_2);
+            assert!(!lingering, "destroyed desktop strip must be despawned");
+        })
+        .on_iteration(5, |world, _| {
+            assert_eq!(
+                world.resource::<DesktopCensus>().desktop_count(1),
+                1,
+                "last desktop on display must never be destroyed"
+            );
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .run(commands);
+}
+
+#[test]
+fn desktop_reorder_and_swap_permute_display_spaces_including_non_adjacent_two_step() {
+    let harness = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    for ws in [6u64, 7, 8] {
+        harness.mock_state.add_space_on_display(1, ws, false);
+    }
+
+    let space_order = |world: &bevy::ecs::world::World| -> Vec<u64> {
+        world
+            .resource::<DesktopCensus>()
+            .0
+            .display(1)
+            .unwrap()
+            .spaces
+            .iter()
+            .map(|s| s.id.get())
+            .collect()
+    };
+
+    let commands = vec![
+        tick(), // 0: initial [2, 6, 7, 8]
+        desktop_cmd(DesktopOperation::Reorder(DesktopTarget::Number {
+            number: 3,
+            display: None,
+        })), // 1: move active (2) to index 2 -> [6, 7, 2, 8]
+        desktop_cmd(DesktopOperation::Swap(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })), // 2: adjacent swap (index 2 <-> index 1) -> [6, 2, 7, 8]
+        desktop_cmd(DesktopOperation::Swap(DesktopTarget::Number {
+            number: 4,
+            display: None,
+        })), // 3: non-adjacent two-step swap (index 1 <-> index 3) -> [6, 8, 7, 2]
+    ];
+
+    harness
+        .on_iteration(0, move |world, _| {
+            assert_eq!(space_order(world), vec![TEST_WORKSPACE_ID, 6, 7, 8]);
+        })
+        .on_iteration(1, move |world, _| {
+            assert_eq!(space_order(world), vec![6, 7, TEST_WORKSPACE_ID, 8]);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .on_iteration(2, move |world, _| {
+            assert_eq!(space_order(world), vec![6, TEST_WORKSPACE_ID, 7, 8]);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .on_iteration(3, move |world, _| {
+            assert_eq!(space_order(world), vec![6, 8, 7, TEST_WORKSPACE_ID]);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .run(commands);
+}

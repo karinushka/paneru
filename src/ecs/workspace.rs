@@ -779,7 +779,7 @@ fn workspace_created_handler(
         };
 
         if workspaces.into_iter().any(|strip| strip.id() == *space_id) {
-            warn!("Workspace {space_id} already exists!");
+            debug!("Workspace {space_id} already exists");
             continue;
         }
         let target_display_id = census

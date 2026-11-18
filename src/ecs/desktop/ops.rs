@@ -30,7 +30,7 @@ use crate::manager::spaces::{
 };
 use crate::platform::WinID;
 
-type DesktopStrips<'w, 's> = Query<
+pub(super) type DesktopStrips<'w, 's> = Query<
     'w,
     's,
     (
@@ -46,14 +46,14 @@ type DesktopStrips<'w, 's> = Query<
 
 #[derive(SystemParam)]
 pub(super) struct DesktopOpWorld<'w, 's> {
-    displays: Query<'w, 's, (Entity, &'static Display, Has<ActiveDisplayMarker>)>,
-    strips: DesktopStrips<'w, 's>,
-    windows: Windows<'w, 's>,
-    opened_from: Query<'w, 's, &'static OpenedFrom>,
-    focus_history: Option<Res<'w, FocusHistory>>,
-    pending: ResMut<'w, PendingDesktopOps>,
-    census: ResMut<'w, DesktopCensus>,
-    commands: Commands<'w, 's>,
+    pub(super) displays: Query<'w, 's, (Entity, &'static Display, Has<ActiveDisplayMarker>)>,
+    pub(super) strips: DesktopStrips<'w, 's>,
+    pub(super) windows: Windows<'w, 's>,
+    pub(super) opened_from: Query<'w, 's, &'static OpenedFrom>,
+    pub(super) focus_history: Option<Res<'w, FocusHistory>>,
+    pub(super) pending: ResMut<'w, PendingDesktopOps>,
+    pub(super) census: ResMut<'w, DesktopCensus>,
+    pub(super) commands: Commands<'w, 's>,
 }
 
 /// Resolves a [`DesktopTarget`] against `census`.
@@ -115,7 +115,7 @@ fn resolve_directional_space<'a>(
     }
 }
 
-fn active_display_id(
+pub(super) fn active_display_id(
     displays: &Query<(Entity, &Display, Has<ActiveDisplayMarker>)>,
 ) -> Option<CGDirectDisplayID> {
     displays
@@ -124,7 +124,7 @@ fn active_display_id(
         .or_else(|| displays.iter().next().map(|(_, d, _)| d.id()))
 }
 
-fn sibling_space_ids(census: &SpaceCensus, target: &SpaceRecord) -> Vec<SpaceId> {
+pub(super) fn sibling_space_ids(census: &SpaceCensus, target: &SpaceRecord) -> Vec<SpaceId> {
     census
         .display(target.display_id)
         .map(|d| {
@@ -137,7 +137,7 @@ fn sibling_space_ids(census: &SpaceCensus, target: &SpaceRecord) -> Vec<SpaceId>
         .unwrap_or_default()
 }
 
-fn preferred_focus_on_space(
+pub(super) fn preferred_focus_on_space(
     space_id: SpaceId,
     strips: &DesktopStrips,
     focus_history: Option<&FocusHistory>,
@@ -164,7 +164,7 @@ fn preferred_focus_on_space(
     focus_history.and_then(|h| h.last_floating(raw))
 }
 
-fn save_active_strip_focus(
+pub(super) fn save_active_strip_focus(
     strips: &DesktopStrips,
     focused_entity: Option<Entity>,
     commands: &mut Commands,
@@ -575,14 +575,27 @@ pub(super) fn desktop_command_handler(
             DesktopOperation::MoveWindow { target, move_focus } => {
                 handle_move_window(target, *move_focus, &mut bridge, &mut world);
             }
-            DesktopOperation::Create { .. }
-            | DesktopOperation::Destroy { .. }
-            | DesktopOperation::Reorder(_)
-            | DesktopOperation::Swap(_)
-            | DesktopOperation::Pin(_)
+            DesktopOperation::Create { focus } => {
+                super::lifecycle::handle_create(*focus, &mut bridge, &mut world);
+            }
+            DesktopOperation::Destroy { target, empty_only } => {
+                super::lifecycle::handle_destroy(
+                    target.as_ref(),
+                    *empty_only,
+                    &mut bridge,
+                    &mut world,
+                );
+            }
+            DesktopOperation::Reorder(target) => {
+                super::lifecycle::handle_reorder(target, &mut bridge, &mut world);
+            }
+            DesktopOperation::Swap(target) => {
+                super::lifecycle::handle_swap(target, &mut bridge, &mut world);
+            }
+            DesktopOperation::Pin(_)
             | DesktopOperation::Unpin
             | DesktopOperation::Assign { .. } => {
-                debug!("desktop operation {op:?} queued for lifecycle/pinning commits");
+                debug!("desktop operation {op:?} queued for pinning/assign commit");
             }
         }
     }

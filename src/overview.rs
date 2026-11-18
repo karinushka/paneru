@@ -36,15 +36,6 @@ impl Rect {
             && other.y < self.y + self.h
     }
 
-    /// Whether `other` lies entirely inside this rectangle (within half a
-    /// point).
-    pub fn encloses(&self, other: &Self) -> bool {
-        other.x >= self.x - 0.5
-            && other.y >= self.y - 0.5
-            && other.x + other.w <= self.x + self.w + 0.5
-            && other.y + other.h <= self.y + self.h + 0.5
-    }
-
     pub fn contains(&self, x: f64, y: f64) -> bool {
         x >= self.x && x < self.x + self.w && y >= self.y && y < self.y + self.h
     }
@@ -714,10 +705,7 @@ mod tests {
     }
 
     #[test]
-    fn rect_overlap_and_enclosure() {
-        let screen = Rect::new(0.0, 0.0, 100.0, 100.0);
-        assert!(screen.encloses(&Rect::new(0.0, 0.0, 100.0, 100.0)));
-        assert!(!screen.encloses(&Rect::new(90.0, 0.0, 20.0, 10.0)));
+    fn rect_overlap() {
         let a = Rect::new(0.0, 0.0, 50.0, 50.0);
         assert!(a.intersects(&Rect::new(40.0, 40.0, 20.0, 20.0)));
         // Side by side columns only touch.

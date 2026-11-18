@@ -20,8 +20,8 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::schedule::common_conditions::{on_message, resource_equals};
-use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res, ResMut, SystemParam};
+use bevy::ecs::schedule::common_conditions::on_message;
+use bevy::ecs::system::{Commands, Local, NonSend, NonSendMut, Query, Res, ResMut, SystemParam};
 use objc2_core_foundation::CGPoint;
 use tracing::debug;
 
@@ -232,12 +232,13 @@ pub fn register_overview(app: &mut App) {
         )
         .add_systems(Update, overview_tick.run_if(overview_tick_needed))
         // After every layout system has written this frame's targets.
-        .add_systems(
-            Last,
-            overview_follow_layout
-                .run_if(resource_equals(OverviewPhase::Open))
-                .run_if(overview_layout_dirty),
-        );
+        .add_systems(Last, configure_overview_follow(overview_follow_layout));
+}
+
+fn configure_overview_follow<M>(
+    system: impl bevy::ecs::schedule::IntoScheduleConfigs<bevy::ecs::system::ScheduleSystem, M>,
+) -> bevy::ecs::schedule::ScheduleConfigs<bevy::ecs::system::ScheduleSystem> {
+    system.run_if(overview_follow_needed)
 }
 
 fn overview_tick_needed(
@@ -1094,13 +1095,27 @@ type ChangedOverviewWindows<'w, 's> = Query<
     ),
 >;
 
-fn overview_layout_dirty(
+fn overview_follow_needed(
+    phase: Res<OverviewPhase>,
     changed_strips: ChangedOverviewStrips,
     changed_windows: ChangedOverviewWindows,
     mut removed_windows: RemovedComponents<Window>,
+    mut pending_while_opening: Local<bool>,
 ) -> bool {
-    let any_removed = removed_windows.read().count() > 0;
-    any_removed || !changed_strips.is_empty() || !changed_windows.is_empty()
+    let dirty = removed_windows.read().count() > 0
+        || !changed_strips.is_empty()
+        || !changed_windows.is_empty();
+    match *phase {
+        OverviewPhase::Open => dirty || std::mem::replace(&mut *pending_while_opening, false),
+        OverviewPhase::Opening | OverviewPhase::Scrubbing => {
+            *pending_while_opening |= dirty;
+            false
+        }
+        OverviewPhase::Closed | OverviewPhase::Closing => {
+            *pending_while_opening = false;
+            false
+        }
+    }
 }
 
 /// While open, re-snapshots the layout whenever paneru changed it (a hotkey

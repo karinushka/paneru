@@ -162,13 +162,15 @@ struct Card {
     best: bool,
     /// Capture order (lower first), see [`Rank`].
     rank: Rank,
-    /// Where the window is on screen (absolute CG), when it can be captured
-    /// as a screen region instead of on its own: fully on screen, on the
-    /// active row, and not under a floating window. A region capture shows
-    /// what is really there, including the blur macOS draws behind a
-    /// translucent window, which a capture of the window alone renders as
-    /// flat grey.
-    screen_rect: Option<Rect>,
+}
+
+impl Card {
+    fn shot(&self) -> Shot {
+        Shot::Window {
+            id: self.window_id,
+            best: self.best,
+        }
+    }
 }
 
 /// Capture order, most important first. The focused window and the ones
@@ -370,13 +372,36 @@ fn visible_set<K>(layout: &DisplayLayout<K>, margin: f64) -> HashSet<i32> {
         .collect()
 }
 
-/// Cards in the order the panels hold them: every row's tiled windows,
-/// then every floating window (drawn on top).
-fn card_order<K>(layout: &DisplayLayout<K>) -> impl Iterator<Item = &super::WindowPlacement<K>> {
-    let windows = || layout.strips.iter().flat_map(|s| s.windows.iter());
-    windows()
+fn strip_cards<K>(
+    strip: &super::StripPlacement<K>,
+) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, Rank)> {
+    let focus = strip
+        .windows
+        .iter()
         .filter(|w| !w.floating)
-        .chain(windows().filter(|w| w.floating))
+        .position(|w| w.focused);
+    let mut column = 0;
+    strip.windows.iter().map(move |window| {
+        let distance = if window.floating {
+            None
+        } else {
+            column += 1;
+            focus.map(|f| f.abs_diff(column - 1))
+        };
+        let rank = Rank::of_card(strip.active, window.focused, window.floating, distance);
+        (window, strip.active, rank)
+    })
+}
+
+/// Cards in the order the panels hold them: every row's tiled windows,
+/// then every floating window (drawn on top), paired with `(best, rank)`.
+fn cards_of<K>(
+    layout: &DisplayLayout<K>,
+) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, Rank)> {
+    let all = || layout.strips.iter().flat_map(strip_cards);
+    all()
+        .filter(|(w, ..)| !w.floating)
+        .chain(all().filter(|(w, ..)| w.floating))
 }
 
 impl OverviewManager {
@@ -546,13 +571,7 @@ impl OverviewManager {
             }
             let previews = self.previews;
             for card in panel.cards.iter().filter(|_| previews) {
-                let shot = card.screen_rect.map_or(
-                    Shot::Window {
-                        id: card.window_id,
-                        best: card.best,
-                    },
-                    |rect| Shot::Region { rect, below },
-                );
+                let shot = card.shot();
                 let key = format!("window {}", card.window_id);
                 let fresh = card.rank.wants_fresh();
                 let index = self.target(vec![card.content.clone()], true, card.best, fresh, &key);
@@ -872,36 +891,7 @@ impl OverviewManager {
             container.layer.addSublayer(&pan.layer);
             pan.set(0.0);
 
-            let focus = strip
-                .windows
-                .iter()
-                .filter(|w| !w.floating)
-                .position(|w| w.focused);
-            let floating_frames: Vec<Rect> = strip
-                .windows
-                .iter()
-                .filter(|w| w.floating)
-                .map(|w| w.rest)
-                .collect();
-            let display = Rect::new(0.0, 0.0, b.w, b.h);
-            let mut column = 0;
-            for window in &strip.windows {
-                let covered =
-                    !window.floating && floating_frames.iter().any(|f| f.intersects(&window.rest));
-                // Floating windows are captured on their own: one can sit
-                // behind tiled windows, and its region would show them.
-                let screen_rect = (strip.active
-                    && !window.floating
-                    && display.encloses(&window.rest)
-                    && !covered)
-                    .then(|| window.rest.offset(b.x, b.y));
-                let distance = if window.floating {
-                    None
-                } else {
-                    column += 1;
-                    focus.map(|f| f.abs_diff(column - 1))
-                };
-                let rank = Rank::of_card(strip.active, window.focused, window.floating, distance);
+            for (window, best, rank) in strip_cards(strip) {
                 let mut card =
                     Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
                 card.layer.setMasksToBounds(true);
@@ -946,9 +936,8 @@ impl OverviewManager {
                     animated: card,
                     content,
                     window_id: window.window_id,
-                    best: strip.active,
+                    best,
                     rank,
-                    screen_rect,
                 };
                 if window.floating {
                     floating.push(entry);
@@ -1092,7 +1081,6 @@ impl OverviewManager {
                             window_id: card.window_id,
                             layer: card.content.clone(),
                             scale,
-                            region: card.screen_rect,
                         };
                         (card.rank, want)
                     })
@@ -1138,7 +1126,7 @@ impl OverviewManager {
                 .cards
                 .iter()
                 .map(|c| c.window_id)
-                .eq(card_order(layout).map(|w| w.window_id));
+                .eq(cards_of(layout).map(|(w, ..)| w.window_id));
             if panel.rows.len() != layout.strips.len() || !same_cards {
                 return false;
             }
@@ -1156,7 +1144,9 @@ impl OverviewManager {
                 row.pan.morph(rest, open, spring);
                 row.label.morph(strip.label, strip.label, spring);
             }
-            for (card, window) in panel.cards.iter_mut().zip(card_order(layout)) {
+            for (card, (window, best, rank)) in panel.cards.iter_mut().zip(cards_of(layout)) {
+                card.best = best;
+                card.rank = rank;
                 card.animated.set_ring(window.focused);
                 card.animated.morph(window.rest, window.overview, spring);
             }
@@ -1177,7 +1167,7 @@ impl OverviewManager {
             for (row, strip) in panel.rows.iter_mut().zip(&layout.strips) {
                 row.viewport.rest = strip.viewport_rest;
             }
-            for (card, window) in panel.cards.iter_mut().zip(card_order(layout)) {
+            for (card, (window, ..)) in panel.cards.iter_mut().zip(cards_of(layout)) {
                 card.animated.rest = window.rest;
             }
         }
@@ -1290,5 +1280,100 @@ mod tests {
         assert_eq!(ranks.first(), Some(&Rank::Focused));
         assert!(Rank::Focused.wants_fresh() && Rank::Neighbour.wants_fresh());
         assert!(!Rank::Row.wants_fresh());
+    }
+
+    #[test]
+    fn active_row_cards_always_capture_their_own_window_not_a_screen_region() {
+        use crate::overview::{Metrics, StripInput, WindowInput, layout_display};
+
+        // Reproduces the 3-window strip (`[Gmail, Meet, Ghostty]` on 3840x2160)
+        // where `Meet` sits inside the display bounds while neighbours sit off
+        // left/right or slide underneath: every card must capture its own
+        // `window_id` (`Shot::Window`), never a screen region (`Shot::Region`),
+        // and `cards_of` recomputes ranks when focus moves right.
+        let make_layout = |focused_idx: usize| {
+            let strips = vec![StripInput {
+                virtual_index: 0,
+                active: true,
+                windows: vec![
+                    WindowInput {
+                        key: 1,
+                        window_id: 101,
+                        layout_frame: Rect::new(-1572.0, 0.0, 2328.0, 2160.0),
+                        real_frame: Some(Rect::new(-1572.0, 0.0, 2328.0, 2160.0)),
+                        floating: false,
+                        focused: focused_idx == 0,
+                    },
+                    WindowInput {
+                        key: 2,
+                        window_id: 102,
+                        layout_frame: Rect::new(756.0, 0.0, 2328.0, 2160.0),
+                        real_frame: Some(Rect::new(350.0, 0.0, 2328.0, 2160.0)),
+                        floating: false,
+                        focused: focused_idx == 1,
+                    },
+                    WindowInput {
+                        key: 3,
+                        window_id: 103,
+                        layout_frame: Rect::new(3084.0, 0.0, 2328.0, 2160.0),
+                        real_frame: Some(Rect::new(3835.0, 0.0, 2328.0, 2160.0)),
+                        floating: false,
+                        focused: focused_idx == 2,
+                    },
+                ],
+            }];
+            layout_display((3840.0, 2160.0), &strips, 1.0, &Metrics::default())
+        };
+
+        let layout = make_layout(0);
+        let initial_ranks: Vec<_> = cards_of(&layout)
+            .map(|(window, best, rank)| {
+                let card = Card {
+                    animated: Animated::new(
+                        CALayer::new(),
+                        window.rest,
+                        window.overview,
+                        (1.0, 1.0),
+                    ),
+                    content: CALayer::new(),
+                    window_id: window.window_id,
+                    best,
+                    rank,
+                };
+                assert_eq!(
+                    card.shot(),
+                    Shot::Window {
+                        id: window.window_id,
+                        best: true,
+                    },
+                    "window {} must capture by window_id, not display region",
+                    window.window_id,
+                );
+                (window.window_id, best, rank)
+            })
+            .collect();
+        assert_eq!(
+            initial_ranks,
+            [
+                (101, true, Rank::Focused),
+                (102, true, Rank::Neighbour),
+                (103, true, Rank::Row),
+            ]
+        );
+
+        // Moving focus all the way to the rightmost window updates `cards_of`
+        // so `relayout` promotes the rightmost card to `Rank::Focused`.
+        let moved = make_layout(2);
+        let updated_ranks: Vec<_> = cards_of(&moved)
+            .map(|(w, best, rank)| (w.window_id, best, rank))
+            .collect();
+        assert_eq!(
+            updated_ranks,
+            [
+                (101, true, Rank::Row),
+                (102, true, Rank::Neighbour),
+                (103, true, Rank::Focused),
+            ]
+        );
     }
 }

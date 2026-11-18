@@ -8,10 +8,9 @@
 //!
 //! A window captured on its own keeps drawing as long as part of it is on
 //! screen, which paneru guarantees: parked windows keep a sliver visible, so
-//! even windows on hidden rows stream. On its own, though, a translucent
-//! window's blurred backdrop comes out flat grey, so a window fully on
-//! screen streams its region of the display instead (everything but
-//! paneru's own windows), which shows the real blur.
+//! even windows on hidden rows stream. Capturing each window by its own
+//! `WindowServer` id keeps every card isolated from neighbouring windows,
+//! desktop wallpaper, and overlays even while the real strip is animating.
 //!
 //! Streams only run while the overview is up; [`Live::stop_all`] ends them.
 
@@ -28,10 +27,9 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject};
 use objc2::{
     AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
 };
-use objc2_core_foundation::{CGPoint, CGRect, CGSize};
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::CVPixelBufferGetIOSurface;
-use objc2_foundation::{NSArray, NSError};
+use objc2_foundation::NSError;
 use objc2_quartz_core::{CALayer, CATransaction};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamOutput,
@@ -39,7 +37,6 @@ use objc2_screen_capture_kit::{
 };
 use tracing::{debug, warn};
 
-use super::Rect;
 use crate::events::{Event, EventSender};
 
 /// Frames per second of a live preview.
@@ -52,9 +49,6 @@ pub struct Wanted {
     /// Pixels per point to stream at (the card's sharpness when fully open
     /// matters more for the focused window than for far-away ones).
     pub scale: f64,
-    /// Stream this part of the screen (absolute CG) instead of the window
-    /// alone; see the module docs.
-    pub region: Option<Rect>,
 }
 
 struct OutputIvars {
@@ -164,7 +158,6 @@ impl LiveOutput {
 struct Stream {
     capture: Retained<SCStream>,
     output: Retained<LiveOutput>,
-    region: Option<Rect>,
 }
 
 impl Stream {
@@ -236,12 +229,11 @@ impl Live {
     /// the rest stop, and new ones start once `ScreenCaptureKit` has
     /// listed the windows (asynchronously; see [`Live::poll`]).
     pub fn set(&mut self, wanted: Vec<Wanted>) {
-        let keep: HashMap<i32, Option<Rect>> =
-            wanted.iter().map(|w| (w.window_id, w.region)).collect();
+        let keep: HashSet<i32> = wanted.iter().map(|w| w.window_id).collect();
         self.prune_stopped();
         let now = Instant::now();
         for (id, stream) in std::mem::take(&mut self.streams) {
-            if keep.get(&id) == Some(&stream.region) {
+            if keep.contains(&id) {
                 self.streams.insert(id, stream);
             } else {
                 stream.stop();
@@ -299,45 +291,12 @@ impl Live {
             let Some(SendShareableContent(content)) = content else {
                 continue;
             };
-            // Region streams leave out paneru's own windows: the overview
-            // panels on top, and the borders.
-            let pid = i32::try_from(std::process::id()).unwrap_or_default();
-            let ours: Vec<_> = unsafe { content.applications() }
-                .iter()
-                .filter(|app| unsafe { app.processID() } == pid)
-                .collect();
-            let ours = NSArray::from_retained_slice(&ours);
-            let displays = unsafe { content.displays() };
             let windows = unsafe { content.windows() };
-            for want in pending.values().filter(|want| want.region.is_some()) {
-                let Some(region) = want.region else { continue };
-                let display = displays.iter().find(|display| {
-                    let f = unsafe { display.frame() };
-                    Rect::new(f.origin.x, f.origin.y, f.size.width, f.size.height).encloses(&region)
-                });
-                let Some(display) = display else { continue };
-                let filter = unsafe {
-                    SCContentFilter::initWithDisplay_excludingApplications_exceptingWindows(
-                        SCContentFilter::alloc(),
-                        &display,
-                        &ours,
-                        &NSArray::new(),
-                    )
-                };
-                let origin = unsafe { display.frame() }.origin;
-                let source = CGRect::new(
-                    CGPoint::new(region.x - origin.x, region.y - origin.y),
-                    CGSize::new(region.w, region.h),
-                );
-                if let Some(stream) = self.start(&filter, region.w, region.h, Some(source), want) {
-                    self.streams.insert(want.window_id, stream);
-                }
-            }
             for window in &windows {
                 let Ok(id) = i32::try_from(unsafe { window.windowID() }) else {
                     continue;
                 };
-                let Some(want) = pending.get(&id).filter(|want| want.region.is_none()) else {
+                let Some(want) = pending.get(&id) else {
                     continue;
                 };
                 let frame = unsafe { window.frame() };
@@ -347,8 +306,7 @@ impl Live {
                         &window,
                     )
                 };
-                if let Some(stream) =
-                    self.start(&filter, frame.size.width, frame.size.height, None, want)
+                if let Some(stream) = self.start(&filter, frame.size.width, frame.size.height, want)
                 {
                     self.streams.insert(id, stream);
                 }
@@ -359,20 +317,16 @@ impl Live {
         }
     }
 
-    /// Starts streaming `filter` (cut to `source`, in display points, if
-    /// given) at `width` × `height` points into `want`'s layer.
+    /// Starts streaming `filter` at `width` × `height` points into `want`'s
+    /// layer.
     fn start(
         &self,
         filter: &SCContentFilter,
         width: f64,
         height: f64,
-        source: Option<CGRect>,
         want: &Wanted,
     ) -> Option<Stream> {
         let config = unsafe { SCStreamConfiguration::new() };
-        if let Some(source) = source {
-            unsafe { config.setSourceRect(source) };
-        }
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         unsafe {
             config.setWidth((width * want.scale).round().max(1.0) as usize);
@@ -417,7 +371,6 @@ impl Live {
         Some(Stream {
             capture: stream,
             output,
-            region: want.region,
         })
     }
 

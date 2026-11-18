@@ -721,3 +721,80 @@ fn tabbed_display_stacks_only_expose_their_active_tab_to_the_overview() {
     let shown: Vec<Entity> = visible_windows(&strip).collect();
     assert_eq!(shown, vec![w1, w2, w3, w4]);
 }
+
+#[test]
+fn layout_change_during_opening_triggers_follow_once_open() {
+    #[derive(Resource, Default)]
+    struct FollowRuns(usize);
+
+    let mut app = App::new();
+    app.init_resource::<OverviewPhase>()
+        .init_resource::<FollowRuns>()
+        .add_systems(
+            Last,
+            configure_overview_follow(|mut runs: ResMut<FollowRuns>| {
+                runs.0 += 1;
+            }),
+        );
+
+    let w1 = app
+        .world_mut()
+        .spawn((
+            LayoutPosition(Origin::ZERO),
+            Bounds(Size::new(800, 600)),
+            FocusedMarker,
+        ))
+        .id();
+    let w2 = app
+        .world_mut()
+        .spawn((
+            LayoutPosition(Origin::new(800, 0)),
+            Bounds(Size::new(800, 600)),
+        ))
+        .id();
+    let mut strip = LayoutStrip::new(TEST_WORKSPACE_ID, 0);
+    strip.append(w1);
+    strip.append(w2);
+    app.world_mut().spawn((strip, ActiveWorkspaceMarker));
+
+    // 1. Changes while `Closed` are drained and do not trigger a stale follow on open.
+    app.update();
+    assert_eq!(app.world().resource::<FollowRuns>().0, 0);
+
+    *app.world_mut().resource_mut::<OverviewPhase>() = OverviewPhase::Opening;
+    app.update();
+    *app.world_mut().resource_mut::<OverviewPhase>() = OverviewPhase::Open;
+    app.update();
+    assert_eq!(
+        app.world().resource::<FollowRuns>().0,
+        0,
+        "opening without layout edits must not spuriously run overview_follow_layout"
+    );
+
+    // 2. Pressing `focus east` (`cmd - l`) or `swap` while `Opening` is still
+    //    in flight (~362ms) must NOT be lost: as soon as `OverviewPhase::Open`
+    //    is entered, `overview_follow_layout` must run once to catch up.
+    *app.world_mut().resource_mut::<OverviewPhase>() = OverviewPhase::Opening;
+    app.update();
+
+    app.world_mut().entity_mut(w1).remove::<FocusedMarker>();
+    app.world_mut().entity_mut(w2).insert(FocusedMarker);
+    app.update();
+    assert_eq!(
+        app.world().resource::<FollowRuns>().0,
+        0,
+        "must wait for opening spring to finish before morphing"
+    );
+
+    *app.world_mut().resource_mut::<OverviewPhase>() = OverviewPhase::Open;
+    app.update();
+    assert_eq!(
+        app.world().resource::<FollowRuns>().0,
+        1,
+        "focus/layout change during Opening must trigger follow once Open"
+    );
+
+    // Subsequent idle frames stay silent.
+    app.update();
+    assert_eq!(app.world().resource::<FollowRuns>().0, 1);
+}

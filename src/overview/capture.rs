@@ -137,6 +137,7 @@ pub(super) fn app_icon(pid: Pid) -> Option<CFRetained<CGImage>> {
 
 /// One capture to run off the main thread.
 #[derive(Clone)]
+#[cfg_attr(test, derive(Debug, PartialEq))]
 pub(super) enum Shot {
     Window {
         id: i32,

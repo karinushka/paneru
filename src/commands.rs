@@ -37,7 +37,8 @@ use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
 pub use crate::types::commands::{
-    Command, Direction, MouseMove, MoveFocus, Operation, ResizeDirection,
+    Command, DesktopOperation, DesktopTarget, Direction, MouseMove, MoveFocus, Operation,
+    ResizeDirection,
 };
 
 /// The strips that are selected on their display but not the one on screen —

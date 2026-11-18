@@ -297,6 +297,78 @@ pub enum Operation {
     CopyRule,
 }
 
+/// Identifies a native macOS Desktop or managed Space target.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopTarget {
+    /// Directional step (`West`, `East`, `First`, `Last`) on `display` (or active display).
+    Direction {
+        direction: Direction,
+        display: Option<u32>,
+    },
+    /// 1-based ordinary Desktop number (`1..=N`) on `display` (or active display).
+    Number { number: u32, display: Option<u32> },
+    /// Explicit native `SkyLight` Space ID (`id64`).
+    SpaceId(u64),
+}
+
+/// Target for per-window multi-Desktop pinning (`desktop pin ...`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopPinTarget {
+    /// Join all ordinary Desktops on the window's display and auto-join future Desktops.
+    All,
+    /// Join a specific existing Desktop on the window's display.
+    Desktop(DesktopTarget),
+}
+
+/// Target for process-wide Space assignment (`desktop assign ...`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopAssignTarget {
+    /// Assign owning process to all Desktops (`0x800`).
+    All,
+    /// Assign owning process to the currently active Desktop.
+    This,
+    /// Assign owning process to a specific Desktop.
+    Desktop(DesktopTarget),
+    /// Clear process-level Space assignment (`spaceID = 0`).
+    None,
+}
+
+/// Operations on native macOS Desktops (`SkyLight` / `WMBridge`).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DesktopOperation {
+    /// Instantaneously activates a Space without Mission Control's slide animation.
+    Focus(DesktopTarget),
+    /// Moves (or sends) the focused window and its tab group to a Desktop.
+    MoveWindow {
+        target: DesktopTarget,
+        move_focus: MoveFocus,
+    },
+    /// Appends a new Desktop on the active display, optionally switching to it.
+    Create { focus: bool },
+    /// Destroys the active (or targeted) Desktop, migrating windows unless `empty_only`.
+    Destroy {
+        target: Option<DesktopTarget>,
+        empty_only: bool,
+    },
+    /// Moves the active Desktop to a new position on its display.
+    Reorder(DesktopTarget),
+    /// Swaps the active Desktop with another Desktop on its display.
+    Swap(DesktopTarget),
+    /// Pins the focused window onto another Desktop or all Desktops.
+    Pin(DesktopPinTarget),
+    /// Collapses a pinned multi-Desktop window back onto the active Desktop.
+    Unpin,
+    /// Assigns the focused window's (or `pid`'s) process to Desktop(s).
+    Assign {
+        target: DesktopAssignTarget,
+        pid: Option<i32>,
+    },
+}
+
 /// Defines operations that can be performed on the mouse.
 #[derive(Clone, Debug, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -313,6 +385,8 @@ pub enum MouseMove {
 pub enum Command {
     /// A command targeting a window with a specific `Operation`.
     Window(Operation),
+    /// A command targeting native macOS Desktops / Spaces.
+    Desktop(DesktopOperation),
     /// A command targeting the mouse with a specific `MouseOperation`.
     Mouse(MouseMove),
     /// A command to quit the window manager application.

@@ -340,6 +340,9 @@ impl Event {
             Event::SpaceChanged
                 | Event::SpaceCurrentChanged { .. }
                 | Event::SpaceDestroyed { .. }
+                | Event::Command {
+                    command: Command::Desktop(_),
+                }
                 | Event::DisplayAdded { .. }
                 | Event::DisplayRemoved { .. }
                 | Event::DisplayMoved { .. }

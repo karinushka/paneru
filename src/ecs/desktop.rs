@@ -30,6 +30,8 @@ use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId}
 use crate::manager::{Display, Window};
 use crate::platform::{WinID, WorkspaceId};
 
+pub(crate) mod ops;
+
 /// Maximum wall/virtual time a dispatched `WMBridge` mutation waits for OS
 /// census/membership confirmation before expiring (§2.4).
 pub const DESKTOP_CONFIRM_BUDGET: Duration = Duration::from_secs(2);
@@ -137,6 +139,7 @@ pub struct PendingDesktopOp {
     pub condition: ConfirmCondition,
     pub remaining: Timer,
     pub poll: Timer,
+    pub fresh: bool,
     pub on_confirmed: Option<PostConfirmAction>,
 }
 
@@ -152,6 +155,7 @@ impl PendingDesktopOp {
             condition,
             remaining: Timer::new(DESKTOP_CONFIRM_BUDGET, TimerMode::Once),
             poll: Timer::new(DESKTOP_POLL_INTERVAL, TimerMode::Repeating),
+            fresh: true,
             on_confirmed,
         }
     }
@@ -164,7 +168,6 @@ pub struct PendingDesktopOps {
 }
 
 impl PendingDesktopOps {
-    #[allow(dead_code, reason = "called by desktop commands in Commit 3")]
     pub fn push(&mut self, op: PendingDesktopOp) {
         self.queue.push_back(op);
     }
@@ -187,9 +190,13 @@ impl Plugin for DesktopEventsPlugin {
             .init_resource::<PendingDesktopOps>()
             .add_systems(
                 PreUpdate,
-                sync_desktop_census
-                    .in_set(PreUpdateSet::Dispatch)
-                    .run_if(has_added_displays.or_eager(on_message::<Event>)),
+                (
+                    sync_desktop_census.run_if(has_added_displays.or_eager(on_message::<Event>)),
+                    ops::desktop_command_handler
+                        .after(sync_desktop_census)
+                        .run_if(on_message::<Event>),
+                )
+                    .in_set(PreUpdateSet::Dispatch),
             )
             .add_systems(
                 Update,
@@ -329,23 +336,25 @@ fn run_post_confirm(
                 .filter(|(_, s, _, _)| s.id() == raw_id)
                 .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
                 .map(|(entity, strip, active, _)| (entity, strip.first(), active));
-            if let Some((strip_entity, first_win, already_active)) = target_strip {
+            let focus_target = if let Some((strip_entity, first_win, already_active)) = target_strip
+            {
                 if !already_active && let Ok(mut entity_cmds) = commands.get_entity(strip_entity) {
                     entity_cmds.try_insert(ActiveWorkspaceMarker);
                 }
-                let focus_target = preferred_window.or(first_win);
-                if let Some(win_entity) = focus_target {
-                    if let Ok((_, true)) = targets.windows.get(win_entity)
-                        && let Ok(mut ec) = commands.get_entity(win_entity)
-                    {
-                        ec.try_remove::<FocusedMarker>();
-                    }
-                    commands.focus_entity(win_entity, true);
-                }
+                preferred_window.or(first_win)
             } else {
                 commands.trigger(SendMessageTrigger(Event::SpaceCurrentChanged {
                     space_id: raw_id,
                 }));
+                preferred_window
+            };
+            if let Some(win_entity) = focus_target {
+                if let Ok((_, true)) = targets.windows.get(win_entity)
+                    && let Ok(mut ec) = commands.get_entity(win_entity)
+                {
+                    ec.try_remove::<FocusedMarker>();
+                }
+                commands.focus_entity(win_entity, true);
             }
             None
         }
@@ -402,9 +411,10 @@ fn confirm_desktop_ops(
     let Some(front) = pending.queue.front_mut() else {
         return;
     };
+    let initial_probe = std::mem::replace(&mut front.fresh, false);
     front.remaining.tick(delta);
     let poll_due = front.poll.tick(delta).just_finished();
-    if !woke_by_event && !poll_due && !front.remaining.is_finished() {
+    if !initial_probe && !woke_by_event && !poll_due && !front.remaining.is_finished() {
         return;
     }
 

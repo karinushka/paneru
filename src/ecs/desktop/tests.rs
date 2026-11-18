@@ -8,15 +8,15 @@ use super::{
     ConfirmCondition, DESKTOP_CONFIRM_BUDGET, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
     PostConfirmAction, StickyWindowMarker,
 };
-use crate::commands::Command;
+use crate::commands::{Command, DesktopOperation, DesktopTarget, Direction, MoveFocus};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{ActiveWorkspaceMarker, SelectedVirtualMarker, Unmanaged};
 use crate::events::Event;
-use crate::manager::spaces::SpaceId;
+use crate::manager::spaces::{DesktopBridge, SpaceId};
 use crate::manager::{Display, Window};
 use crate::tests::{
     EXT_DISPLAY_HEIGHT, EXT_DISPLAY_ID, EXT_DISPLAY_WIDTH, EXT_WORKSPACE_ID, TEST_DISPLAY_WIDTH,
-    TEST_WORKSPACE_ID, TestHarness,
+    TEST_WORKSPACE_ID, TestHarness, find_window_entity,
 };
 
 fn tick() -> Event {
@@ -228,4 +228,235 @@ fn pending_desktop_op_confirms_deferred_mutation_and_expires_on_timeout() {
         harness.world().resource::<PendingDesktopOps>().is_empty(),
         "timed-out op cleans itself up after budget"
     );
+}
+
+fn desktop_cmd(op: DesktopOperation) -> Event {
+    Event::Command {
+        command: Command::Desktop(op),
+    }
+}
+
+fn active_space_id(world: &mut bevy::ecs::world::World) -> u64 {
+    world
+        .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
+        .iter(world)
+        .find_map(|(s, active)| active.then_some(s.id()))
+        .expect("one active workspace strip")
+}
+
+#[test]
+fn desktop_focus_steps_across_desktops_and_fullscreen_and_clamps_edges() {
+    let fs_space = 5u64;
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(11, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(50, fs_space, |data| data.is_full_screen = true)
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, fs_space, false);
+    harness.mock_state.set_fullscreen_owner(fs_space, 50);
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(), // 0: settle + focus window 11 on Desktop 1
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Direction {
+            direction: Direction::West,
+            display: None,
+        })), // 1: left edge clamp -> stays on Desktop 1
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Direction {
+            direction: Direction::East,
+            display: None,
+        })), // 2: steps into Fullscreen space 5
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Direction {
+            direction: Direction::East,
+            display: None,
+        })), // 3: steps onto Desktop 2 (space 6)
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Direction {
+            direction: Direction::East,
+            display: None,
+        })), // 4: right edge clamp -> stays on Desktop 2
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 1,
+            display: None,
+        })), // 5: 1-based Desktop 1 restores remembered focus (11)
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })), // 6: 1-based Desktop 2 skips Fullscreen space 5 -> lands on space 6
+    ];
+
+    harness
+        .on_iteration(0, |world, state| {
+            state.focus_window(11);
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+        })
+        .on_iteration(1, |world, _| {
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_focused!(world, 11);
+        })
+        .on_iteration(2, move |world, _| {
+            assert_eq!(
+                world.resource::<DesktopCensus>().active_space(1),
+                Some(fs_space)
+            );
+        })
+        .on_iteration(3, move |world, _| {
+            assert_eq!(active_space_id(world), desktop_2);
+            crate::assert_focused!(world, 20);
+        })
+        .on_iteration(4, move |world, _| {
+            assert_eq!(active_space_id(world), desktop_2);
+        })
+        .on_iteration(5, |world, _| {
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_focused!(world, 11);
+        })
+        .on_iteration(6, move |world, _| {
+            assert_eq!(active_space_id(world), desktop_2);
+            crate::assert_focused!(world, 20);
+        })
+        .run(commands);
+}
+
+#[test]
+fn desktop_send_and_move_transfer_windows_and_tab_groups() {
+    let desktop_2 = 6u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(11, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(12, TEST_WORKSPACE_ID, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    let commands = vec![
+        tick(), // 0: group 10+11 into a tabbed stack and focus 10
+        tick(), // 1: settle focus on 10
+        desktop_cmd(DesktopOperation::MoveWindow {
+            target: DesktopTarget::Number {
+                number: 2,
+                display: None,
+            },
+            move_focus: MoveFocus::Stay,
+        }), // 2: send tab group (10, 11) to Desktop 2 while staying on Desktop 1
+        desktop_cmd(DesktopOperation::MoveWindow {
+            target: DesktopTarget::Direction {
+                direction: Direction::East,
+                display: None,
+            },
+            move_focus: MoveFocus::Follow,
+        }), // 3: move remaining window 12 to Desktop 2 and follow
+    ];
+
+    harness
+        .on_iteration(0, |world, state| {
+            let e10 = find_window_entity(10, world);
+            let e11 = find_window_entity(11, world);
+            for mut strip in world.query::<&mut LayoutStrip>().iter_mut(world) {
+                if strip.id() == TEST_WORKSPACE_ID {
+                    strip.remove(e11);
+                    strip.convert_to_tabs(e10, e11).unwrap();
+                }
+            }
+            state.focus_window(10);
+        })
+        .on_iteration(1, |world, _| {
+            crate::assert_focused!(world, 10);
+        })
+        .on_iteration(2, move |world, _| {
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_not_on_workspace!(world, 10, TEST_WORKSPACE_ID);
+            crate::assert_not_on_workspace!(world, 11, TEST_WORKSPACE_ID);
+            crate::assert_on_workspace!(world, 10, desktop_2);
+            crate::assert_on_workspace!(world, 11, desktop_2);
+            crate::assert_on_workspace!(world, 12, TEST_WORKSPACE_ID);
+            crate::assert_focused!(world, 12);
+
+            let bridge = world.non_send::<DesktopBridge>();
+            let sid_2 = SpaceId::new(desktop_2).unwrap();
+            assert_eq!(bridge.spaces_for_window(10).unwrap(), [sid_2]);
+            assert_eq!(bridge.spaces_for_window(11).unwrap(), [sid_2]);
+        })
+        .on_iteration(3, move |world, _| {
+            assert_eq!(active_space_id(world), desktop_2);
+            crate::assert_on_workspace!(world, 12, desktop_2);
+            crate::assert_focused!(world, 12);
+        })
+        .run(commands);
+}
+
+#[test]
+fn fullscreen_guest_rescue_moves_unassociated_guest_and_refuses_owner_and_sheet() {
+    let fs_space = 5u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(50, fs_space, |data| data.is_full_screen = true)
+        .with_workspace_window(51, fs_space, |_| {})
+        .with_workspace_window(52, fs_space, |_| {});
+    harness.mock_state.add_space_on_display(1, fs_space, false);
+    harness.mock_state.set_fullscreen_owner(fs_space, 50);
+    harness.mock_state.set_associated_windows(52, vec![50, 52]);
+
+    let to_desktop_1 = || {
+        desktop_cmd(DesktopOperation::MoveWindow {
+            target: DesktopTarget::Number {
+                number: 1,
+                display: None,
+            },
+            move_focus: MoveFocus::Follow,
+        })
+    };
+
+    let commands = vec![
+        tick(), // 0: activate fullscreen space 5 & focus owner 50
+        Event::SpaceCurrentChanged { space_id: fs_space }, // 1: enter fs_space, focus 50
+        to_desktop_1(), // 2: owner 50 refused -> focus associated sheet 52
+        tick(), // 3: settle focus on 52
+        to_desktop_1(), // 4: associated sheet 52 refused -> focus guest 51
+        tick(), // 5: settle focus on 51
+        to_desktop_1(), // 6: unassociated guest 51 rescued onto Desktop 1!
+    ];
+
+    harness
+        .on_iteration(0, move |_world, state| {
+            state.activate_workspace(1, fs_space, true);
+            state.focus_window(50);
+        })
+        .on_iteration(2, move |world, state| {
+            let sid_fs = SpaceId::new(fs_space).unwrap();
+            assert_eq!(
+                world
+                    .non_send::<DesktopBridge>()
+                    .spaces_for_window(50)
+                    .unwrap(),
+                [sid_fs],
+                "fullscreen owner must never be moved"
+            );
+            state.focus_window(52);
+        })
+        .on_iteration(4, move |world, state| {
+            let sid_fs = SpaceId::new(fs_space).unwrap();
+            assert_eq!(
+                world
+                    .non_send::<DesktopBridge>()
+                    .spaces_for_window(52)
+                    .unwrap(),
+                [sid_fs],
+                "sheet associated with fullscreen owner must be refused"
+            );
+            state.focus_window(51);
+        })
+        .on_iteration(6, |world, _| {
+            let sid_1 = SpaceId::new(TEST_WORKSPACE_ID).unwrap();
+            assert_eq!(
+                world
+                    .non_send::<DesktopBridge>()
+                    .spaces_for_window(51)
+                    .unwrap(),
+                [sid_1],
+                "unassociated guest window must be rescued onto Desktop 1"
+            );
+            assert_eq!(active_space_id(world), TEST_WORKSPACE_ID);
+            crate::assert_on_workspace!(world, 51, TEST_WORKSPACE_ID);
+            crate::assert_focused!(world, 51);
+        })
+        .run(commands);
 }

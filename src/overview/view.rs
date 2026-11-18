@@ -6,12 +6,12 @@
 //! └─ root
 //!    ├─ backdrop                   the wallpaper, blurred (opaque throughout)
 //!    ├─ tint                       opacity 0 → 1
-//!    └─ container                  vertical scroll
-//!       ├─ per row: viewport       the row's "screen": wallpaper, shrinks
-//!       │           bar            menu bar, fades out
-//!       │           pan            horizontal pan of the row's columns
-//!       │           └─ tiled cards
-//!       └─ floating cards          above every row, not panned
+//!    ├─ container                  vertical scroll
+//!    │  └─ per row: viewport       the row's "screen": wallpaper, shrinks
+//!    │              bar            menu bar, fades out
+//!    │              pan            horizontal pan of the row's columns
+//!    │              └─ tiled cards
+//!    └─ floating cards             pinned top-right shelf, above every row
 //! ```
 //!
 //! Every animated layer keeps fixed bounds and moves by `position` plus
@@ -158,7 +158,8 @@ struct Card {
     /// The window's snapshot.
     content: Retained<CALayer>,
     window_id: i32,
-    /// On the active row: captured at full resolution, before showing.
+    floating: bool,
+    /// On the active row (or floating shelf): captured at full resolution, before showing.
     best: bool,
     /// Capture order (lower first), see [`Rank`].
     rank: Rank,
@@ -374,34 +375,27 @@ fn visible_set<K>(layout: &DisplayLayout<K>, margin: f64) -> HashSet<i32> {
 
 fn strip_cards<K>(
     strip: &super::StripPlacement<K>,
-) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, Rank)> {
-    let focus = strip
-        .windows
-        .iter()
-        .filter(|w| !w.floating)
-        .position(|w| w.focused);
-    let mut column = 0;
-    strip.windows.iter().map(move |window| {
-        let distance = if window.floating {
-            None
-        } else {
-            column += 1;
-            focus.map(|f| f.abs_diff(column - 1))
-        };
-        let rank = Rank::of_card(strip.active, window.focused, window.floating, distance);
-        (window, strip.active, rank)
+) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, bool, Rank)> {
+    let focus = strip.windows.iter().position(|w| w.focused);
+    strip.windows.iter().enumerate().map(move |(col, window)| {
+        let distance = focus.map(|f| f.abs_diff(col));
+        let rank = Rank::of_card(strip.active, window.focused, false, distance);
+        (window, false, strip.active, rank)
     })
 }
 
 /// Cards in the order the panels hold them: every row's tiled windows,
-/// then every floating window (drawn on top), paired with `(best, rank)`.
+/// then every floating shelf window (drawn pinned on top), paired with
+/// `(floating, best, rank)`.
 fn cards_of<K>(
     layout: &DisplayLayout<K>,
-) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, Rank)> {
-    let all = || layout.strips.iter().flat_map(strip_cards);
-    all()
-        .filter(|(w, ..)| !w.floating)
-        .chain(all().filter(|(w, ..)| w.floating))
+) -> impl Iterator<Item = (&super::WindowPlacement<K>, bool, bool, Rank)> {
+    layout.strips.iter().flat_map(strip_cards).chain(
+        layout
+            .floating
+            .iter()
+            .map(|w| (w, true, true, Rank::of_card(true, w.focused, true, None))),
+    )
 }
 
 impl OverviewManager {
@@ -846,9 +840,55 @@ impl OverviewManager {
         flipped.addSublayer(&container.layer);
         container.set(0.0);
 
+        let make_card =
+            |window: &super::WindowPlacement<K>, floating: bool, best: bool, rank: Rank| -> Card {
+                let mut card =
+                    Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
+                card.layer.setMasksToBounds(true);
+                card.corner = card.open_points(CARD_RADIUS);
+                card.layer
+                    .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
+                card.set_ring(window.focused);
+                let content = CALayer::new();
+                content.setFrame(CGRect::new(
+                    CGPoint::new(0.0, 0.0),
+                    CGSize::new(card.base.0, card.base.1),
+                ));
+                content.setContentsGravity(unsafe { kCAGravityResize });
+                content.setContentsScale(scale);
+                // Tiled cards hold their slot with a placeholder until the image
+                // lands. Floating cards start on top of the screen at rest, so one
+                // whose capture never comes (or is blocked) would cover windows
+                // under it: leave it clear instead.
+                if !self.previews {
+                    let label = labels.get(&window.window_id);
+                    let icon = label
+                        .and_then(|l| l.pid)
+                        .and_then(|pid| self.icons.get(&pid))
+                        .and_then(Option::as_deref);
+                    add_tile(
+                        &content,
+                        &card,
+                        label.map(|l| l.title.as_str()),
+                        icon,
+                        scale,
+                    );
+                } else if !floating {
+                    content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
+                }
+                card.layer.addSublayer(&content);
+                Card {
+                    animated: card,
+                    content,
+                    window_id: window.window_id,
+                    floating,
+                    best,
+                    rank,
+                }
+            };
+
         let mut rows = Vec::new();
-        let mut tiled = Vec::new();
-        let mut floating = Vec::new();
+        let mut cards = Vec::new();
         for strip in &layout.strips {
             let mut viewport = Animated::new(
                 CALayer::new(),
@@ -891,61 +931,11 @@ impl OverviewManager {
             container.layer.addSublayer(&pan.layer);
             pan.set(0.0);
 
-            for (window, best, rank) in strip_cards(strip) {
-                let mut card =
-                    Animated::new(CALayer::new(), window.rest, window.overview, (1.0, 1.0));
-                card.layer.setMasksToBounds(true);
-                card.corner = card.open_points(CARD_RADIUS);
-                card.layer
-                    .setBorderColor(Some(&color(0.45, 0.65, 1.0, 1.0)));
-                card.set_ring(window.focused);
-                let content = CALayer::new();
-                content.setFrame(CGRect::new(
-                    CGPoint::new(0.0, 0.0),
-                    CGSize::new(card.base.0, card.base.1),
-                ));
-                content.setContentsGravity(unsafe { kCAGravityResize });
-                content.setContentsScale(scale);
-                // Tiled cards hold their slot with a placeholder until the
-                // image lands. Floating cards sit on top of the rows, so one
-                // whose capture never comes (or is blocked) would just cover
-                // them: leave it clear instead.
-                if !self.previews {
-                    let label = labels.get(&window.window_id);
-                    let icon = label
-                        .and_then(|l| l.pid)
-                        .and_then(|pid| self.icons.get(&pid))
-                        .and_then(Option::as_deref);
-                    add_tile(
-                        &content,
-                        &card,
-                        label.map(|l| l.title.as_str()),
-                        icon,
-                        scale,
-                    );
-                } else if !window.floating {
-                    content.setBackgroundColor(Some(&color(0.3, 0.32, 0.36, 1.0)));
-                }
-                card.layer.addSublayer(&content);
-                let parent = if window.floating {
-                    &container.layer
-                } else {
-                    &pan.layer
-                };
-                let entry = Card {
-                    animated: card,
-                    content,
-                    window_id: window.window_id,
-                    best,
-                    rank,
-                };
-                if window.floating {
-                    floating.push(entry);
-                } else {
-                    parent.addSublayer(&entry.animated.layer);
-                    entry.animated.set(0.0);
-                    tiled.push(entry);
-                }
+            for (window, floating, best, rank) in strip_cards(strip) {
+                let entry = make_card(window, floating, best, rank);
+                pan.layer.addSublayer(&entry.animated.layer);
+                entry.animated.set(0.0);
+                cards.push(entry);
             }
             let label = row_label(strip.virtual_index, &strip.label, scale);
             container.layer.addSublayer(&label.layer);
@@ -957,12 +947,15 @@ impl OverviewManager {
                 label,
             });
         }
-        // Floating windows go above every row.
-        for card in &floating {
-            container.layer.addSublayer(&card.animated.layer);
-            card.animated.set(0.0);
+        // Pinned floating shelf sits on `flipped` above `container` so vertical
+        // row scrolling and horizontal strip panning never move it.
+        for window in &layout.floating {
+            let rank = Rank::of_card(true, window.focused, true, None);
+            let entry = make_card(window, true, true, rank);
+            flipped.addSublayer(&entry.animated.layer);
+            entry.animated.set(0.0);
+            cards.push(entry);
         }
-        tiled.extend(floating);
 
         Some(Panel {
             window,
@@ -972,7 +965,7 @@ impl OverviewManager {
             tint,
             container,
             rows,
-            cards: tiled,
+            cards,
             scale,
         })
     }
@@ -1126,8 +1119,8 @@ impl OverviewManager {
             let same_cards = panel
                 .cards
                 .iter()
-                .map(|c| c.window_id)
-                .eq(cards_of(layout).map(|(w, ..)| w.window_id));
+                .map(|c| (c.window_id, c.floating))
+                .eq(cards_of(layout).map(|(w, floating, ..)| (w.window_id, floating)));
             if panel.rows.len() != layout.strips.len() || !same_cards {
                 return false;
             }
@@ -1145,7 +1138,7 @@ impl OverviewManager {
                 row.pan.morph(rest, open, spring);
                 row.label.morph(strip.label, strip.label, spring);
             }
-            for (card, (window, best, rank)) in panel.cards.iter_mut().zip(cards_of(layout)) {
+            for (card, (window, _, best, rank)) in panel.cards.iter_mut().zip(cards_of(layout)) {
                 card.best = best;
                 card.rank = rank;
                 card.animated.set_ring(window.focused);
@@ -1305,7 +1298,6 @@ mod tests {
                         window_id: 101,
                         layout_frame: Rect::new(-1572.0, 0.0, 2328.0, 2160.0),
                         real_frame: Some(Rect::new(-1572.0, 0.0, 2328.0, 2160.0)),
-                        floating: false,
                         focused: focused_idx == 0,
                     },
                     WindowInput {
@@ -1313,7 +1305,6 @@ mod tests {
                         window_id: 102,
                         layout_frame: Rect::new(756.0, 0.0, 2328.0, 2160.0),
                         real_frame: Some(Rect::new(350.0, 0.0, 2328.0, 2160.0)),
-                        floating: false,
                         focused: focused_idx == 1,
                     },
                     WindowInput {
@@ -1321,17 +1312,16 @@ mod tests {
                         window_id: 103,
                         layout_frame: Rect::new(3084.0, 0.0, 2328.0, 2160.0),
                         real_frame: Some(Rect::new(3835.0, 0.0, 2328.0, 2160.0)),
-                        floating: false,
                         focused: focused_idx == 2,
                     },
                 ],
             }];
-            layout_display((3840.0, 2160.0), &strips, 1.0, &Metrics::default())
+            layout_display((3840.0, 2160.0), &strips, &[], 1.0, &Metrics::default())
         };
 
         let layout = make_layout(0);
         let initial_ranks: Vec<_> = cards_of(&layout)
-            .map(|(window, best, rank)| {
+            .map(|(window, floating, best, rank)| {
                 let card = Card {
                     animated: Animated::new(
                         CALayer::new(),
@@ -1341,6 +1331,7 @@ mod tests {
                     ),
                     content: CALayer::new(),
                     window_id: window.window_id,
+                    floating,
                     best,
                     rank,
                 };
@@ -1369,7 +1360,7 @@ mod tests {
         // so `relayout` promotes the rightmost card to `Rank::Focused`.
         let moved = make_layout(2);
         let updated_ranks: Vec<_> = cards_of(&moved)
-            .map(|(w, best, rank)| (w.window_id, best, rank))
+            .map(|(w, _, best, rank)| (w.window_id, best, rank))
             .collect();
         assert_eq!(
             updated_ranks,

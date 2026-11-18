@@ -8,7 +8,7 @@
 //! overview is open, hotkeys keep driving the real layout and the overview
 //! follows it (`overview_follow_layout`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
@@ -43,9 +43,9 @@ use crate::overview::view::{
     CardLabel, DisplayScene, OverviewManager, WindowServerInfo, window_server_info,
 };
 use crate::overview::{
-    DisplayLayout, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN, Rect, SPRING_RESPONSE,
-    Spring, StripInput, WindowInput, hit_test, layout_display, middle_row, reanchor, release_opens,
-    rubber_band, same_geometry,
+    DisplayLayout, FloatingInput, Hit, Metrics, OVERVIEW_ACCEPTS_KEYS, OVERVIEW_OPEN, Rect,
+    SPRING_RESPONSE, Spring, StripInput, WindowInput, hit_test, layout_display, middle_row,
+    reanchor, release_opens, rubber_band, same_geometry,
 };
 use crate::screen_capture;
 
@@ -92,6 +92,10 @@ struct DisplayEntry {
     origins: Vec<bevy::math::IVec2>,
     /// Where this display parks its hidden rows.
     parked: bevy::math::IVec2,
+    /// `Unmanaged::Floating` window IDs that `WindowServer` reported as
+    /// off-Space or zero-alpha when the overview opened, so follow-up
+    /// relayouts (which avoid re-querying `WindowServer`) keep them hidden.
+    rejected_floating: HashSet<i32>,
 }
 
 struct Scrub {
@@ -650,7 +654,9 @@ type Anchor = (u32, Option<Entity>);
 /// A card or row the user clicked to close into.
 struct Pick {
     display: usize,
-    virtual_index: u32,
+    /// Chosen row, or `None` when a pinned floating shelf card was picked
+    /// (closes into the middle/shown row while focusing `focus`).
+    virtual_index: Option<u32>,
     focus: Option<Entity>,
 }
 
@@ -706,7 +712,8 @@ fn write_back(
         let virtual_index = entry.layout.strips[target].virtual_index;
         let holds_focus = holds_focus(entry, shown, strips);
         let mut focus = picked.and_then(|pick| pick.focus);
-        if picked.is_none() && Some(target) != shown {
+        let explicit_row = picked.and_then(|pick| pick.virtual_index).is_some();
+        if !explicit_row && Some(target) != shown {
             if let (Some(old), Some(&new)) = (shown, entry.strips.get(target)) {
                 wrote = true;
                 debug!("overview: display {index} closes into row {virtual_index}");
@@ -719,6 +726,13 @@ fn write_back(
                     focus = nearest_middle(&entry.layout, target);
                     if let Some(key) = focus {
                         commands.focus_entity(key, true);
+                    }
+                } else if holds_focus && picked.is_some() {
+                    // Picked a floating shelf card on this display after
+                    // scrolling to another row: activate the scrolled row,
+                    // leaving focus for the picked floating window.
+                    if let Ok(mut strip) = commands.get_entity(new) {
+                        strip.try_insert(ActiveWorkspaceMarker);
                     }
                 } else if let (Some(&old_strip), Some(&old_origin), Some(&new_base)) = (
                     entry.strips.get(old),
@@ -764,11 +778,12 @@ fn close_rows(
 ) -> (Option<usize>, Option<usize>) {
     let shown = layout.strips.iter().position(|strip| strip.active);
     let target = picked
-        .and_then(|pick| {
+        .and_then(|pick| pick.virtual_index)
+        .and_then(|virtual_index| {
             layout
                 .strips
                 .iter()
-                .position(|strip| strip.virtual_index == pick.virtual_index)
+                .position(|strip| strip.virtual_index == virtual_index)
         })
         .or_else(|| middle_row(layout))
         .or(shown);
@@ -907,9 +922,6 @@ fn show_row(
 fn refocus(layout: &DisplayLayout<Entity>, focus: Entity) -> Option<Entity> {
     let strip = layout.strips.iter().find(|strip| strip.active)?;
     let window = strip.windows.iter().find(|w| w.key == focus)?;
-    if window.floating {
-        return None;
-    }
     let pan = strip.pan / layout.scale.max(f64::EPSILON);
     let (left, right) = layout.work_area;
     let inside = |w: &crate::overview::WindowPlacement<Entity>| {
@@ -937,7 +949,6 @@ fn nearest_middle(layout: &DisplayLayout<Entity>, row: usize) -> Option<Entity> 
     strip
         .windows
         .iter()
-        .filter(|w| !w.floating)
         .min_by(|a, b| distance(a).total_cmp(&distance(b)))
         .map(|w| w.key)
 }
@@ -1029,12 +1040,17 @@ fn select(
     let pick = match &hit {
         Some((display, Hit::Window { key, virtual_index })) => Some(Pick {
             display: *display,
-            virtual_index: *virtual_index,
+            virtual_index: Some(*virtual_index),
+            focus: Some(*key),
+        }),
+        Some((display, Hit::Floating { key })) => Some(Pick {
+            display: *display,
+            virtual_index: None,
             focus: Some(*key),
         }),
         Some((display, Hit::Strip { virtual_index })) => Some(Pick {
             display: *display,
-            virtual_index: *virtual_index,
+            virtual_index: Some(*virtual_index),
             focus: None,
         }),
         _ => None,
@@ -1044,6 +1060,10 @@ fn select(
     match hit {
         Some((_, Hit::Window { key, virtual_index })) => {
             debug!("overview: selected window {key} on row {virtual_index}");
+            commands.focus_entity(key, true);
+        }
+        Some((_, Hit::Floating { key })) => {
+            debug!("overview: selected floating window {key}");
             commands.focus_entity(key, true);
         }
         Some((display, Hit::Strip { virtual_index })) => {
@@ -1130,7 +1150,7 @@ fn overview_follow_layout(
     let (Some(mut manager), Some(active)) = (manager, session.0.as_mut()) else {
         return;
     };
-    let mut entries = gather(&scene, None);
+    let mut entries = gather_following(&scene, &active.displays);
     let unchanged = entries.len() == active.displays.len()
         && entries
             .iter()
@@ -1204,12 +1224,40 @@ fn build_scenes(
 /// active rows start from exactly where the `WindowServer` has them (opening);
 /// without it they rest at their layout targets (following a change while
 /// open, when real windows may be mid-animation).
+fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
+    gather_inner(scene, info, None)
+}
+
+fn gather_following(scene: &Scene, previous: &[DisplayEntry]) -> Vec<DisplayEntry> {
+    gather_inner(scene, None, Some(previous))
+}
+
 #[allow(
     clippy::too_many_lines,
     reason = "one pass over displays, rows and windows"
 )]
-fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
+fn gather_inner(
+    scene: &Scene,
+    info: Option<&WindowServerInfo>,
+    previous: Option<&[DisplayEntry]>,
+) -> Vec<DisplayEntry> {
     let metrics = Metrics::default();
+    let display_rects: Vec<(u32, Rect)> = scene
+        .displays
+        .iter()
+        .map(|(_, display, _)| {
+            let b = display.frame();
+            (
+                display.id(),
+                Rect::new(
+                    f64::from(b.min.x),
+                    f64::from(b.min.y),
+                    f64::from(b.width()),
+                    f64::from(b.height()),
+                ),
+            )
+        })
+        .collect();
     let mut entries = Vec::new();
     for (display_entity, display, dock) in &scene.displays {
         // The whole screen, menu bar included: the overview covers it, and
@@ -1267,7 +1315,7 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
             } else {
                 previous.map_or(viewport.min, |previous| previous.origin)
             };
-            let mut windows: Vec<_> = visible_windows(strip)
+            let windows: Vec<_> = visible_windows(strip)
                 .filter_map(|entity| {
                     let (_, window, layout, bounds, unmanaged, focused, _) =
                         scene.windows.get(entity).ok()?;
@@ -1290,14 +1338,10 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
                         window_id: window.id(),
                         layout_frame,
                         real_frame,
-                        floating: false,
                         focused,
                     })
                 })
                 .collect();
-            if active {
-                windows.extend(floating_windows(scene, info, display_rect, local));
-            }
             inputs.push(StripInput {
                 virtual_index: strip.virtual_index,
                 active,
@@ -1306,7 +1350,10 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
             strip_entities.push(entity);
             origins.push(strip_origin);
         }
-        let mut layout = layout_display(size, &inputs, 1.0, &metrics);
+        let prev_entry = previous.and_then(|list| list.iter().find(|e| e.display_id == display_id));
+        let (floating, rejected_floating) =
+            floating_windows(scene, info, prev_entry, display_id, &display_rects, local);
+        let mut layout = layout_display(size, &inputs, &floating, 1.0, &metrics);
         layout.work_area = (
             f64::from(viewport.min.x) - origin.0,
             f64::from(viewport.max.x) - origin.0,
@@ -1318,6 +1365,7 @@ fn gather(scene: &Scene, info: Option<&WindowServerInfo>) -> Vec<DisplayEntry> {
             strips: strip_entities,
             origins,
             parked: display.bounds().max - PARKED_STRIP_SLIVER,
+            rejected_floating,
         });
     }
     entries
@@ -1361,8 +1409,14 @@ fn card_labels(scene: &Scene, entries: &[DisplayEntry], previews: bool) -> HashM
     }
     entries
         .iter()
-        .flat_map(|entry| &entry.layout.strips)
-        .flat_map(|strip| &strip.windows)
+        .flat_map(|entry| {
+            entry
+                .layout
+                .strips
+                .iter()
+                .flat_map(|strip| &strip.windows)
+                .chain(&entry.layout.floating)
+        })
         .filter_map(|placement| {
             let (_, window, ..) = scene.windows.get(placement.key).ok()?;
             let label = CardLabel {
@@ -1392,48 +1446,89 @@ fn shown_row(
     shown
 }
 
-/// Floating windows on this display, shown on the active row at their real
-/// position. The `WindowServer`'s frame is preferred: it is what the snapshot
-/// is cut to, and only windows it lists as on screen (this space) and
-/// actually drawing (not fully transparent) are shown.
-fn floating_windows<'a>(
-    scene: &'a Scene,
-    info: Option<&'a WindowServerInfo>,
-    display: Rect,
-    local: impl Fn(Rect) -> Rect + 'a,
-) -> impl Iterator<Item = WindowInput<Entity>> + 'a {
-    scene
+/// Floating windows on this display, sorted left-to-right by screen centre so
+/// visual shelf order matches `focus west` / `focus east`.
+///
+/// On open (`info` is `Some`), `WindowServer`'s frame is preferred and only
+/// windows listed as on screen (this space) and actually drawing (not zero
+/// alpha) are shown; rejected IDs are returned so follow-up relayouts (`info`
+/// is `None`) keep parked popovers and off-space windows excluded.
+fn floating_windows(
+    scene: &Scene,
+    info: Option<&WindowServerInfo>,
+    previous: Option<&DisplayEntry>,
+    display_id: u32,
+    all_displays: &[(u32, Rect)],
+    local: impl Fn(Rect) -> Rect,
+) -> (Vec<FloatingInput<Entity>>, HashSet<i32>) {
+    let display_origin = all_displays
+        .iter()
+        .find(|(id, _)| *id == display_id)
+        .map_or((0.0, 0.0), |(_, r)| (r.x, r.y));
+    let mut rejected = previous
+        .map(|prev| prev.rejected_floating.clone())
+        .unwrap_or_default();
+    let mut out: Vec<FloatingInput<Entity>> = scene
         .windows
         .iter()
         .filter(|w| matches!(w.4, Some(Unmanaged::Floating)))
-        .filter_map(move |(entity, window, _, _, _, focused, _)| {
+        .filter_map(|(entity, window, _, _, _, focused, _)| {
+            let id = window.id();
             let frame = if let Some(info) = info {
-                if info.invisible.contains(&window.id()) {
+                if info.invisible.contains(&id) {
+                    rejected.insert(id);
                     return None;
                 }
-                *info.frames.get(&window.id())?
+                let Some(frame) = info.frames.get(&id).copied() else {
+                    rejected.insert(id);
+                    return None;
+                };
+                frame
             } else {
-                let f = window.frame();
-                Rect::new(
-                    f64::from(f.min.x),
-                    f64::from(f.min.y),
-                    f64::from(f.width()),
-                    f64::from(f.height()),
-                )
+                if rejected.contains(&id) {
+                    return None;
+                }
+                if let Some(prev_win) = previous
+                    .and_then(|prev| prev.layout.floating.iter().find(|w| w.window_id == id))
+                {
+                    prev_win.rest.offset(display_origin.0, display_origin.1)
+                } else {
+                    let f = window.frame();
+                    Rect::new(
+                        f64::from(f.min.x),
+                        f64::from(f.min.y),
+                        f64::from(f.width()),
+                        f64::from(f.height()),
+                    )
+                }
             };
-            let (cx, cy) = (frame.x + frame.w / 2.0, frame.y + frame.h / 2.0);
-            if !display.contains(cx, cy) {
+            let best_display = all_displays
+                .iter()
+                .map(|(id, rect)| (*id, rect.intersection_area(&frame)))
+                .filter(|(_, area)| *area > 0.0)
+                .max_by(|(_, a), (_, b)| a.total_cmp(b))
+                .map(|(id, _)| id);
+            if best_display != Some(display_id) {
                 return None;
             }
-            Some(WindowInput {
+            Some(FloatingInput {
                 key: entity,
-                window_id: window.id(),
-                layout_frame: local(frame),
-                real_frame: Some(local(frame)),
-                floating: true,
+                window_id: id,
+                frame: local(frame),
                 focused,
             })
         })
+        .collect();
+    out.sort_by(|a, b| {
+        let ax = a.frame.x + a.frame.w / 2.0;
+        let bx = b.frame.x + b.frame.w / 2.0;
+        let ay = a.frame.y + a.frame.h / 2.0;
+        let by = b.frame.y + b.frame.h / 2.0;
+        ax.total_cmp(&bx)
+            .then_with(|| ay.total_cmp(&by))
+            .then_with(|| a.window_id.cmp(&b.window_id))
+    });
+    (out, rejected)
 }
 
 enum ColumnWindows<'a> {

@@ -72,6 +72,8 @@ struct PagingFocusParams<'w, 's> {
     strip_positions:
         Query<'w, 's, (&'static Position, Option<&'static RepositionMarker>), With<LayoutStrip>>,
     haptics: MessageWriter<'w, PageHapticRequest>,
+    focus_history: Option<Res<'w, FocusHistory>>,
+    overview_phase: Option<Res<'w, crate::ecs::overview::OverviewPhase>>,
 }
 
 pub fn register_commands(app: &mut bevy::app::App) {
@@ -437,6 +439,47 @@ fn active_focus_candidate(
     })
 }
 
+/// Next window to focus when `focused_entity` is `Unmanaged::Floating`, paired
+/// with whether to reshuffle the active strip: prefers a floating neighbour in
+/// `direction`, and while the overview is open falls back onto the active
+/// tiled strip so navigation never gets stuck on a lone floating card.
+fn floating_focus_target(
+    direction: &Direction,
+    focused_entity: Entity,
+    windows: &Windows,
+    window_manager: &WindowManager,
+    active_display: &ActiveDisplay,
+    workspaces: &Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
+    paging: &PagingFocusParams,
+) -> Option<(Entity, bool)> {
+    let active_strip = active_display.active_strip();
+    if let Some(entity) = nearest_float_in_direction(
+        direction,
+        focused_entity,
+        windows,
+        window_manager,
+        active_strip.id(),
+        active_display.bounds(),
+    ) {
+        return Some((entity, false));
+    }
+    if !paging
+        .overview_phase
+        .as_ref()
+        .is_some_and(|phase| phase.is_active())
+    {
+        return None;
+    }
+    paging
+        .focus_history
+        .as_ref()
+        .and_then(|history| history.last_managed(active_strip.id()))
+        .filter(|entity| active_strip.contains(*entity))
+        .or_else(|| active_focus_candidate(direction, focused_entity, active_strip, workspaces))
+        .or_else(|| active_strip.all_columns().into_iter().next())
+        .map(|entity| (entity, true))
+}
+
 fn command_move_focus(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -493,13 +536,14 @@ fn command_move_focus(
     if let Some((_, _, Some(Unmanaged::Floating))) = windows.get_managed(focused_entity)
         && !matches!(direction, Direction::Nth(_))
     {
-        if let Some(entity) = nearest_float_in_direction(
+        if let Some((entity, reshuffle)) = floating_focus_target(
             direction,
             focused_entity,
             &windows,
             &window_manager,
-            active_strip.id(),
-            active_display.bounds(),
+            &active_display,
+            &workspaces,
+            &paging,
         ) {
             focus_with_verification(
                 entity,
@@ -507,6 +551,9 @@ fn command_move_focus(
                 is_page.then_some(&mut *paging.page_state),
                 &mut commands,
             );
+            if reshuffle {
+                commands.reshuffle_around(entity);
+            }
         }
         return;
     }

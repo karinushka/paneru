@@ -30,10 +30,14 @@ impl Rect {
 
     /// Whether the two rectangles overlap (touching edges don't count).
     pub fn intersects(&self, other: &Self) -> bool {
-        self.x < other.x + other.w
-            && other.x < self.x + self.w
-            && self.y < other.y + other.h
-            && other.y < self.y + self.h
+        self.intersection_area(other) > 0.0
+    }
+
+    /// Area of overlap between `self` and `other` (`0.0` when disjoint).
+    pub fn intersection_area(&self, other: &Self) -> f64 {
+        let w = (self.x + self.w).min(other.x + other.w) - self.x.max(other.x);
+        let h = (self.y + self.h).min(other.y + other.h) - self.y.max(other.y);
+        if w > 0.0 && h > 0.0 { w * h } else { 0.0 }
     }
 
     pub fn contains(&self, x: f64, y: f64) -> bool {
@@ -87,7 +91,7 @@ pub(crate) static OVERVIEW_OPEN_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mut
 
 // ── Inputs ──────────────────────────────────────────────────────────────
 
-/// One window as the ECS sees it.
+/// One tiled window as the ECS sees it.
 #[derive(Clone, Debug)]
 pub struct WindowInput<K> {
     pub key: K,
@@ -100,9 +104,17 @@ pub struct WindowInput<K> {
     /// (so the transition starts exactly on top of them). `None` for windows
     /// parked off-screen (hidden rows, inactive tabs).
     pub real_frame: Option<Rect>,
-    /// Floating windows sit above the strip, anchored to its viewport (they
-    /// don't pan with the columns).
-    pub floating: bool,
+    pub focused: bool,
+}
+
+/// One floating (`Unmanaged::Floating`) window on this display.
+#[derive(Clone, Debug)]
+pub struct FloatingInput<K> {
+    pub key: K,
+    pub window_id: i32,
+    /// Where the floating window sits on screen right now, in display-local
+    /// coordinates.
+    pub frame: Rect,
     pub focused: bool,
 }
 
@@ -154,7 +166,6 @@ pub struct WindowPlacement<K> {
     pub rest: Rect,
     /// Frame while open (progress 1), before the strip's pan is applied.
     pub overview: Rect,
-    pub floating: bool,
     pub focused: bool,
 }
 
@@ -189,6 +200,76 @@ pub struct DisplayLayout<K> {
     /// see `reanchor`. Defaults to the full display width.
     pub work_area: (f64, f64),
     pub strips: Vec<StripPlacement<K>>,
+    /// Floating windows parked in a pinned top-right shelf above the strips.
+    pub floating: Vec<WindowPlacement<K>>,
+}
+
+/// Height of the top-right floating shelf as a fraction of the display height.
+const FLOATING_SHELF_HEIGHT_RATIO: f64 = 0.12;
+
+/// Top inset of the floating shelf (clears the macOS menu bar / notch height).
+const FLOATING_SHELF_TOP: f64 = 36.0;
+
+/// Aspect ratio clamp `(min, max)` so extreme sliver/banner floating windows
+/// stay clickable and legible in the shelf.
+const FLOATING_ASPECT_RANGE: (f64, f64) = (0.4, 3.0);
+
+/// Lays out floating windows into a right-aligned top-right shelf, returning
+/// `(reserved_top_margin, placements)`. When `floating` is empty, `top` stays
+/// at `metrics.top_padding * zoom`.
+#[allow(clippy::cast_precision_loss, reason = "window counts are small")]
+fn layout_floating_shelf<K: Clone>(
+    size: (f64, f64),
+    floating: &[FloatingInput<K>],
+    zoom: f64,
+    metrics: &Metrics,
+) -> (f64, Vec<WindowPlacement<K>>) {
+    let default_top = metrics.top_padding * zoom;
+    if floating.is_empty() {
+        return (default_top, Vec::new());
+    }
+    let (width, height) = size;
+    let ribbon_pad = metrics.ribbon_padding * zoom;
+    let shelf_top = FLOATING_SHELF_TOP * zoom;
+    let shelf_h = (height * FLOATING_SHELF_HEIGHT_RATIO * zoom).max(48.0 * zoom);
+    let gap = metrics.card_gap * zoom;
+
+    let natural_widths: Vec<f64> = floating
+        .iter()
+        .map(|f| {
+            let aspect = (f.frame.w / f.frame.h.max(1.0))
+                .clamp(FLOATING_ASPECT_RANGE.0, FLOATING_ASPECT_RANGE.1);
+            shelf_h * aspect
+        })
+        .collect();
+    let natural_sum: f64 = natural_widths.iter().sum();
+    let gap_total = gap * (floating.len().saturating_sub(1) as f64);
+    let max_w = (width - 2.0 * ribbon_pad).max(1.0);
+    let fit_k = (max_w / (natural_sum + gap_total).max(1.0)).min(1.0);
+
+    let thumb_h = shelf_h * fit_k;
+    let y = shelf_top + (shelf_h - thumb_h) / 2.0;
+    let total_w = (natural_sum + gap_total) * fit_k;
+    let mut x = width - ribbon_pad - total_w;
+    let placements = floating
+        .iter()
+        .zip(natural_widths)
+        .map(|(f, natural_w)| {
+            let w = natural_w * fit_k;
+            let overview = Rect::new(x, y, w, thumb_h);
+            x += w + gap * fit_k;
+            WindowPlacement {
+                key: f.key.clone(),
+                window_id: f.window_id,
+                layout: f.frame,
+                rest: f.frame,
+                overview,
+                focused: f.focused,
+            }
+        })
+        .collect();
+    let reserved_top = (shelf_top + shelf_h + metrics.section_gap * zoom).max(default_top);
+    (reserved_top, placements)
 }
 
 /// Lays out one display's rows as niri does: a vertical stack of strips,
@@ -199,12 +280,13 @@ pub struct DisplayLayout<K> {
 pub fn layout_display<K: Clone>(
     size: (f64, f64),
     strips: &[StripInput<K>],
+    floating: &[FloatingInput<K>],
     zoom: f64,
     metrics: &Metrics,
 ) -> DisplayLayout<K> {
     let (width, height) = size;
     let zoom = zoom.clamp(0.5, 1.5);
-    let top = metrics.top_padding * zoom;
+    let (top, floating_placements) = layout_floating_shelf(size, floating, zoom, metrics);
     let bottom = metrics.bottom_padding * zoom;
     let label_h = metrics.label_height * zoom;
     let gap = metrics.section_gap * zoom;
@@ -264,7 +346,6 @@ pub fn layout_display<K: Clone>(
                         layout: local,
                         rest,
                         overview,
-                        floating: window.floating,
                         focused: window.focused,
                     }
                 })
@@ -290,6 +371,7 @@ pub fn layout_display<K: Clone>(
         margins: (top, bottom),
         work_area: (0.0, width),
         strips: placements,
+        floating: floating_placements,
     }
 }
 
@@ -352,10 +434,12 @@ impl<K> DisplayLayout<K> {
         let Some(strip) = self.strips.get(row) else {
             return (0.0, 0.0);
         };
-        let tiled = strip.windows.iter().filter(|w| !w.floating);
-        let (left, right) = tiled.fold((f64::MAX, f64::MIN), |(l, r), w| {
-            (l.min(w.layout.x), r.max(w.layout.x + w.layout.w))
-        });
+        let (left, right) = strip
+            .windows
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(l, r), w| {
+                (l.min(w.layout.x), r.max(w.layout.x + w.layout.w))
+            });
         if left > right {
             return (0.0, 0.0);
         }
@@ -403,15 +487,24 @@ pub fn same_geometry<K: PartialEq>(a: &DisplayLayout<K>, b: &DisplayLayout<K>) -
             && (x.w - y.w).abs() < 0.5
             && (x.h - y.h).abs() < 0.5
     };
+    let same_window = |w: &WindowPlacement<K>, v: &WindowPlacement<K>| {
+        w.key == v.key && w.focused == v.focused && close(&w.overview, &v.overview)
+    };
     a.strips.len() == b.strips.len()
+        && a.floating.len() == b.floating.len()
+        && a.floating
+            .iter()
+            .zip(&b.floating)
+            .all(|(w, v)| same_window(w, v))
         && a.strips.iter().zip(&b.strips).all(|(s, t)| {
             s.virtual_index == t.virtual_index
                 && s.active == t.active
                 && close(&s.viewport_overview, &t.viewport_overview)
                 && s.windows.len() == t.windows.len()
-                && s.windows.iter().zip(&t.windows).all(|(w, v)| {
-                    w.key == v.key && w.focused == v.focused && close(&w.overview, &v.overview)
-                })
+                && s.windows
+                    .iter()
+                    .zip(&t.windows)
+                    .all(|(w, v)| same_window(w, v))
         })
 }
 
@@ -419,27 +512,32 @@ pub fn same_geometry<K: PartialEq>(a: &DisplayLayout<K>, b: &DisplayLayout<K>) -
 #[derive(Clone, Debug, PartialEq)]
 pub enum Hit<K> {
     Window { key: K, virtual_index: u32 },
+    Floating { key: K },
     Strip { virtual_index: u32 },
     Background,
 }
 
-/// Hit-tests a display-local point against the fully open layout. Windows
-/// win over their strip, and are clipped to the strip's ribbon.
+/// Hit-tests a display-local point against the fully open layout. Pinned
+/// floating shelf cards win first; tiled windows win over their strip and are
+/// clipped to the strip's ribbon.
 pub fn hit_test<K: Clone>(layout: &DisplayLayout<K>, x: f64, y: f64) -> Hit<K> {
+    if let Some(window) = layout
+        .floating
+        .iter()
+        .rev()
+        .find(|w| w.overview.contains(x, y))
+    {
+        return Hit::Floating {
+            key: window.key.clone(),
+        };
+    }
     let y = y + layout.scroll;
     for strip in &layout.strips {
         if !strip.ribbon.contains(x, y) {
             continue;
         }
-        // Floating windows are drawn above the columns; within each group
-        // later windows are drawn above earlier ones.
-        let hit = |w: &&WindowPlacement<K>| {
-            let px = if w.floating { x } else { x - strip.pan };
-            w.overview.contains(px, y)
-        };
-        let floating = strip.windows.iter().rev().filter(|w| w.floating).find(hit);
-        let tiled = || strip.windows.iter().rev().filter(|w| !w.floating).find(hit);
-        if let Some(window) = floating.or_else(tiled) {
+        let hit = |w: &&WindowPlacement<K>| w.overview.contains(x - strip.pan, y);
+        if let Some(window) = strip.windows.iter().rev().find(hit) {
             return Hit::Window {
                 key: window.key.clone(),
                 virtual_index: strip.virtual_index,
@@ -466,11 +564,12 @@ pub fn visible_windows<K>(layout: &DisplayLayout<K>, margin: f64) -> Vec<i32> {
         .strips
         .iter()
         .flat_map(|strip| {
-            strip.windows.iter().filter(move |w| {
-                let pan = if w.floating { 0.0 } else { strip.pan };
-                w.overview.offset(pan, 0.0).intersects(&screen)
-            })
+            strip
+                .windows
+                .iter()
+                .filter(move |w| w.overview.offset(strip.pan, 0.0).intersects(&screen))
         })
+        .chain(&layout.floating)
         .map(|w| w.window_id)
         .collect()
 }
@@ -482,8 +581,8 @@ pub fn visible_windows<K>(layout: &DisplayLayout<K>, margin: f64) -> Vec<i32> {
 /// of that row, the row is first shifted the way paneru scrolls a strip to
 /// expose a newly focused window (by the shortfall only, see
 /// `layout::origin_exposing`), so picking a card that was scrolled out of
-/// view doesn't land on the old scroll and then jump. Floating windows keep
-/// their rest frames: they don't move.
+/// view doesn't land on the old scroll and then jump. Floating windows live
+/// outside the strips (`layout.floating`) and keep their real rest frames.
 #[allow(clippy::cast_precision_loss, reason = "row counts are tiny")]
 pub fn reanchor<K: Clone + PartialEq>(
     layout: &mut DisplayLayout<K>,
@@ -509,7 +608,7 @@ pub fn reanchor<K: Clone + PartialEq>(
         let pan = strip.pan / scale;
         let shift = if strip.active {
             focus
-                .and_then(|key| strip.windows.iter().find(|w| !w.floating && &w.key == key))
+                .and_then(|key| strip.windows.iter().find(|w| &w.key == key))
                 .map_or(0.0, |w| {
                     exposing_shift(&w.layout.offset(pan, 0.0), work_area)
                 })
@@ -520,11 +619,10 @@ pub fn reanchor<K: Clone + PartialEq>(
         // windows go back exactly where they were taken from.
         let unmoved = was_active && strip.active && (shift + pan).abs() < 0.5;
         for window in &mut strip.windows {
-            if unmoved || (window.floating && strip.active) {
+            if unmoved {
                 continue;
             }
-            let dx = if window.floating { 0.0 } else { pan + shift };
-            window.rest = window.layout.offset(dx, row_offset);
+            window.rest = window.layout.offset(pan + shift, row_offset);
         }
     }
 }
@@ -680,9 +778,12 @@ mod tests {
             window_id: key.cast_signed(),
             layout_frame: Rect::new(x, 30.0, 800.0, 970.0),
             real_frame: real,
-            floating: false,
             focused: false,
         }
+    }
+
+    fn layout_strips(rows: &[StripInput<u32>]) -> DisplayLayout<u32> {
+        layout_display(SIZE, rows, &[], 1.0, &Metrics::default())
     }
 
     fn strips() -> Vec<StripInput<u32>> {
@@ -714,7 +815,7 @@ mod tests {
 
     #[test]
     fn strips_stack_vertically_at_the_same_scale() {
-        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let layout = layout_strips(&strips());
         let [a, b] = &layout.strips[..] else { panic!() };
         assert!(layout.scale > 0.3 && layout.scale < 0.5, "{}", layout.scale);
         assert!(a.viewport_overview.y < b.viewport_overview.y);
@@ -727,7 +828,7 @@ mod tests {
 
     #[test]
     fn active_strip_rests_on_real_frames_others_slide_from_offscreen() {
-        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let layout = layout_strips(&strips());
         let active = &layout.strips[1];
         assert_eq!(
             active.windows[1].rest,
@@ -744,7 +845,7 @@ mod tests {
 
     #[test]
     fn overview_frames_keep_off_viewport_columns_on_the_ribbon() {
-        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let layout = layout_strips(&strips());
         let strip = &layout.strips[1];
         let off = &strip.windows[1].overview;
         // Starts right of the scaled viewport, i.e. the ribbon shows it.
@@ -761,7 +862,7 @@ mod tests {
                 windows: vec![],
             })
             .collect();
-        let layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
+        let layout = layout_strips(&many);
         let (top, bottom) = layout.margins;
         let middle = top + (SIZE.1 - top - bottom) / 2.0;
         assert!((centre_y(&layout, 5) - middle).abs() < 1e-6);
@@ -777,7 +878,7 @@ mod tests {
                 windows: vec![],
             })
             .collect();
-        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        let mut layout = layout_strips(&rows);
         assert_eq!(middle_row(&layout), Some(1));
         let step = layout.strips[2].viewport_overview.y - layout.strips[1].viewport_overview.y;
         layout.scroll_by(step);
@@ -801,7 +902,7 @@ mod tests {
                         windows: vec![],
                     })
                     .collect();
-                let layout = layout_display(SIZE, &rows, 1.0, &metrics);
+                let layout = layout_display(SIZE, &rows, &[], 1.0, &metrics);
                 let (top, bottom) = layout.margins;
                 let middle = top + (SIZE.1 - top - bottom) / 2.0;
                 assert!(
@@ -814,7 +915,7 @@ mod tests {
 
     #[test]
     fn hit_test_prefers_windows_and_respects_ribbon() {
-        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let layout = layout_strips(&strips());
         let w = &layout.strips[1].windows[0].overview;
         assert_eq!(
             hit_test(&layout, w.x + 5.0, w.y + 5.0),
@@ -833,7 +934,7 @@ mod tests {
 
     #[test]
     fn reanchor_moves_target_row_to_full_screen() {
-        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let mut layout = layout_strips(&strips());
         reanchor(&mut layout, 0, None);
         let target = &layout.strips[0];
         assert!(target.active);
@@ -846,7 +947,7 @@ mod tests {
 
     #[test]
     fn cards_get_gaps_without_changing_aspect() {
-        let layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let layout = layout_strips(&strips());
         let strip = &layout.strips[1];
         let (a, b) = (&strip.windows[0], &strip.windows[1]);
         // Columns were edge to edge (0..800, 800..) in layout space.
@@ -858,6 +959,7 @@ mod tests {
                 active: true,
                 windows: vec![window(9, 800.0, None)],
             }],
+            &[],
             1.0,
             &Metrics::default(),
         );
@@ -872,7 +974,7 @@ mod tests {
     fn pan_and_scroll_clamp_and_shift_hit_testing() {
         let mut rows = strips();
         rows[1].windows[1].layout_frame.x = 3000.0;
-        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        let mut layout = layout_strips(&rows);
         // Row 1 has a column far off to the right: panning left is allowed
         // until that column's right edge meets the screen's (paneru's edge
         // rule), panning right isn't (nothing beyond the left edge).
@@ -906,7 +1008,7 @@ mod tests {
 
     #[test]
     fn scroll_reaches_the_middle_for_every_row_when_rows_fit() {
-        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let mut layout = layout_strips(&strips());
         let (top, bottom) = layout.margins;
         let middle = top + (SIZE.1 - top - bottom) / 2.0;
         layout.scroll_by(-10_000.0);
@@ -933,7 +1035,7 @@ mod tests {
                 windows: vec![window(i, 0.0, None), window(100 + i, 6000.0, None)],
             })
             .collect();
-        let mut layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
+        let mut layout = layout_strips(&many);
         layout.scroll_by(-10_000.0);
         let top = visible_windows(&layout, 0.0);
         assert!(top.contains(&0));
@@ -962,7 +1064,7 @@ mod tests {
                 windows: vec![],
             })
             .collect();
-        let mut layout = layout_display(SIZE, &many, 1.0, &Metrics::default());
+        let mut layout = layout_strips(&many);
         layout.scroll_by(10_000.0);
         let last = &layout.strips[5].viewport_overview;
         let (_, bottom) = layout.margins;
@@ -991,7 +1093,7 @@ mod tests {
 
     #[test]
     fn picking_an_offscreen_card_in_the_open_row_lands_on_the_scrolled_strip() {
-        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let mut layout = layout_strips(&strips());
         // Window 3 sits at 1700..2500, past the right edge of a 1600 display.
         reanchor(&mut layout, 1, Some(&3));
         let row = &layout.strips[1];
@@ -1004,7 +1106,7 @@ mod tests {
 
     #[test]
     fn picking_a_visible_card_in_the_open_row_keeps_the_real_frames() {
-        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let mut layout = layout_strips(&strips());
         reanchor(&mut layout, 1, Some(&2));
         let row = &layout.strips[1];
         assert_eq!(row.windows[0].rest, Rect::new(0.0, 30.0, 800.0, 970.0));
@@ -1016,7 +1118,7 @@ mod tests {
     fn picking_an_offscreen_card_in_a_hidden_row_activates_and_scrolls_it() {
         let mut rows = strips();
         rows[0].windows = vec![window(1, 0.0, None), window(4, -1200.0, None)];
-        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
+        let mut layout = layout_strips(&rows);
         reanchor(&mut layout, 0, Some(&4));
         let (target, other) = (&layout.strips[0], &layout.strips[1]);
         assert!(target.active && !other.active);
@@ -1029,27 +1131,103 @@ mod tests {
 
     #[test]
     fn exposing_respects_the_work_area() {
-        let mut layout = layout_display(SIZE, &strips(), 1.0, &Metrics::default());
+        let mut layout = layout_strips(&strips());
         layout.work_area = (8.0, 1592.0);
         reanchor(&mut layout, 1, Some(&3));
         assert!((layout.strips[1].windows[1].rest.x - 792.0).abs() < 1e-6);
     }
 
     #[test]
-    fn floating_windows_stay_put_when_the_row_scrolls() {
-        let mut rows = strips();
-        let float = Rect::new(400.0, 200.0, 500.0, 400.0);
-        rows[1].windows.push(WindowInput {
-            key: 7,
-            window_id: 7,
-            layout_frame: float,
-            real_frame: Some(float),
-            floating: true,
-            focused: false,
-        });
-        let mut layout = layout_display(SIZE, &rows, 1.0, &Metrics::default());
-        reanchor(&mut layout, 1, Some(&3));
-        assert_eq!(layout.strips[1].windows[2].rest, float);
+    fn floating_windows_park_in_top_right_shelf_without_overlapping_strips() {
+        let float_a = Rect::new(400.0, 200.0, 500.0, 400.0);
+        let float_b = Rect::new(900.0, 300.0, 300.0, 300.0);
+        let floating = vec![
+            FloatingInput {
+                key: 7,
+                window_id: 7,
+                frame: float_a,
+                focused: false,
+            },
+            FloatingInput {
+                key: 8,
+                window_id: 8,
+                frame: float_b,
+                focused: true,
+            },
+        ];
+        let metrics = Metrics::default();
+        let without = layout_display(SIZE, &strips(), &[], 1.0, &metrics);
+        assert_eq!(without.margins.0, metrics.top_padding);
+        assert!(without.floating.is_empty());
+
+        let mut layout = layout_display(SIZE, &strips(), &floating, 1.0, &metrics);
+        assert_eq!(layout.floating.len(), 2);
+
+        // Rest frames stay on the real screen windows; overview frames park in
+        // a top-right shelf (~12% display height) preserving aspect ratio.
+        let (a, b) = (&layout.floating[0], &layout.floating[1]);
+        assert_eq!(a.rest, float_a);
+        assert_eq!(b.rest, float_b);
+        assert!(!a.focused && b.focused);
+        assert!((a.overview.h - SIZE.1 * 0.12).abs() < 1e-6);
+        assert!((b.overview.h - SIZE.1 * 0.12).abs() < 1e-6);
+        assert!((a.overview.w / a.overview.h - 1.25).abs() < 1e-6);
+        assert!((b.overview.w / b.overview.h - 1.0).abs() < 1e-6);
+        assert!(a.overview.x + a.overview.w < b.overview.x);
+        assert!((b.overview.x + b.overview.w - (SIZE.0 - metrics.ribbon_padding)).abs() < 1e-6);
+
+        // Reserved top band keeps the active row's label and strip strictly
+        // below the floating shelf.
+        let (a_ov, b_ov) = (a.overview, b.overview);
+        let shelf_bottom = a_ov.y + a_ov.h;
+        assert!(layout.margins.0 > shelf_bottom);
+        assert!(layout.strips[1].label.y >= layout.margins.0);
+
+        // Hit-testing hits the pinned shelf regardless of scroll or pan.
+        layout.pan_by(1, -500.0);
+        layout.scroll_by(-200.0);
+        assert_eq!(
+            hit_test(&layout, a_ov.x + 5.0, a_ov.y + 5.0),
+            Hit::Floating { key: 7 }
+        );
+        assert_eq!(
+            hit_test(&layout, b_ov.x + 5.0, b_ov.y + 5.0),
+            Hit::Floating { key: 8 }
+        );
+
+        // Switching virtual rows leaves floating rest frames untouched on screen.
+        reanchor(&mut layout, 0, None);
+        assert_eq!(layout.floating[0].rest, float_a);
+        assert_eq!(layout.floating[1].rest, float_b);
+    }
+
+    #[test]
+    fn many_floating_windows_shrink_proportionally_to_fit_shelf_width() {
+        let floating: Vec<_> = (0..16_u32)
+            .map(|i| FloatingInput {
+                key: 100 + i,
+                window_id: (100 + i).cast_signed(),
+                frame: Rect::new(100.0, 100.0, 600.0, 300.0),
+                focused: i == 0,
+            })
+            .collect();
+        let metrics = Metrics::default();
+        let layout = layout_display(SIZE, &strips(), &floating, 1.0, &metrics);
+        assert_eq!(layout.floating.len(), 16);
+        let first = &layout.floating[0].overview;
+        let last = &layout.floating[15].overview;
+        assert!(
+            first.x >= metrics.ribbon_padding - 1e-6,
+            "shelf overflowed left edge: {first:?}"
+        );
+        assert!(
+            (last.x + last.w - (SIZE.0 - metrics.ribbon_padding)).abs() < 1e-6,
+            "shelf right edge misaligned: {last:?}"
+        );
+        for pair in layout.floating.windows(2) {
+            assert!(pair[0].overview.x + pair[0].overview.w < pair[1].overview.x);
+            assert!((pair[0].overview.w / pair[0].overview.h - 2.0).abs() < 1e-6);
+        }
     }
 
     #[test]

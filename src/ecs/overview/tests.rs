@@ -299,7 +299,7 @@ fn clicking_another_display_keeps_the_row_scrolled_to_on_the_focused_one() {
                         .expect("window 200 has a card");
                     let pick = Pick {
                         display: external,
-                        virtual_index: 0,
+                        virtual_index: Some(0),
                         focus: Some(key),
                     };
                     write_back(
@@ -797,4 +797,189 @@ fn layout_change_during_opening_triggers_follow_once_open() {
     // Subsequent idle frames stay silent.
     app.update();
     assert_eq!(app.world().resource::<FollowRuns>().0, 1);
+}
+
+fn assert_rejected_floating_persists_across_follow(scene: &Scene) {
+    // Invisible popovers (or off-Space floaters) rejected by `WindowServerInfo`
+    // on open must stay excluded across follow-up relayouts (`gather_following`
+    // without `info`).
+    let mut ws_info = WindowServerInfo::default();
+    ws_info
+        .frames
+        .insert(302, Rect::new(200.0, 150.0, 400.0, 400.0));
+    ws_info
+        .frames
+        .insert(301, Rect::new(900.0, 150.0, 400.0, 400.0));
+    ws_info.invisible.insert(301);
+    let opened = gather(scene, Some(&ws_info));
+    let followed = gather_following(scene, &opened);
+    let followed_ids: Vec<i32> = followed[0]
+        .layout
+        .floating
+        .iter()
+        .map(|w| w.window_id)
+        .collect();
+    assert_eq!(followed_ids, [302]);
+}
+
+#[test]
+fn floating_windows_gather_sorted_left_to_right_and_click_keeps_scrolled_row() {
+    let config = Config::try_from(
+        r#"
+default_workspaces = 2
+
+[windows.floater]
+title = "Floater.*"
+floating = true
+"#,
+    )
+    .expect("config parses");
+    // Spawn right-side floater (301) BEFORE left-side floater (302) to verify
+    // `gather` sorts shelf thumbnails left-to-right by screen centre X.
+    let harness = TestHarness::new()
+        .with_config(config)
+        .with_workspace_window(100, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(101, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(301, TEST_WORKSPACE_ID, |data| {
+            data.title = "Floater Right".to_string();
+            data.frame = IRect::new(900, 150, 1300, 550);
+        })
+        .with_workspace_window(302, TEST_WORKSPACE_ID, |data| {
+            data.title = "Floater Left".to_string();
+            data.frame = IRect::new(200, 150, 600, 550);
+        });
+
+    let commands = vec![
+        tick(),
+        // Focus tiled window 100, then move it to virtual row 1 (staying on row 0).
+        Event::Command {
+            command: Command::Window(Operation::Focus(crate::commands::Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+        },
+        tick(),
+        tick(),
+        tick(),
+    ];
+
+    harness
+        .on_iteration(3, |world, _| {
+            world
+                .run_system_once(|scene: Scene, windows: Windows, mut commands: Commands| {
+                    let mut entries = gather(&scene, None);
+                    assert_eq!(entries.len(), 1);
+                    let floating_ids: Vec<i32> = entries[0]
+                        .layout
+                        .floating
+                        .iter()
+                        .map(|w| w.window_id)
+                        .collect();
+                    assert_eq!(
+                        floating_ids,
+                        [302, 301],
+                        "floating shelf must sort left-to-right by screen centre"
+                    );
+                    for strip in &entries[0].layout.strips {
+                        assert!(
+                            strip.windows.iter().all(|w| w.window_id < 300),
+                            "floating windows must not remain inside tiled strips"
+                        );
+                    }
+
+                    assert_rejected_floating_persists_across_follow(&scene);
+
+                    // Scroll to virtual row 1 and click the left floating thumbnail (302).
+                    scroll_laptop_to_row(&mut entries, 1);
+                    let thumb = entries[0].layout.floating[0].overview;
+                    let hit = hit_test(&entries[0].layout, thumb.x + 2.0, thumb.y + 2.0);
+                    let Hit::Floating { key } = hit else {
+                        panic!("expected Hit::Floating on shelf thumbnail, got {hit:?}");
+                    };
+                    let pick = Pick {
+                        display: 0,
+                        virtual_index: None,
+                        focus: Some(key),
+                    };
+                    write_back(
+                        &entries,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                        Some(&pick),
+                    );
+                    commands.focus_entity(key, true);
+                })
+                .expect("gather + select runs");
+        })
+        .on_iteration(5, |world, _| {
+            let rows = laptop_rows(world);
+            let selected: Vec<u32> = rows.iter().filter(|r| r.2).map(|r| r.0).collect();
+            assert_eq!(
+                selected,
+                [1],
+                "scrolled virtual row 1 is activated: {rows:?}"
+            );
+            assert_eq!(
+                focused_ids(world),
+                [302],
+                "clicked floating window has focus"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
+    use crate::commands::Direction;
+
+    let mut harness = TestHarness::new()
+        .with_workspace_window(100, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(101, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(200, TEST_WORKSPACE_ID, |data| {
+            data.frame = IRect::new(400, 200, 900, 600);
+        });
+    harness.world().init_resource::<OverviewPhase>();
+
+    let commands = vec![
+        tick(),
+        // Iteration 1: float & focus window 200, open overview phase.
+        tick(),
+        // Iteration 2: press `focus east` while lone floating window 200 is focused in overview.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+    ];
+
+    harness
+        .on_iteration(1, |world, _| {
+            let float_entity = world
+                .query::<(Entity, &Window)>()
+                .iter(world)
+                .find(|(_, w)| w.id() == 200)
+                .map(|(e, _)| e)
+                .expect("window 200");
+            for (_, mut strip) in world.query::<(Entity, &mut LayoutStrip)>().iter_mut(world) {
+                strip.remove(float_entity);
+            }
+            let prev_focused: Vec<Entity> = world
+                .query_filtered::<Entity, With<FocusedMarker>>()
+                .iter(world)
+                .collect();
+            for entity in prev_focused {
+                world.entity_mut(entity).remove::<FocusedMarker>();
+            }
+            world
+                .entity_mut(float_entity)
+                .insert((Unmanaged::Floating, FocusedMarker));
+            *world.resource_mut::<OverviewPhase>() = OverviewPhase::Open;
+        })
+        .on_iteration(2, |world, _| {
+            let focused = focused_ids(world);
+            assert!(
+                focused == [100] || focused == [101],
+                "focus east in overview must fall back from lone floater 200 to tiled strip, got {focused:?}"
+            );
+        })
+        .run(commands);
 }

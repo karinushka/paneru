@@ -27,19 +27,19 @@ use crate::ecs::{
     UpdateSet,
 };
 use crate::events::Event;
-#[cfg(test)]
-use crate::manager::spaces::DisplaySpaces;
-use crate::manager::spaces::{DesktopBridge, SpaceCensus, SpaceId};
+use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceError, SpaceId};
 use crate::manager::{Display, Window};
 use crate::platform::{WinID, WorkspaceId};
 
+pub(crate) mod assign;
 pub(crate) mod lifecycle;
 pub(crate) mod ops;
 pub(crate) mod pin;
+pub(crate) mod rules;
 
 #[cfg(test)]
 pub use pin::PinnedDesktopWindow;
-pub use pin::SentToInactiveDesktop;
+pub use rules::SentToInactiveDesktop;
 
 /// Maximum wall/virtual time a dispatched `WMBridge` mutation waits for OS
 /// census/membership confirmation before expiring (§2.4).
@@ -251,7 +251,7 @@ impl Plugin for DesktopEventsPlugin {
             )
             .add_systems(
                 Update,
-                pin::apply_window_desktop_rules
+                rules::apply_window_desktop_rules
                     .in_set(UpdateSet::Spawn)
                     .after(super::triggers::apply_window_defaults)
                     .after(super::systems::detect_tabbed_windows)
@@ -260,7 +260,7 @@ impl Plugin for DesktopEventsPlugin {
             )
             .add_systems(
                 PostUpdate,
-                pin::cleanup_sent_to_inactive_markers.in_set(PostUpdateSet::Bookkeeping),
+                rules::cleanup_sent_to_inactive_markers.in_set(PostUpdateSet::Bookkeeping),
             );
     }
 }
@@ -293,6 +293,103 @@ fn refresh_census_from_bridge(bridge: &DesktopBridge, census: &mut ResMut<Deskto
         }
         Err(err) => debug!("desktop census refresh skipped: {err}"),
     }
+}
+
+/// Logs `err`, refreshes [`DesktopCensus`] if `err.request_may_have_applied`,
+/// and unwraps `Ok(val)` into `Some(val)`.
+pub(super) fn exec_bridge_op<T>(
+    label: &str,
+    result: Result<T, SpaceError>,
+    bridge: &DesktopBridge,
+    census: &mut ResMut<DesktopCensus>,
+) -> Option<T> {
+    match result {
+        Ok(val) => Some(val),
+        Err(err) => {
+            warn!("{label} failed: {err}");
+            if err.request_may_have_applied {
+                refresh_census_from_bridge(bridge, census);
+            }
+            None
+        }
+    }
+}
+
+/// Picks the preferred non-fullscreen `LayoutStrip` for `raw_space_id`
+/// (`SelectedVirtualMarker` first, then lowest `virtual_index`).
+pub(super) fn select_desktop_strip<'a>(
+    strips: impl IntoIterator<Item = (Entity, &'a LayoutStrip, bool)>,
+    raw_space_id: WorkspaceId,
+) -> Option<Entity> {
+    strips
+        .into_iter()
+        .filter(|(_, s, _)| s.id() == raw_space_id && !s.is_fullscreen())
+        .min_by_key(|(_, s, selected)| (!*selected, s.virtual_index))
+        .map(|(entity, _, _)| entity)
+}
+
+/// Spawns `strip` onto `display_id` if that display exists in ECS.
+pub(super) fn spawn_desktop_strip(
+    strip: LayoutStrip,
+    display_id: CGDirectDisplayID,
+    displays: &Query<(Entity, &Display, Has<ActiveDisplayMarker>)>,
+    active: bool,
+    commands: &mut Commands,
+) {
+    if let Some((disp_entity, disp, _)) = displays.iter().find(|(_, d, _)| d.id() == display_id) {
+        commands.spawn_layout_strip(strip, disp.bounds().min, disp_entity, active);
+    }
+}
+
+/// Validates that every Space currently containing `wid` is an ordinary Desktop
+/// on a single display. Returns `Ok(None)` when `wid` has no Space memberships.
+pub(super) fn validate_desktop_memberships(
+    wid: WinID,
+    census: &SpaceCensus,
+    bridge: &DesktopBridge,
+) -> Result<Option<(CGDirectDisplayID, Vec<SpaceId>)>, String> {
+    let memberships = bridge
+        .spaces_for_window(wid)
+        .map_err(|e| format!("reading spaces for window {wid}: {e}"))?;
+    let Some(&first) = memberships.first() else {
+        return Ok(None);
+    };
+    let Some(first_rec) = census.find_space(first) else {
+        return Err(format!("window {wid} space {first} missing from census"));
+    };
+    let disp_id = first_rec.display_id;
+    let all_same_display_desktops = memberships.iter().all(|sid| {
+        census
+            .find_space(*sid)
+            .is_some_and(|rec| rec.kind.is_desktop() && rec.display_id == disp_id)
+    });
+    if !all_same_display_desktops {
+        return Err(format!(
+            "window {wid} is not exclusively on ordinary Desktops of display {disp_id}"
+        ));
+    }
+    Ok(Some((disp_id, memberships)))
+}
+
+/// Joins `wid` onto every ordinary Desktop on `disp` not already present in
+/// `memberships`, stopping on the first bridge error. Returns `(added, failed,
+/// may_have_applied)`.
+pub(super) fn join_window_to_desktops(
+    wid: WinID,
+    disp: &DisplaySpaces,
+    memberships: &[SpaceId],
+    bridge: &mut DesktopBridge,
+    label: &str,
+) -> (Vec<SpaceId>, bool, bool) {
+    let mut added = Vec::new();
+    for sid in disp.desktop_ids().filter(|sid| !memberships.contains(sid)) {
+        if let Err(err) = bridge.add_windows_to_space(&[wid], sid, false) {
+            warn!("{label} failed adding {wid} to {sid}: {err}");
+            return (added, true, err.request_may_have_applied);
+        }
+        added.push(sid);
+    }
+    (added, false, false)
 }
 
 const MAX_INITIAL_CENSUS_ATTEMPTS: u8 = 3;
@@ -408,12 +505,9 @@ fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Confir
                 let Some(disp) = c.display(disp_id) else {
                     return false;
                 };
-                bridge.spaces_for_window(wid).is_ok_and(|now| {
-                    disp.spaces
-                        .iter()
-                        .filter(|s| s.kind.is_desktop())
-                        .all(|s| now.contains(&s.id))
-                })
+                bridge
+                    .spaces_for_window(wid)
+                    .is_ok_and(|now| disp.desktop_ids().all(|sid| now.contains(&sid)))
             })
         }),
         ConfirmCondition::DisplayOrder {
@@ -575,22 +669,16 @@ fn migrate_confirmed_strips_to_neighbor(
         return None;
     }
 
-    let existing_dest = targets
-        .strips
-        .iter()
-        .filter(|(_, s, _, _)| s.id() == raw_dst && !s.is_fullscreen())
-        .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
-        .map(|(entity, _, _, _)| entity);
+    let existing_dest = select_desktop_strip(
+        targets.strips.iter().map(|(e, s, _, sel)| (e, s, sel)),
+        raw_dst,
+    );
     if let Some(dest_entity) = existing_dest {
         if let Ok((_, mut dest_strip, _, _)) = targets.strips.get_mut(dest_entity) {
             dest_strip.append_strip(&mut combined);
         }
-    } else if let Some((disp_entity, disp, _)) = targets
-        .displays
-        .iter()
-        .find(|(_, d, _)| d.id() == display_id)
-    {
-        commands.spawn_layout_strip(combined, disp.bounds().min, disp_entity, false);
+    } else {
+        spawn_desktop_strip(combined, display_id, &targets.displays, false, commands);
     }
     migrated_first
 }
@@ -602,18 +690,13 @@ fn ensure_strip_exists(
     commands: &mut Commands,
 ) {
     let raw_id = space_id.get();
-    let exists = targets.strips.iter().any(|(_, s, _, _)| s.id() == raw_id);
-    if !exists
-        && let Some((disp_entity, disp, _)) = targets
-            .displays
-            .iter()
-            .find(|(_, d, _)| d.id() == display_id)
-    {
-        commands.spawn_layout_strip(
+    if !targets.strips.iter().any(|(_, s, _, _)| s.id() == raw_id) {
+        spawn_desktop_strip(
             LayoutStrip::new(raw_id, 0),
-            disp.bounds().min,
-            disp_entity,
+            display_id,
+            &targets.displays,
             false,
+            commands,
         );
     }
 }
@@ -728,18 +811,12 @@ fn run_post_confirm(
                     targets,
                     commands,
                 );
-            } else {
-                let raw_neighbor = neighbor_id.get();
-                if let Some(strip_entity) = targets
-                    .strips
-                    .iter()
-                    .filter(|(_, s, _, _)| s.id() == raw_neighbor && !s.is_fullscreen())
-                    .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
-                    .map(|(entity, _, _, _)| entity)
-                    && let Ok(mut ec) = commands.get_entity(strip_entity)
-                {
-                    ec.try_insert(SelectedVirtualMarker);
-                }
+            } else if let Some(strip_entity) = select_desktop_strip(
+                targets.strips.iter().map(|(e, s, _, sel)| (e, s, sel)),
+                neighbor_id.get(),
+            ) && let Ok(mut ec) = commands.get_entity(strip_entity)
+            {
+                ec.try_insert(SelectedVirtualMarker);
             }
             (
                 Some(PendingDesktopOp::new(

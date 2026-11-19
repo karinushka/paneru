@@ -53,12 +53,12 @@ impl NotifyHandler {
             KnownCGSEvent::ManagedSpaceMembershipUpdated,
             KnownCGSEvent::SpaceWindowDestroyed,
         ];
-        for event in events {
+        events.into_iter().try_for_each(|event| {
             unsafe {
                 SLSRegisterConnectionNotifyProc(cid, Self::callback, event.into(), this.cast())
             }
-            .to_result(function_name!())?;
-        }
+            .to_result(function_name!())
+        })?;
 
         Ok(scopeguard::guard(
             pinned,

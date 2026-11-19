@@ -262,9 +262,10 @@ fn parse_desktop_operation(argv: &[&str]) -> Result<DesktopOperation> {
                 all => (all, None),
             };
             let target = match target_args {
-                ["all"] => DesktopAssignTarget::All,
-                ["this"] => DesktopAssignTarget::This,
-                ["none"] => DesktopAssignTarget::None,
+                [mode] => DesktopAssignTarget::parse_mode(mode).map_or_else(
+                    || parse_desktop_target(target_args).map(DesktopAssignTarget::Desktop),
+                    Ok,
+                )?,
                 other => DesktopAssignTarget::Desktop(parse_desktop_target(other)?),
             };
             DesktopOperation::Assign { target, pid }

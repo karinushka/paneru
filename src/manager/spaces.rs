@@ -1,5 +1,4 @@
-//! Native macOS Space census domain model, `DesktopBridge` abstraction, and
-//! deterministic in-memory `FakeDesktopBridge` for headless ECS testing.
+//! Native macOS Space census domain model and [`DesktopBridge`] abstraction.
 
 pub mod bridge;
 
@@ -7,8 +6,6 @@ use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut};
-#[cfg(test)]
-use std::sync::{Arc, Mutex};
 
 use objc2_core_graphics::CGDirectDisplayID;
 
@@ -111,10 +108,24 @@ pub struct DisplaySpaces {
 }
 
 impl DisplaySpaces {
+    /// Ordinary Desktop (`type == 0`) Space IDs on this display, in Mission Control order.
+    pub fn desktop_ids(&self) -> impl Iterator<Item = SpaceId> + '_ {
+        self.spaces
+            .iter()
+            .filter(|s| s.kind.is_desktop())
+            .map(|s| s.id)
+    }
+
+    /// Record for this display's active (`current_space`) Space.
+    #[must_use]
+    pub fn current_space_record(&self) -> Option<&SpaceRecord> {
+        self.spaces.iter().find(|s| s.id == self.current_space)
+    }
+
     /// Number of ordinary `SpaceKind::Desktop` Spaces on this display.
     #[must_use]
     pub fn desktop_count(&self) -> usize {
-        self.spaces.iter().filter(|s| s.kind.is_desktop()).count()
+        self.desktop_ids().count()
     }
 
     /// Looks up the `n`th (1-based) ordinary Desktop on this display.
@@ -175,7 +186,6 @@ impl SpaceCensus {
                     ));
                 }
                 let mut desktop_ordinal = 0u32;
-                let mut found_current = false;
                 let spaces = raw
                     .spaces
                     .into_iter()
@@ -187,8 +197,6 @@ impl SpaceCensus {
                                 format!("duplicate space id {id} in SkyLight census"),
                             ));
                         }
-                        let active = id == raw.current_space;
-                        found_current |= active;
                         let desktop_number = kind.is_desktop().then(|| {
                             desktop_ordinal += 1;
                             desktop_ordinal
@@ -200,11 +208,11 @@ impl SpaceCensus {
                             space_index,
                             desktop_number,
                             kind,
-                            active,
+                            active: id == raw.current_space,
                         })
                     })
                     .collect::<Result<Vec<_>, _>>()?;
-                if !found_current {
+                if !spaces.iter().any(|s| s.active) {
                     return Err(SpaceError::new(
                         SpaceErrorKind::QueryFailed,
                         format!(
@@ -427,358 +435,6 @@ impl DerefMut for DesktopBridge {
 }
 
 #[cfg(test)]
-type DeferredFakeOp = Box<dyn FnOnce(&mut FakeDesktopState) + Send>;
-
-/// Simulated `WindowServer` Space state for headless unit and `TestHarness` tests.
-#[cfg(test)]
-pub struct FakeDesktopState {
-    pub locked: bool,
-    pub displays: Vec<RawDisplaySpaces>,
-    pub memberships: HashMap<WinID, Vec<SpaceId>>,
-    pub sticky: HashSet<WinID>,
-    pub associated: HashMap<WinID, Vec<WinID>>,
-    pub window_meta: HashMap<WinID, WindowServerMeta>,
-    pub next_space_id: u64,
-    /// When `true`, async mutations queue into `deferred` until [`Self::flush_deferred`]
-    /// runs, exercising multi-tick confirmation polling in ECS tests.
-    pub defer_mutations: bool,
-    deferred: Vec<DeferredFakeOp>,
-}
-
-#[cfg(test)]
-impl Default for FakeDesktopState {
-    fn default() -> Self {
-        let first = SpaceId::new(1).expect("nonzero");
-        Self {
-            locked: false,
-            displays: vec![RawDisplaySpaces {
-                display_id: 1,
-                skylight_display: "Main".to_string(),
-                current_space: first,
-                spaces: vec![(first, "uuid-1".to_string(), SpaceKind::Desktop)],
-            }],
-            memberships: HashMap::new(),
-            sticky: HashSet::new(),
-            associated: HashMap::new(),
-            window_meta: HashMap::new(),
-            next_space_id: 100,
-            defer_mutations: false,
-            deferred: Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl FakeDesktopState {
-    pub fn flush_deferred(&mut self) {
-        let ops = std::mem::take(&mut self.deferred);
-        for op in ops {
-            op(self);
-        }
-    }
-
-    fn run_or_defer(&mut self, op: impl FnOnce(&mut Self) + Send + 'static) {
-        if self.defer_mutations {
-            self.deferred.push(Box::new(op));
-        } else {
-            op(self);
-        }
-    }
-
-    pub fn register_window(&mut self, wid: WinID, pid: Pid, space_id: SpaceId) {
-        self.window_meta
-            .insert(wid, WindowServerMeta { layer: 0, pid });
-        self.memberships.insert(wid, vec![space_id]);
-        self.associated.entry(wid).or_insert_with(|| vec![wid]);
-    }
-}
-
-/// Cloneable handle to a [`FakeDesktopState`] implementing [`DesktopBridgeApi`].
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub struct FakeDesktopBridge {
-    state: Arc<Mutex<FakeDesktopState>>,
-}
-
-#[cfg(test)]
-impl FakeDesktopBridge {
-    #[must_use]
-    pub fn state(&self) -> Arc<Mutex<FakeDesktopState>> {
-        Arc::clone(&self.state)
-    }
-}
-
-#[cfg(test)]
-impl DesktopBridgeApi for FakeDesktopBridge {
-    fn read_census(&self) -> Result<SpaceCensus, SpaceError> {
-        let guard = self.state.lock().expect("fake state mutex");
-        SpaceCensus::from_raw(guard.displays.clone())
-    }
-
-    fn session_unlocked(&self) -> Result<(), SpaceError> {
-        let guard = self.state.lock().expect("fake state mutex");
-        if guard.locked {
-            Err(SpaceError::new(
-                SpaceErrorKind::SessionLocked,
-                "simulated screen is locked",
-            ))
-        } else {
-            Ok(())
-        }
-    }
-
-    fn spaces_for_window(&self, window_id: WinID) -> Result<Vec<SpaceId>, SpaceError> {
-        let guard = self.state.lock().expect("fake state mutex");
-        Ok(guard
-            .memberships
-            .get(&window_id)
-            .cloned()
-            .unwrap_or_default())
-    }
-
-    fn windows_in_space(
-        &self,
-        space_id: SpaceId,
-        _include_minimized: bool,
-    ) -> Result<Vec<WinID>, SpaceError> {
-        let guard = self.state.lock().expect("fake state mutex");
-        Ok(guard
-            .memberships
-            .iter()
-            .filter(|(wid, spaces)| {
-                spaces.contains(&space_id)
-                    && guard
-                        .window_meta
-                        .get(wid)
-                        .is_none_or(|meta| meta.is_app_window())
-            })
-            .map(|(&wid, _)| wid)
-            .collect())
-    }
-
-    fn window_is_sticky(&self, window_id: WinID) -> Option<bool> {
-        let guard = self.state.lock().expect("fake state mutex");
-        guard
-            .memberships
-            .contains_key(&window_id)
-            .then(|| guard.sticky.contains(&window_id))
-    }
-
-    fn associated_windows(&self, window_id: WinID) -> Result<Vec<WinID>, SpaceError> {
-        let guard = self.state.lock().expect("fake state mutex");
-        Ok(guard
-            .associated
-            .get(&window_id)
-            .cloned()
-            .unwrap_or_else(|| vec![window_id]))
-    }
-
-    fn window_meta(&self, window_id: WinID) -> Option<WindowServerMeta> {
-        let guard = self.state.lock().expect("fake state mutex");
-        guard.window_meta.get(&window_id).copied()
-    }
-
-    fn windows_for_pid(&self, pid: Pid) -> Vec<WinID> {
-        let guard = self.state.lock().expect("fake state mutex");
-        guard
-            .window_meta
-            .iter()
-            .filter(|(wid, meta)| {
-                meta.pid == pid
-                    && meta.is_app_window()
-                    && guard.memberships.get(wid).is_some_and(|s| !s.is_empty())
-            })
-            .map(|(&wid, _)| wid)
-            .collect()
-    }
-
-    fn activate_space(
-        &mut self,
-        skylight_display: &str,
-        target: SpaceId,
-        _hide: &[SpaceId],
-    ) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let disp = skylight_display.to_string();
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            if let Some(display) = state.displays.iter_mut().find(|d| {
-                d.skylight_display == disp && d.spaces.iter().any(|(id, _, _)| *id == target)
-            }) {
-                display.current_space = target;
-            }
-        });
-        Ok(())
-    }
-
-    fn create_desktop(&mut self) -> Result<SpaceId, SpaceError> {
-        self.session_unlocked()?;
-        let mut guard = self.state.lock().expect("fake state mutex");
-        let raw_id = guard.next_space_id;
-        guard.next_space_id += 1;
-        let new_id = SpaceId::new(raw_id).expect("nonzero");
-        guard.run_or_defer(move |state| {
-            if let Some(display) = state.displays.first_mut() {
-                display
-                    .spaces
-                    .push((new_id, format!("uuid-{raw_id}"), SpaceKind::Desktop));
-            }
-        });
-        Ok(new_id)
-    }
-
-    fn destroy_space(&mut self, space_id: SpaceId) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            let Some(display) = state
-                .displays
-                .iter_mut()
-                .find(|d| d.spaces.iter().any(|(id, _, _)| *id == space_id))
-            else {
-                return;
-            };
-            if display.current_space == space_id {
-                return;
-            }
-            let active = display.current_space;
-            display.spaces.retain(|(id, _, _)| *id != space_id);
-            for spaces in state.memberships.values_mut() {
-                if let Some(pos) = spaces.iter().position(|&s| s == space_id) {
-                    spaces.remove(pos);
-                    if spaces.is_empty() {
-                        spaces.push(active);
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-
-    fn move_windows_to_space(
-        &mut self,
-        windows: &[WinID],
-        space_id: SpaceId,
-    ) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let win_vec = windows.to_vec();
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            for wid in win_vec {
-                if !state.sticky.contains(&wid) {
-                    state.memberships.insert(wid, vec![space_id]);
-                }
-            }
-        });
-        Ok(())
-    }
-
-    fn add_windows_to_space(
-        &mut self,
-        windows: &[WinID],
-        space_id: SpaceId,
-        remove_others: bool,
-    ) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let win_vec = windows.to_vec();
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            for wid in win_vec {
-                if state.sticky.contains(&wid) {
-                    continue;
-                }
-                let entry = state.memberships.entry(wid).or_default();
-                if remove_others {
-                    entry.clear();
-                    entry.push(space_id);
-                } else if !entry.contains(&space_id) {
-                    entry.push(space_id);
-                }
-            }
-        });
-        Ok(())
-    }
-
-    fn assign_process(&mut self, pid: Pid, mode: AssignMode) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            let pid_windows: Vec<WinID> = state
-                .window_meta
-                .iter()
-                .filter(|(_, m)| m.pid == pid && m.is_app_window())
-                .map(|(&wid, _)| wid)
-                .collect();
-            for wid in pid_windows {
-                let disp_idx = state
-                    .memberships
-                    .get(&wid)
-                    .and_then(|s| s.first())
-                    .and_then(|first| {
-                        state
-                            .displays
-                            .iter()
-                            .position(|d| d.spaces.iter().any(|(id, _, _)| id == first))
-                    })
-                    .unwrap_or(0);
-                let Some(disp) = state.displays.get(disp_idx) else {
-                    continue;
-                };
-                match mode {
-                    AssignMode::AllSpaces => {
-                        let desktops: Vec<SpaceId> = disp
-                            .spaces
-                            .iter()
-                            .filter(|(_, _, k)| k.is_desktop())
-                            .map(|(id, _, _)| *id)
-                            .collect();
-                        state.sticky.insert(wid);
-                        state.memberships.insert(wid, desktops);
-                    }
-                    AssignMode::Space(target) => {
-                        state.sticky.remove(&wid);
-                        state.memberships.insert(wid, vec![target]);
-                    }
-                    AssignMode::Clear => {
-                        if state.sticky.remove(&wid) {
-                            state.memberships.insert(wid, vec![disp.current_space]);
-                        }
-                    }
-                }
-            }
-        });
-        Ok(())
-    }
-
-    fn move_space_to_index(
-        &mut self,
-        space_id: SpaceId,
-        skylight_display: &str,
-        index: u32,
-    ) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let disp_name = skylight_display.to_string();
-        let mut guard = self.state.lock().expect("fake state mutex");
-        guard.run_or_defer(move |state| {
-            let Some(display) = state
-                .displays
-                .iter_mut()
-                .find(|d| d.skylight_display == disp_name)
-            else {
-                return;
-            };
-            let Some(from) = display.spaces.iter().position(|(id, _, _)| *id == space_id) else {
-                return;
-            };
-            let entry = display.spaces.remove(from);
-            let to = (index as usize).min(display.spaces.len());
-            display.spaces.insert(to, entry);
-        });
-        Ok(())
-    }
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -915,59 +571,6 @@ mod tests {
         assert_eq!(
             SpaceCensus::from_raw(missing_active).unwrap_err().kind,
             SpaceErrorKind::QueryFailed
-        );
-    }
-
-    #[test]
-    fn fake_bridge_simulates_create_activate_move_destroy_migration_and_deferred_apply() {
-        let mut bridge = FakeDesktopBridge::default();
-        bridge
-            .state()
-            .lock()
-            .unwrap()
-            .register_window(42, 1000, sid(1));
-
-        let created = bridge.create_desktop().expect("creates desktop 2");
-        assert_eq!(
-            bridge
-                .read_census()
-                .unwrap()
-                .display(1)
-                .unwrap()
-                .desktop_count(),
-            2
-        );
-
-        // Move window 42 to the newly created Desktop, then destroy that Desktop
-        // while Desktop 1 is active: window 42 migrates back to active Desktop 1.
-        bridge.move_windows_to_space(&[42], created).unwrap();
-        assert_eq!(bridge.spaces_for_window(42).unwrap(), vec![created]);
-
-        bridge.destroy_space(created).unwrap();
-        assert_eq!(bridge.spaces_for_window(42).unwrap(), vec![sid(1)]);
-
-        // Deferred mode holds mutations until `flush_deferred()`.
-        let s2 = bridge.create_desktop().unwrap();
-        bridge.state().lock().unwrap().defer_mutations = true;
-        bridge.activate_space("Main", s2, &[sid(1)]).unwrap();
-        assert_eq!(
-            bridge
-                .read_census()
-                .unwrap()
-                .display(1)
-                .unwrap()
-                .current_space,
-            sid(1)
-        );
-        bridge.state().lock().unwrap().flush_deferred();
-        assert_eq!(
-            bridge
-                .read_census()
-                .unwrap()
-                .display(1)
-                .unwrap()
-                .current_space,
-            s2
         );
     }
 }

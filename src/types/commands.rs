@@ -336,6 +336,19 @@ pub enum DesktopAssignTarget {
     None,
 }
 
+impl DesktopAssignTarget {
+    /// Parses one of the non-targeted mode keywords (`"all"`, `"this"`, `"none"`).
+    #[must_use]
+    pub fn parse_mode(token: &str) -> Option<Self> {
+        match token {
+            "all" => Some(Self::All),
+            "this" => Some(Self::This),
+            "none" => Some(Self::None),
+            _ => None,
+        }
+    }
+}
+
 /// Operations on native macOS Desktops (`SkyLight` / `WMBridge`).
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]

@@ -3,7 +3,6 @@
 use std::collections::HashSet;
 
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, Without};
 use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut, SystemParam};
@@ -12,7 +11,7 @@ use tracing::{debug, warn};
 
 use super::{
     ConfirmCondition, DesktopCensus, PendingDesktopOp, PendingDesktopOps, PostConfirmAction,
-    refresh_census_from_bridge,
+    exec_bridge_op, select_desktop_strip, spawn_desktop_strip,
 };
 use crate::commands::{Command, DesktopOperation, DesktopTarget, Direction, MoveFocus};
 use crate::ecs::focus::FocusHistory;
@@ -86,28 +85,12 @@ fn resolve_directional_space<'a>(
     include_fullscreen: bool,
 ) -> Option<&'a SpaceRecord> {
     let cur_idx = disp.spaces.iter().position(|s| s.active)?;
-    if include_fullscreen {
-        return match direction {
-            Direction::West | Direction::North => {
-                cur_idx.checked_sub(1).and_then(|i| disp.spaces.get(i))
-            }
-            Direction::East | Direction::South => disp.spaces.get(cur_idx + 1),
-            Direction::First => disp.spaces.first(),
-            Direction::Last => disp.spaces.last(),
-            Direction::Nth(idx) => u32::try_from(idx.saturating_add(1))
-                .ok()
-                .and_then(|n| disp.desktop_by_number(n)),
-        };
-    }
+    let matches = |s: &&SpaceRecord| include_fullscreen || s.kind.is_desktop();
     match direction {
-        Direction::West | Direction::North => {
-            disp.spaces[..cur_idx].iter().rfind(|s| s.kind.is_desktop())
-        }
-        Direction::East | Direction::South => disp.spaces[cur_idx + 1..]
-            .iter()
-            .find(|s| s.kind.is_desktop()),
-        Direction::First => disp.spaces.iter().find(|s| s.kind.is_desktop()),
-        Direction::Last => disp.spaces.iter().rfind(|s| s.kind.is_desktop()),
+        Direction::West | Direction::North => disp.spaces[..cur_idx].iter().rfind(matches),
+        Direction::East | Direction::South => disp.spaces[cur_idx + 1..].iter().find(matches),
+        Direction::First => disp.spaces.iter().find(matches),
+        Direction::Last => disp.spaces.iter().rfind(matches),
         Direction::Nth(idx) => u32::try_from(idx.saturating_add(1))
             .ok()
             .and_then(|n| disp.desktop_by_number(n)),
@@ -121,6 +104,19 @@ pub(super) fn active_display_id(
         .iter()
         .find_map(|(_, d, active)| active.then_some(d.id()))
         .or_else(|| displays.iter().next().map(|(_, d, _)| d.id()))
+}
+
+pub(super) fn read_active_census(
+    op_name: &str,
+    bridge: &DesktopBridge,
+    world: &DesktopOpWorld,
+) -> Option<(CGDirectDisplayID, SpaceCensus)> {
+    let active_disp_id = active_display_id(&world.displays)?;
+    let census = bridge
+        .read_census()
+        .inspect_err(|err| warn!("{op_name} census failed: {err}"))
+        .ok()?;
+    Some((active_disp_id, census))
 }
 
 pub(super) fn sibling_space_ids(census: &SpaceCensus, target: &SpaceRecord) -> Vec<SpaceId> {
@@ -285,11 +281,15 @@ fn dispatch_focus_space(
         return false;
     };
     let hide = sibling_space_ids(census, target);
-    if let Err(err) = bridge.activate_space(&disp.skylight_display, target.id, &hide) {
-        warn!("desktop focus {} failed: {err}", target.id);
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.activate_space(&disp.skylight_display, target.id, &hide);
+    if exec_bridge_op(
+        &format!("desktop focus {}", target.id),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return false;
     }
     save_active_strip_focus(
@@ -317,13 +317,7 @@ fn dispatch_focus_space(
 }
 
 fn handle_focus(target: &DesktopTarget, bridge: &mut DesktopBridge, world: &mut DesktopOpWorld) {
-    let Some(active_disp_id) = active_display_id(&world.displays) else {
-        return;
-    };
-    let Ok(census) = bridge
-        .read_census()
-        .inspect_err(|err| warn!("desktop focus census failed: {err}"))
-    else {
+    let Some((active_disp_id, census)) = read_active_census("desktop focus", bridge, world) else {
         return;
     };
     let Some(dest) = resolve_desktop_target(&census, active_disp_id, target, true) else {
@@ -399,12 +393,10 @@ fn apply_relocation_plan(
     }
 
     let raw_dest = dest_space.get();
-    let existing_dest = world
-        .strips
-        .iter()
-        .filter(|(_, s, _, _, _)| s.id() == raw_dest && !s.is_fullscreen())
-        .min_by_key(|(_, s, _, _, selected)| (!*selected, s.virtual_index))
-        .map(|(entity, _, _, _, _)| entity);
+    let existing_dest = select_desktop_strip(
+        world.strips.iter().map(|(e, s, _, _, sel)| (e, s, sel)),
+        raw_dest,
+    );
 
     for (entity, mut strip, _, _, _) in &mut world.strips {
         if Some(entity) == existing_dest {
@@ -416,18 +408,16 @@ fn apply_relocation_plan(
         }
     }
 
-    if existing_dest.is_none()
-        && let Some((disp_entity, disp, _)) = world
-            .displays
-            .iter()
-            .find(|(_, d, _)| d.id() == dest_display_id)
-    {
+    if existing_dest.is_none() {
         let mut new_strip = LayoutStrip::new(raw_dest, 0);
         new_strip.append_relocation_group(focused_entity, plan.group.as_ref());
-        world
-            .commands
-            .spawn_layout_strip(new_strip, disp.bounds().min, disp_entity, false)
-            .insert((SelectedVirtualMarker, ChildOf(disp_entity)));
+        spawn_desktop_strip(
+            new_strip,
+            dest_display_id,
+            &world.displays,
+            false,
+            &mut world.commands,
+        );
     }
 }
 
@@ -452,13 +442,7 @@ fn handle_move_window(
         debug!("desktop move/send: no focused window");
         return;
     };
-    let Some(active_disp_id) = active_display_id(&world.displays) else {
-        return;
-    };
-    let Ok(census) = bridge
-        .read_census()
-        .inspect_err(|err| warn!("desktop move census failed: {err}"))
-    else {
+    let Some((active_disp_id, census)) = read_active_census("desktop move", bridge, world) else {
         return;
     };
     let Some(dest) = resolve_desktop_target(&census, active_disp_id, target, false) else {
@@ -476,18 +460,16 @@ fn handle_move_window(
         return;
     }
 
-    let mut already_sole = true;
-    for &wid in &moving_wids {
-        match validate_window_move(wid, dest, &census, bridge) {
-            Ok(memberships) => {
-                already_sole &= memberships.as_slice() == [dest.id];
-            }
-            Err(reason) => {
-                warn!("desktop move refused: {reason}");
-                return;
-            }
+    let already_sole = match moving_wids.iter().try_fold(true, |sole, &wid| {
+        validate_window_move(wid, dest, &census, bridge)
+            .map(|memberships| sole && memberships.as_slice() == [dest.id])
+    }) {
+        Ok(sole) => sole,
+        Err(reason) => {
+            warn!("desktop move refused: {reason}");
+            return;
         }
-    }
+    };
 
     if already_sole {
         if matches!(move_focus, MoveFocus::Follow) {
@@ -504,11 +486,15 @@ fn handle_move_window(
         return;
     }
 
-    if let Err(err) = bridge.move_windows_to_space(&moving_wids, dest.id) {
-        warn!("desktop move to {} failed: {err}", dest.id);
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.move_windows_to_space(&moving_wids, dest.id);
+    if exec_bridge_op(
+        &format!("desktop move to {}", dest.id),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return;
     }
 
@@ -660,7 +646,7 @@ pub(super) fn desktop_command_handler(
                 super::pin::handle_unpin(&mut bridge, &mut world);
             }
             DesktopOperation::Assign { target, pid } => {
-                super::pin::handle_assign(target, *pid, &mut bridge, &mut world);
+                super::assign::handle_assign(target, *pid, &mut bridge, &mut world);
             }
         }
     }

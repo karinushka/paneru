@@ -451,15 +451,14 @@ fn desktop_assign_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
         let (target, pid) = match &opts {
             Value::String(s) => {
                 let s = s.to_str()?;
-                let target = match &*s {
-                    "all" => DesktopAssignTarget::All,
-                    "this" => DesktopAssignTarget::This,
-                    "none" => DesktopAssignTarget::None,
-                    _ => DesktopAssignTarget::Desktop(DesktopTarget::Direction {
+                let target = if let Some(mode) = DesktopAssignTarget::parse_mode(&s) {
+                    mode
+                } else {
+                    DesktopAssignTarget::Desktop(DesktopTarget::Direction {
                         direction: Direction::parse(&s)
                             .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?,
                         display: None,
-                    }),
+                    })
                 };
                 (target, None)
             }
@@ -485,16 +484,11 @@ fn desktop_assign_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
                                 "desktop.assign: mode cannot be combined with a target".into(),
                             ));
                         }
-                        match mode {
-                            "all" => DesktopAssignTarget::All,
-                            "this" => DesktopAssignTarget::This,
-                            "none" => DesktopAssignTarget::None,
-                            other => {
-                                return Err(mlua::Error::RuntimeError(format!(
-                                    "desktop.assign: unknown mode '{other}'"
-                                )));
-                            }
-                        }
+                        DesktopAssignTarget::parse_mode(mode).ok_or_else(|| {
+                            mlua::Error::RuntimeError(format!(
+                                "desktop.assign: unknown mode '{mode}'"
+                            ))
+                        })?
                     }
                     None => DesktopAssignTarget::Desktop(desktop_target.ok_or_else(|| {
                         mlua::Error::RuntimeError(

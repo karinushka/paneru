@@ -1,18 +1,19 @@
 //! Native Desktop lifecycle operations (`Create`, `Destroy`, `Reorder`, `Swap`).
 
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::ChildOf;
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
 use super::ops::{
-    DesktopOpWorld, active_display_id, preferred_focus_on_space, resolve_desktop_target,
+    DesktopOpWorld, preferred_focus_on_space, read_active_census, resolve_desktop_target,
     save_active_strip_focus, sibling_space_ids,
 };
-use super::{ConfirmCondition, PendingDesktopOp, PostConfirmAction, refresh_census_from_bridge};
+use super::{
+    ConfirmCondition, PendingDesktopOp, PostConfirmAction, exec_bridge_op,
+    refresh_census_from_bridge, select_desktop_strip, spawn_desktop_strip,
+};
 use crate::commands::DesktopTarget;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{SelectedVirtualMarker, SpawnCommandsExt as _};
 use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId, SpaceRecord};
 use crate::platform::WinID;
 
@@ -25,15 +26,9 @@ pub(super) fn handle_create(focus: bool, bridge: &mut DesktopBridge, world: &mut
     else {
         return;
     };
-    let new_id = match bridge.create_desktop() {
-        Ok(id) => id,
-        Err(err) => {
-            warn!("desktop create failed: {err}");
-            if err.request_may_have_applied {
-                refresh_census_from_bridge(bridge, &mut world.census);
-            }
-            return;
-        }
+    let res = bridge.create_desktop();
+    let Some(new_id) = exec_bridge_op("desktop create", res, bridge, &mut world.census) else {
+        return;
     };
     if before.find_space(new_id).is_some() {
         warn!("desktop create returned pre-existing space {new_id}; resyncing census");
@@ -125,23 +120,22 @@ fn migrate_strips_to_survivor(
         return None;
     }
 
-    let existing_dest = world
-        .strips
-        .iter()
-        .filter(|(_, s, _, _, _)| s.id() == raw_dst && !s.is_fullscreen())
-        .min_by_key(|(_, s, _, _, selected)| (!*selected, s.virtual_index))
-        .map(|(entity, _, _, _, _)| entity);
+    let existing_dest = select_desktop_strip(
+        world.strips.iter().map(|(e, s, _, _, sel)| (e, s, sel)),
+        raw_dst,
+    );
     if let Some(dest_entity) = existing_dest {
         if let Ok((_, mut dest_strip, _, _, _)) = world.strips.get_mut(dest_entity) {
             dest_strip.append_strip(&mut combined);
         }
-    } else if let Some((disp_entity, disp, _)) =
-        world.displays.iter().find(|(_, d, _)| d.id() == display_id)
-    {
-        world
-            .commands
-            .spawn_layout_strip(combined, disp.bounds().min, disp_entity, false)
-            .insert((SelectedVirtualMarker, ChildOf(disp_entity)));
+    } else {
+        spawn_desktop_strip(
+            combined,
+            display_id,
+            &world.displays,
+            false,
+            &mut world.commands,
+        );
     }
     migrated_first
 }
@@ -155,12 +149,7 @@ pub(super) fn handle_destroy(
     bridge: &mut DesktopBridge,
     world: &mut DesktopOpWorld,
 ) {
-    let Some(active_disp_id) = active_display_id(&world.displays) else {
-        return;
-    };
-    let Ok(census) = bridge
-        .read_census()
-        .inspect_err(|err| warn!("desktop destroy census failed: {err}"))
+    let Some((active_disp_id, census)) = read_active_census("desktop destroy", bridge, world)
     else {
         return;
     };
@@ -168,7 +157,7 @@ pub(super) fn handle_destroy(
         Some(t) => resolve_desktop_target(&census, active_disp_id, t, false),
         None => census
             .display(active_disp_id)
-            .and_then(|d| census.find_space(d.current_space)),
+            .and_then(|d| d.current_space_record()),
     };
     let Some(dest) = dest else {
         debug!("desktop destroy target {target:?} not found");
@@ -210,7 +199,7 @@ pub(super) fn handle_destroy(
             world,
         );
     } else {
-        destroy_inactive_desktop(dest, disp, &census, app_windows, bridge, world);
+        destroy_inactive_desktop(dest, disp, app_windows, bridge, world);
     }
 }
 
@@ -231,11 +220,15 @@ fn destroy_active_desktop(
         return;
     };
     let hide = sibling_space_ids(census, neighbor);
-    if let Err(err) = bridge.activate_space(&disp.skylight_display, neighbor.id, &hide) {
-        warn!("desktop destroy switch to {} failed: {err}", neighbor.id);
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.activate_space(&disp.skylight_display, neighbor.id, &hide);
+    if exec_bridge_op(
+        &format!("desktop destroy switch to {}", neighbor.id),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return;
     }
     let prior_neighbor_focus =
@@ -257,20 +250,23 @@ fn destroy_active_desktop(
 fn destroy_inactive_desktop(
     dest: &SpaceRecord,
     disp: &DisplaySpaces,
-    census: &SpaceCensus,
     app_windows: Vec<WinID>,
     bridge: &mut DesktopBridge,
     world: &mut DesktopOpWorld,
 ) {
-    if let Err(err) = bridge.destroy_space(dest.id) {
-        warn!("desktop destroy {} failed: {err}", dest.id);
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.destroy_space(dest.id);
+    if exec_bridge_op(
+        &format!("desktop destroy {}", dest.id),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return;
     }
-    let survivor = census
-        .find_space(disp.current_space)
+    let survivor = disp
+        .current_space_record()
         .filter(|s| s.kind.is_desktop())
         .map(|s| s.id)
         .or_else(|| adjacent_desktop(disp, dest.id).map(|s| s.id));
@@ -303,7 +299,7 @@ fn validate_display_reorder<'a>(
             disp.display_id
         ));
     }
-    let source = census.find_space(disp.current_space).ok_or_else(|| {
+    let source = disp.current_space_record().ok_or_else(|| {
         format!(
             "active space {} missing on display {}",
             disp.current_space, disp.display_id
@@ -318,12 +314,7 @@ pub(super) fn handle_reorder(
     bridge: &mut DesktopBridge,
     world: &mut DesktopOpWorld,
 ) {
-    let Some(active_disp_id) = active_display_id(&world.displays) else {
-        return;
-    };
-    let Ok(census) = bridge
-        .read_census()
-        .inspect_err(|err| warn!("desktop reorder census failed: {err}"))
+    let Some((active_disp_id, census)) = read_active_census("desktop reorder", bridge, world)
     else {
         return;
     };
@@ -347,11 +338,15 @@ pub(super) fn handle_reorder(
     let moved = expected.remove(source_local);
     expected.insert(target_local, moved);
 
-    if let Err(err) = bridge.move_space_to_index(source_id, &disp.skylight_display, index_u32) {
-        warn!("desktop reorder {source_id} -> index {index_u32} failed: {err}");
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.move_space_to_index(source_id, &disp.skylight_display, index_u32);
+    if exec_bridge_op(
+        &format!("desktop reorder {source_id} -> index {index_u32}"),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return;
     }
 
@@ -373,13 +368,7 @@ pub(super) fn handle_swap(
     bridge: &mut DesktopBridge,
     world: &mut DesktopOpWorld,
 ) {
-    let Some(active_disp_id) = active_display_id(&world.displays) else {
-        return;
-    };
-    let Ok(census) = bridge
-        .read_census()
-        .inspect_err(|err| warn!("desktop swap census failed: {err}"))
-    else {
+    let Some((active_disp_id, census)) = read_active_census("desktop swap", bridge, world) else {
         return;
     };
     let (disp, a_local, b_local) = match validate_display_reorder(target, &census, active_disp_id) {
@@ -406,11 +395,15 @@ pub(super) fn handle_swap(
     let removed = step1_expected.remove(low);
     step1_expected.insert(high, removed);
 
-    if let Err(err) = bridge.move_space_to_index(earlier, &disp.skylight_display, high_u32) {
-        warn!("desktop swap step 1 ({earlier} -> {high_u32}) failed: {err}");
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, &mut world.census);
-        }
+    let res = bridge.move_space_to_index(earlier, &disp.skylight_display, high_u32);
+    if exec_bridge_op(
+        &format!("desktop swap step 1 ({earlier} -> {high_u32})"),
+        res,
+        bridge,
+        &mut world.census,
+    )
+    .is_none()
+    {
         return;
     }
 

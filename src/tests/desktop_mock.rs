@@ -10,6 +10,22 @@ use crate::platform::{Pid, WinID, WorkspaceId};
 
 pub(crate) struct MockDesktopBridge(pub(crate) MockState);
 
+fn skylight_display_name(display_id: u32) -> String {
+    if display_id == super::TEST_DISPLAY_ID {
+        "Main".to_string()
+    } else {
+        format!("display-{display_id}")
+    }
+}
+
+fn parse_skylight_display_name(name: &str) -> Option<u32> {
+    if name == "Main" {
+        Some(super::TEST_DISPLAY_ID)
+    } else {
+        name.strip_prefix("display-").and_then(|s| s.parse().ok())
+    }
+}
+
 #[allow(
     dead_code,
     reason = "test helpers exercised across desktop test suites"
@@ -40,20 +56,19 @@ impl MockState {
 
     pub(crate) fn set_window_sticky(&self, window_id: WinID, sticky: bool) {
         let mut inner = self.inner.force_write();
-        let all_desktops: Vec<WorkspaceId> = inner
-            .displays
-            .values()
-            .flat_map(|d| d.workspaces.iter().copied())
-            .filter(|ws| !inner.fullscreen_spaces.contains(ws))
-            .collect();
+        let all_desktops = sticky.then(|| {
+            inner
+                .displays
+                .values()
+                .flat_map(|d| d.workspaces.iter().copied())
+                .filter(|ws| !inner.fullscreen_spaces.contains(ws))
+                .collect::<Vec<_>>()
+        });
         if let Some(win) = inner.windows.get_mut(&window_id) {
             win.sticky = sticky;
-            if sticky {
-                for ws in all_desktops {
-                    if ws != win.workspace_id {
-                        win.extra_workspaces.insert(ws);
-                    }
-                }
+            if let Some(desktops) = all_desktops {
+                win.extra_workspaces
+                    .extend(desktops.into_iter().filter(|&ws| ws != win.workspace_id));
             } else {
                 win.extra_workspaces.clear();
             }
@@ -111,11 +126,7 @@ impl DesktopBridgeApi for MockDesktopBridge {
             .filter_map(|id| {
                 let d = inner.displays.get(&id)?;
                 let current_space = SpaceId::new(d.current_workspace)?;
-                let skylight_display = if id == super::TEST_DISPLAY_ID {
-                    "Main".to_string()
-                } else {
-                    format!("display-{id}")
-                };
+                let skylight_display = skylight_display_name(id);
                 let spaces = d
                     .workspaces
                     .iter()
@@ -314,22 +325,7 @@ impl DesktopBridgeApi for MockDesktopBridge {
         windows: &[WinID],
         space_id: SpaceId,
     ) -> Result<(), SpaceError> {
-        self.session_unlocked()?;
-        let raw = space_id.get();
-        let win_vec = windows.to_vec();
-        self.0.run_or_defer_desktop(move |state| {
-            let mut inner = state.inner.force_write();
-            for wid in win_vec {
-                if let Some(win) = inner.windows.get_mut(&wid)
-                    && !win.sticky
-                {
-                    win.workspace_id = raw;
-                    win.extra_workspaces.clear();
-                }
-            }
-            inner.event_queue.push_back(Event::SpaceMembershipChanged);
-        });
-        Ok(())
+        self.add_windows_to_space(windows, space_id, true)
     }
 
     fn add_windows_to_space(
@@ -390,11 +386,12 @@ impl DesktopBridgeApi for MockDesktopBridge {
                 match mode {
                     AssignMode::AllSpaces => {
                         win.sticky = true;
-                        for &ws in desktops {
-                            if ws != win.workspace_id {
-                                win.extra_workspaces.insert(ws);
-                            }
-                        }
+                        win.extra_workspaces.extend(
+                            desktops
+                                .iter()
+                                .copied()
+                                .filter(|&ws| ws != win.workspace_id),
+                        );
                     }
                     AssignMode::Space(target) => {
                         win.sticky = false;
@@ -426,14 +423,7 @@ impl DesktopBridgeApi for MockDesktopBridge {
         let disp_name = skylight_display.to_string();
         self.0.run_or_defer_desktop(move |state| {
             let mut inner = state.inner.force_write();
-            let target_id = if disp_name == "Main" {
-                Some(super::TEST_DISPLAY_ID)
-            } else {
-                disp_name
-                    .strip_prefix("display-")
-                    .and_then(|s| s.parse::<u32>().ok())
-            };
-            if let Some(id) = target_id
+            if let Some(id) = parse_skylight_display_name(&disp_name)
                 && let Some(disp) = inner.displays.get_mut(&id)
                 && let Some(from) = disp.workspaces.iter().position(|&ws| ws == raw)
             {

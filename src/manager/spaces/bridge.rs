@@ -40,19 +40,19 @@ const VISIBLE_SPACES_MASK: i32 = 0x2;
 const REMOVE_FROM_OTHER_SPACES_OPT: u32 = 0x7;
 
 /// Expected Objective-C class and method signature for a `WMBridge` operation.
-pub struct OperationSpec {
-    pub class_name: &'static CStr,
-    pub init_sel: Sel,
+struct OperationSpec {
+    class_name: &'static CStr,
+    init_sel: Sel,
     /// Expected Objective-C type encodings for explicit parameters after `self` and `_cmd`.
-    pub init_args: &'static [&'static CStr],
+    init_args: &'static [&'static CStr],
     /// `c"@"` for synchronous operations, `c"v"` for asynchronous operations.
-    pub perform_ret: &'static CStr,
+    perform_ret: &'static CStr,
 }
 
 /// Verifies that `cls` implements `selector` with exact return and argument
 /// type encodings before dispatching via `objc_msgSend`.
 #[must_use]
-pub fn method_matches(
+fn method_matches(
     cls: &AnyClass,
     selector: Sel,
     expected_ret: &CStr,
@@ -122,7 +122,7 @@ fn guarded<T>(f: impl FnOnce() -> Result<T, SpaceError>) -> Result<T, SpaceError
 /// Extracts an integer from `value` only when its `CoreFoundation` type ID is
 /// `CFNumber` and it is **not** a floating-point representation (§6.5).
 #[must_use]
-pub fn cf_int_i64(value: &CFType) -> Option<i64> {
+fn cf_int_i64(value: &CFType) -> Option<i64> {
     value
         .downcast_ref::<CFNumber>()
         .filter(|n| !n.is_float_type())
@@ -172,7 +172,7 @@ fn session_flag(
 
 /// Evaluates a `CGSessionCopyCurrentDictionary` dictionary: requires an active
 /// console login and returns `Ok(true)` when the screen is locked (§2.3).
-pub fn parse_session_locked(dict: &CFDictionary<CFString, CFType>) -> Result<bool, SpaceError> {
+fn parse_session_locked(dict: &CFDictionary<CFString, CFType>) -> Result<bool, SpaceError> {
     // `<CoreGraphics/CGSession.h>` defines `kCGSessionOnConsoleKey` as
     // `"kCGSSessionOnConsoleKey"` (two `S`s) and `kCGSessionLoginDoneKey` as
     // `"kCGSessionLoginDoneKey"` (one `S`).

@@ -2469,6 +2469,158 @@ fn test_mid_strip_insertion_preserves_window_x() {
     assert_eq!(position.x, previous_offset);
 }
 
+/// The insertion rebase must hold the focused window's on-screen x even when
+/// the strip is scrolled: the origin is assigned `old_x - new_x`, not shifted
+/// by the slot delta, so a non-zero origin cannot throw the rebase off.
+#[test]
+fn test_left_edge_insertion_keeps_focused_window_x_on_scrolled_strip() {
+    let config = Config::try_from(
+        r#"
+[options]
+auto_center = false
+
+[bindings]
+
+[windows.leftedge]
+title = ".*"
+subrole = "AXLeftEdge"
+index = 0
+dont_focus = true
+"#,
+    )
+    .expect("config should parse");
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::WindowFocused { window_id: 2 },
+    ];
+
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness = harness
+        .on_iteration(0, |_world, state| state.set_focused_window(2))
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 2);
+        });
+    harness.run(commands);
+    harness.advance(Duration::from_millis(500));
+
+    // Scroll the strip so its origin is non-zero and the focused window sits
+    // part-way off the right edge — the state the delta-add rebase got wrong.
+    let (focused_x, strip_origin) = {
+        let world = harness.world();
+        let entity = find_window_entity(2, world);
+        let focused_x = world.get::<Position>(entity).expect("a position").x;
+        let strip_entity = active_strip_entity(world);
+        let strip_origin = world
+            .get::<Position>(strip_entity)
+            .expect("strip position")
+            .x;
+        (focused_x, strip_origin)
+    };
+    assert_ne!(
+        strip_origin, 0,
+        "the test needs a scrolled strip to mean anything"
+    );
+
+    harness = harness.with_window(9, |window| {
+        window.subrole = "AXLeftEdge".to_string();
+    });
+    harness.advance(Duration::from_millis(500));
+
+    let world = harness.world();
+    assert_focused!(world, 2);
+    let focused = find_window_entity(2, world);
+    assert_eq!(
+        world.get::<Position>(focused).map(|position| position.x),
+        Some(focused_x),
+        "a left-edge insertion must not move the focused window on a scrolled strip"
+    );
+}
+
+/// A window rule that pins a new window to the strip's left edge must not drag
+/// the focused window away with it. The strip rebases by the focused window's
+/// slot delta, so the new column takes its space on the far side and the
+/// focused window keeps its on-screen x — niri's view is anchored to the
+/// active column the same way.
+#[test]
+fn test_left_edge_insertion_keeps_focused_window_x() {
+    let config = Config::try_from(
+        r#"
+[options]
+
+[bindings]
+
+[windows.leftedge]
+title = ".*"
+subrole = "AXLeftEdge"
+index = 0
+dont_focus = true
+"#,
+    )
+    .expect("config should parse");
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::WindowFocused { window_id: 1 },
+    ];
+
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness = harness
+        .on_iteration(0, |_world, state| state.set_focused_window(1))
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 1);
+        });
+    harness.run(commands);
+    harness.advance(Duration::from_millis(500));
+
+    let focused_x = {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        world.get::<Position>(entity).expect("a position").x
+    };
+
+    // A window whose rule pins it to index 0 arrives after the strip settled.
+    harness = harness.with_window(9, |window| {
+        window.subrole = "AXLeftEdge".to_string();
+    });
+    harness.advance(Duration::from_millis(500));
+
+    let world = harness.world();
+    assert_focused!(world, 1);
+    let focused = find_window_entity(1, world);
+    assert_eq!(
+        world.get::<Position>(focused).map(|position| position.x),
+        Some(focused_x),
+        "a left-edge insertion must not move the focused window"
+    );
+
+    // The new column really is the strip's first column, and the strip
+    // absorbed the insertion by shifting its own origin.
+    let new_entity = find_window_entity(9, world);
+    let strip_entity = active_strip_entity(world);
+    let (strip_len, new_index) = {
+        let strip = world
+            .get::<LayoutStrip>(strip_entity)
+            .expect("the active strip");
+        (strip.len(), strip.index_of(new_entity).ok())
+    };
+    assert_eq!(strip_len, 4);
+    assert_eq!(
+        new_index,
+        Some(0),
+        "the rule pins the new window to the first column"
+    );
+    let strip_position = world
+        .get::<Position>(strip_entity)
+        .expect("strip position")
+        .x;
+    assert_eq!(
+        strip_position,
+        focused_x - 2 * TEST_WINDOW_WIDTH,
+        "the strip origin moved by the focused window's slot delta"
+    );
+}
+
 /// Without the flag (the default), a moved window is appended to the end of the
 /// destination strip, preserving arrival order.
 #[test]

@@ -991,6 +991,163 @@ fn test_closing_floating_window_does_not_reinsert_it_into_the_strip() {
         .run(commands);
 }
 
+/// Floats window `id` with the `float` event after a warm-up step, minimizes
+/// it, restores it, and checks that it floats outside the strip again.
+fn assert_floats_after_minimize_and_restore(harness: TestHarness, float: Event, id: i32) {
+    let print_state = || Event::Command {
+        command: Command::PrintState,
+    };
+    let commands = vec![
+        print_state(),
+        float,
+        print_state(),
+        print_state(),
+        print_state(),
+    ];
+
+    let in_strip = move |world: &mut World| {
+        let entity = find_window_entity(id, world);
+        let mut strips = world.query::<&LayoutStrip>();
+        strips.iter(world).any(|strip| strip.contains(entity))
+    };
+    let floating = move |world: &mut World| {
+        let entity = find_window_entity(id, world);
+        matches!(
+            world.entity(entity).get::<crate::ecs::Unmanaged>(),
+            Some(crate::ecs::Unmanaged::Floating)
+        )
+    };
+
+    harness
+        .on_iteration(2, move |world, state| {
+            assert!(floating(world) && !in_strip(world), "window {id} floats");
+            state.os_minimize_window(id, true);
+        })
+        .on_iteration(3, move |world, state| {
+            let entity = find_window_entity(id, world);
+            assert!(matches!(
+                world.entity(entity).get::<crate::ecs::Unmanaged>(),
+                Some(crate::ecs::Unmanaged::Minimized)
+            ));
+            state.os_minimize_window(id, false);
+        })
+        .on_iteration(4, move |world, _state| {
+            assert!(
+                !in_strip(world),
+                "the restored window must not take a column"
+            );
+            assert!(floating(world), "the restored window must float");
+        })
+        .run(commands);
+}
+
+/// A window a rule floats stays floating after it is minimized and restored.
+#[test]
+fn test_rule_floated_window_stays_floating_after_minimize_and_restore() {
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+    let harness = TestHarness::new().with_config(config).with_windows(2);
+    let print_state = Event::Command {
+        command: Command::PrintState,
+    };
+    assert_floats_after_minimize_and_restore(harness, print_state, 1);
+}
+
+/// A window the user floated with `window_manage` stays floating after it is
+/// minimized and restored.
+#[test]
+fn test_user_floated_window_stays_floating_after_minimize_and_restore() {
+    let float = Event::Command {
+        command: Command::Window(Operation::Manage),
+    };
+    assert_floats_after_minimize_and_restore(TestHarness::new().with_windows(2), float, 0);
+}
+
+/// A tiled window that is minimized and restored takes a column again.
+#[test]
+fn test_tiled_window_is_tiled_again_after_minimize_and_restore() {
+    let print_state = || Event::Command {
+        command: Command::PrintState,
+    };
+    let in_strip = |world: &mut World| {
+        let entity = find_window_entity(1, world);
+        let mut strips = world.query::<&LayoutStrip>();
+        strips.iter(world).any(|strip| strip.contains(entity))
+    };
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(1, move |world, state| {
+            assert!(in_strip(world));
+            state.os_minimize_window(1, true);
+        })
+        .on_iteration(2, move |world, state| {
+            assert!(!in_strip(world), "a minimized window leaves the strip");
+            state.os_minimize_window(1, false);
+        })
+        .on_iteration(3, move |world, _state| {
+            assert!(in_strip(world), "the restored window takes a column again");
+            let entity = find_window_entity(1, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .get::<crate::ecs::Unmanaged>()
+                    .is_none()
+            );
+        })
+        .run(vec![
+            print_state(),
+            print_state(),
+            print_state(),
+            print_state(),
+        ]);
+}
+
+/// A minimized floating window that another path, such as Lua or session
+/// restore, tiles must not keep the marker that floats it on restore.
+#[test]
+fn test_tiling_a_minimized_floating_window_clears_floats_when_restored() {
+    let print_state = || Event::Command {
+        command: Command::PrintState,
+    };
+    let float = Event::Command {
+        command: Command::Window(Operation::Manage),
+    };
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(2, |_world, state| {
+            state.os_minimize_window(0, true);
+        })
+        .on_iteration(3, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .contains::<crate::ecs::FloatsWhenRestored>(),
+                "minimizing a floating window marks it to float on restore"
+            );
+            world.entity_mut(entity).remove::<crate::ecs::Unmanaged>();
+        })
+        .on_iteration(4, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                !world
+                    .entity(entity)
+                    .contains::<crate::ecs::FloatsWhenRestored>(),
+                "a tiled window must not keep FloatsWhenRestored"
+            );
+        })
+        .run(vec![
+            print_state(),
+            float,
+            print_state(),
+            print_state(),
+            print_state(),
+        ]);
+}
+
 // 2026-10-26: A captured Emacs popup disappeared just before focus jumped to
 // the other half-screen tile. Closing an unfocused popup must preserve focus.
 #[test]

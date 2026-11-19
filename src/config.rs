@@ -442,6 +442,15 @@ impl Config {
     /// # Returns
     ///
     /// A `Vec<WindowParams>` containing all matching window rules.
+    /// Whether any configured `[windows.<rule>]` specifies a `desktop` placement target.
+    #[must_use]
+    pub fn has_desktop_window_rules(&self) -> bool {
+        self.inner()
+            .windows
+            .as_ref()
+            .is_some_and(|windows| windows.values().any(|params| params.desktop.is_some()))
+    }
+
     pub fn find_window_properties(
         &self,
         title: &str,

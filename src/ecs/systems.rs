@@ -967,6 +967,9 @@ pub(crate) fn pump_events(
         if let Some(restore_ms) = crate::manager::next_enhanced_ui_restore_timeout_ms() {
             *timeout = (*timeout).min(restore_ms);
         }
+        if let Some(desktop_poll_ms) = activity.desktop_poll_timeout_ms() {
+            *timeout = (*timeout).min(desktop_poll_ms);
+        }
     } else {
         // Still backed up: come straight back rather than sleeping on it.
         *timeout = LOOP_TIMEOUT_STEP;

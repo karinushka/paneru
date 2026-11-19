@@ -14,7 +14,7 @@ use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::SystemCondition as _;
 use bevy::ecs::schedule::common_conditions::{not, on_message, resource_changed, resource_exists};
 use bevy::ecs::system::{
-    Commands, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemParam,
+    Commands, Local, NonSend, NonSendMut, Populated, Query, Res, ResMut, SystemParam,
 };
 use bevy::time::{Time, Timer, TimerMode, Virtual};
 use objc2_core_graphics::CGDirectDisplayID;
@@ -61,7 +61,6 @@ impl DesktopCensus {
             .map(|d| d.display_id)
     }
 
-    #[cfg(test)]
     #[must_use]
     pub fn active_space(&self, display_id: CGDirectDisplayID) -> Option<WorkspaceId> {
         self.0.display(display_id).map(|d| d.current_space.get())
@@ -80,13 +79,6 @@ impl DesktopCensus {
         self.0
             .display(display_id)
             .map_or(0, DisplaySpaces::desktop_count)
-    }
-
-    #[must_use]
-    pub fn is_fullscreen(&self, space_id: WorkspaceId) -> bool {
-        SpaceId::new(space_id)
-            .and_then(|id| self.0.find_space(id))
-            .is_some_and(|record| record.kind.is_fullscreen())
     }
 }
 
@@ -303,91 +295,143 @@ fn refresh_census_from_bridge(bridge: &DesktopBridge, census: &mut ResMut<Deskto
     }
 }
 
+const MAX_INITIAL_CENSUS_ATTEMPTS: u8 = 3;
+
 fn sync_desktop_census(
     mut messages: MessageReader<Event>,
     added_displays: Query<(), Added<Display>>,
     displays: Query<(), With<Display>>,
     bridge: Option<NonSend<DesktopBridge>>,
     mut census: ResMut<DesktopCensus>,
+    mut initial_attempts: Local<u8>,
 ) {
     let event_triggered = messages.read().any(is_census_event);
     messages.clear();
-    let initial_needed = !displays.is_empty() && census.0.displays.is_empty();
-    if !event_triggered && added_displays.is_empty() && !initial_needed {
+    let display_added = !added_displays.is_empty();
+    if event_triggered || display_added {
+        *initial_attempts = 0;
+    }
+    let initial_needed = !displays.is_empty()
+        && census.0.displays.is_empty()
+        && *initial_attempts < MAX_INITIAL_CENSUS_ATTEMPTS;
+    if !event_triggered && !display_added && !initial_needed {
         return;
     }
     let Some(bridge) = bridge else {
         return;
     };
+    if initial_needed && !event_triggered && !display_added {
+        *initial_attempts = initial_attempts.saturating_add(1);
+    }
     refresh_census_from_bridge(&bridge, &mut census);
+    if !census.0.displays.is_empty() {
+        *initial_attempts = 0;
+    }
 }
 
-fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Option<SpaceCensus> {
-    let census = bridge.read_census().ok()?;
-    let satisfied = match condition {
-        ConfirmCondition::SpaceActive(target) => {
-            census.find_space(*target).is_some_and(|s| s.active)
+fn membership_matches(now: &[SpaceId], expected: &HashSet<SpaceId>) -> bool {
+    expected.iter().all(|sid| now.contains(sid)) && now.iter().all(|sid| expected.contains(sid))
+}
+
+enum ConfirmProbe {
+    Confirmed(Option<SpaceCensus>),
+    Pending,
+}
+
+fn confirm_with_census(
+    bridge: &DesktopBridge,
+    check: impl FnOnce(&SpaceCensus) -> bool,
+) -> ConfirmProbe {
+    let Ok(census) = bridge.read_census() else {
+        return ConfirmProbe::Pending;
+    };
+    if check(&census) {
+        ConfirmProbe::Confirmed(Some(census))
+    } else {
+        ConfirmProbe::Pending
+    }
+}
+
+fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> ConfirmProbe {
+    match condition {
+        ConfirmCondition::WindowMemberships { windows, expected } => {
+            let ok = windows.iter().all(|&wid| {
+                bridge
+                    .spaces_for_window(wid)
+                    .is_ok_and(|now| membership_matches(&now, expected))
+            });
+            if ok {
+                ConfirmProbe::Confirmed(None)
+            } else {
+                ConfirmProbe::Pending
+            }
         }
-        ConfirmCondition::SpacePresent(target) => census
-            .find_space(*target)
-            .is_some_and(|s| s.kind.is_desktop()),
-        ConfirmCondition::SpaceAbsent { space_id, migrated } => {
-            census.find_space(*space_id).is_none()
+        ConfirmCondition::AssignClear {
+            memberships,
+            clear_sticky,
+        } => {
+            let memberships_ok = memberships.iter().all(|(wid, expected)| {
+                bridge
+                    .spaces_for_window(*wid)
+                    .is_ok_and(|now| membership_matches(&now, expected))
+            });
+            if !memberships_ok {
+                return ConfirmProbe::Pending;
+            }
+            if !clear_sticky.is_empty() {
+                let sticky_map = bridge.sticky_windows(clear_sticky);
+                if clear_sticky
+                    .iter()
+                    .any(|wid| sticky_map.get(wid) == Some(&true))
+                {
+                    return ConfirmProbe::Pending;
+                }
+            }
+            ConfirmProbe::Confirmed(None)
+        }
+        ConfirmCondition::SpaceActive(target) => {
+            confirm_with_census(bridge, |c| c.find_space(*target).is_some_and(|s| s.active))
+        }
+        ConfirmCondition::SpacePresent(target) => confirm_with_census(bridge, |c| {
+            c.find_space(*target).is_some_and(|s| s.kind.is_desktop())
+        }),
+        ConfirmCondition::SpaceAbsent { space_id, migrated } => confirm_with_census(bridge, |c| {
+            c.find_space(*space_id).is_none()
                 && migrated.iter().all(|&wid| {
                     bridge
                         .spaces_for_window(wid)
                         .is_ok_and(|m| !m.contains(space_id))
                 })
-        }
-        ConfirmCondition::WindowMemberships { windows, expected } => windows.iter().all(|&wid| {
-            bridge.spaces_for_window(wid).is_ok_and(|now| {
-                let actual: HashSet<SpaceId> = now.into_iter().collect();
-                &actual == expected
-            })
         }),
-        ConfirmCondition::AssignClear {
-            memberships,
-            clear_sticky,
-        } => {
-            memberships.iter().all(|(wid, expected)| {
-                bridge.spaces_for_window(*wid).is_ok_and(|now| {
-                    let actual: HashSet<SpaceId> = now.into_iter().collect();
-                    &actual == expected
+        ConfirmCondition::AllSpacesSubset(items) => confirm_with_census(bridge, |c| {
+            items.iter().all(|&(wid, disp_id)| {
+                let Some(disp) = c.display(disp_id) else {
+                    return false;
+                };
+                bridge.spaces_for_window(wid).is_ok_and(|now| {
+                    disp.spaces
+                        .iter()
+                        .filter(|s| s.kind.is_desktop())
+                        .all(|s| now.contains(&s.id))
                 })
-            }) && clear_sticky
-                .iter()
-                .all(|&wid| bridge.window_is_sticky(wid) != Some(true))
-        }
-        ConfirmCondition::AllSpacesSubset(items) => items.iter().all(|&(wid, disp_id)| {
-            let Some(disp) = census.display(disp_id) else {
-                return false;
-            };
-            let desktops: HashSet<SpaceId> = disp
-                .spaces
-                .iter()
-                .filter(|s| s.kind.is_desktop())
-                .map(|s| s.id)
-                .collect();
-            bridge.spaces_for_window(wid).is_ok_and(|now| {
-                let actual: HashSet<SpaceId> = now.into_iter().collect();
-                desktops.is_subset(&actual)
             })
         }),
         ConfirmCondition::DisplayOrder {
             display_id,
             expected,
             active_space,
-        } => census.display(*display_id).is_some_and(|disp| {
-            disp.current_space == *active_space
-                && disp.spaces.len() == expected.len()
-                && disp
-                    .spaces
-                    .iter()
-                    .zip(expected)
-                    .all(|(rec, exp)| rec.id == *exp && rec.kind.is_desktop())
+        } => confirm_with_census(bridge, |c| {
+            c.display(*display_id).is_some_and(|disp| {
+                disp.current_space == *active_space
+                    && disp.spaces.len() == expected.len()
+                    && disp
+                        .spaces
+                        .iter()
+                        .zip(expected)
+                        .all(|(rec, exp)| rec.id == *exp && rec.kind.is_desktop())
+            })
         }),
-    };
-    satisfied.then_some(census)
+    }
 }
 
 #[derive(SystemParam)]
@@ -579,16 +623,19 @@ fn ensure_strip_and_maybe_focus(
     focus: bool,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
-    census: &mut ResMut<DesktopCensus>,
     targets: &ConfirmFocusTargets,
     commands: &mut Commands,
-) -> Option<PendingDesktopOp> {
-    let rec = confirmed_census.find_space(space_id)?;
+) -> (Option<PendingDesktopOp>, bool) {
+    let Some(rec) = confirmed_census.find_space(space_id) else {
+        return (None, false);
+    };
     if !focus {
         ensure_strip_exists(space_id, rec.display_id, targets, commands);
-        return None;
+        return (None, false);
     }
-    let disp = confirmed_census.display(rec.display_id)?;
+    let Some(disp) = confirmed_census.display(rec.display_id) else {
+        return (None, false);
+    };
     let hide: Vec<SpaceId> = disp
         .spaces
         .iter()
@@ -597,20 +644,20 @@ fn ensure_strip_and_maybe_focus(
         .collect();
     if let Err(err) = bridge.activate_space(&disp.skylight_display, space_id, &hide) {
         warn!("failed to focus newly created desktop {space_id}: {err}");
-        if err.request_may_have_applied {
-            refresh_census_from_bridge(bridge, census);
-        }
         ensure_strip_exists(space_id, rec.display_id, targets, commands);
-        return None;
+        return (None, err.request_may_have_applied);
     }
-    Some(PendingDesktopOp::new(
-        format!("focus newly created desktop {space_id}"),
-        ConfirmCondition::SpaceActive(space_id),
-        Some(PostConfirmAction::ActivateAndFocusSpace {
-            space_id,
-            preferred_window: None,
-        }),
-    ))
+    (
+        Some(PendingDesktopOp::new(
+            format!("focus newly created desktop {space_id}"),
+            ConfirmCondition::SpaceActive(space_id),
+            Some(PostConfirmAction::ActivateAndFocusSpace {
+                space_id,
+                preferred_window: None,
+            }),
+        )),
+        false,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -618,10 +665,9 @@ fn run_post_confirm(
     action: PostConfirmAction,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
-    census: &mut ResMut<DesktopCensus>,
     targets: &mut ConfirmFocusTargets,
     commands: &mut Commands,
-) -> Option<PendingDesktopOp> {
+) -> (Option<PendingDesktopOp>, bool) {
     match action {
         PostConfirmAction::ActivateAndFocusSpace {
             space_id,
@@ -634,7 +680,7 @@ fn run_post_confirm(
                 targets,
                 commands,
             );
-            None
+            (None, false)
         }
         PostConfirmAction::EnsureStripAndMaybeFocus { space_id, focus } => {
             ensure_strip_and_maybe_focus(
@@ -642,7 +688,6 @@ fn run_post_confirm(
                 focus,
                 confirmed_census,
                 bridge,
-                census,
                 targets,
                 commands,
             )
@@ -657,9 +702,6 @@ fn run_post_confirm(
         } => {
             if let Err(err) = bridge.destroy_space(space_id) {
                 warn!("failed to destroy vacated space {space_id}: {err}");
-                if err.request_may_have_applied {
-                    refresh_census_from_bridge(bridge, census);
-                }
                 if activate_display {
                     activate_space_in_ecs(
                         neighbor_id,
@@ -669,7 +711,7 @@ fn run_post_confirm(
                         commands,
                     );
                 }
-                return None;
+                return (None, err.request_may_have_applied);
             }
             let migrated_first = migrate_confirmed_strips_to_neighbor(
                 space_id,
@@ -699,11 +741,14 @@ fn run_post_confirm(
                     ec.try_insert(SelectedVirtualMarker);
                 }
             }
-            Some(PendingDesktopOp::new(
-                format!("destroy vacated desktop {space_id}"),
-                ConfirmCondition::SpaceAbsent { space_id, migrated },
-                Some(PostConfirmAction::DespawnDestroyedSpace(space_id)),
-            ))
+            (
+                Some(PendingDesktopOp::new(
+                    format!("destroy vacated desktop {space_id}"),
+                    ConfirmCondition::SpaceAbsent { space_id, migrated },
+                    Some(PostConfirmAction::DespawnDestroyedSpace(space_id)),
+                )),
+                false,
+            )
         }
         PostConfirmAction::DespawnDestroyedSpace(space_id) => {
             let raw_id = space_id.get();
@@ -712,19 +757,19 @@ fn run_post_confirm(
                     space_id: raw_id,
                 }));
             }
-            None
+            (None, false)
         }
         PostConfirmAction::ReconcileStickyMarkers(wids) => {
+            let sticky_map = bridge.sticky_windows(&wids);
             for (entity, win, _, is_sticky_marked) in &targets.windows {
                 if is_sticky_marked
-                    && wids.contains(&win.id())
-                    && bridge.window_is_sticky(win.id()) == Some(false)
+                    && sticky_map.get(&win.id()) == Some(&false)
                     && let Ok(mut ec) = commands.get_entity(entity)
                 {
                     ec.try_remove::<StickyWindowMarker>();
                 }
             }
-            None
+            (None, false)
         }
         PostConfirmAction::SecondSwapStep {
             space_id,
@@ -736,20 +781,20 @@ fn run_post_confirm(
         } => {
             if let Err(err) = bridge.move_space_to_index(space_id, &skylight_display, index) {
                 warn!("second step of desktop swap failed for {space_id}: {err}");
-                if err.request_may_have_applied {
-                    refresh_census_from_bridge(bridge, census);
-                }
-                return None;
+                return (None, err.request_may_have_applied);
             }
-            Some(PendingDesktopOp::new(
-                format!("swap desktop step 2 for {space_id}"),
-                ConfirmCondition::DisplayOrder {
-                    display_id,
-                    expected,
-                    active_space,
-                },
-                None,
-            ))
+            (
+                Some(PendingDesktopOp::new(
+                    format!("swap desktop step 2 for {space_id}"),
+                    ConfirmCondition::DisplayOrder {
+                        display_id,
+                        expected,
+                        active_space,
+                    },
+                    None,
+                )),
+                false,
+            )
         }
     }
 }
@@ -796,23 +841,23 @@ fn confirm_desktop_ops(
             return;
         }
 
-        if let Some(confirmed_census) = condition_met(&bridge, &front.condition) {
+        if let ConfirmProbe::Confirmed(maybe_census) = condition_met(&bridge, &front.condition) {
             let completed = pending.queue.pop_front().expect("front checked");
             debug!("confirmed desktop op: {}", completed.description);
-            if census.0 != confirmed_census {
-                census.0 = confirmed_census.clone();
-            }
-            if let Some(action) = completed.on_confirmed
-                && let Some(follow_up) = run_post_confirm(
-                    action,
-                    &confirmed_census,
-                    &mut bridge,
-                    &mut census,
-                    &mut targets,
-                    &mut commands,
-                )
+            if let Some(confirmed_census) = maybe_census
+                && census.0 != confirmed_census
             {
-                pending.queue.push_front(follow_up);
+                census.0 = confirmed_census;
+            }
+            if let Some(action) = completed.on_confirmed {
+                let (follow_up, needs_resync) =
+                    run_post_confirm(action, &census.0, &mut bridge, &mut targets, &mut commands);
+                if let Some(follow_up) = follow_up {
+                    pending.queue.push_front(follow_up);
+                }
+                if needs_resync {
+                    refresh_census_from_bridge(&bridge, &mut census);
+                }
             }
             continue;
         }
@@ -842,14 +887,17 @@ fn sync_sticky_windows(
     let Some(bridge) = bridge else {
         return;
     };
-    for (entity, window, unmanaged) in &added_windows {
-        if bridge.window_is_sticky(window.id()) != Some(true) {
+    let added: Vec<(Entity, WinID, bool)> = added_windows
+        .iter()
+        .map(|(entity, window, unmanaged)| (entity, window.id(), unmanaged))
+        .collect();
+    let wids: Vec<WinID> = added.iter().map(|&(_, wid, _)| wid).collect();
+    let sticky_map = bridge.sticky_windows(&wids);
+    for (entity, wid, unmanaged) in added {
+        if sticky_map.get(&wid) != Some(&true) {
             continue;
         }
-        debug!(
-            "window {} carries SkyLight sticky tag (0x800); marking floating",
-            window.id()
-        );
+        debug!("window {wid} carries SkyLight sticky tag (0x800); marking floating");
         for mut strip in &mut strips {
             if strip.contains(entity) {
                 strip.remove(entity);

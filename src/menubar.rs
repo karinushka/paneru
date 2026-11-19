@@ -284,17 +284,32 @@ pub(crate) fn menu_desktop_snapshot(
     let Some(disp) = census.and_then(|c| c.0.display(display_id)) else {
         return MenuDesktopSnapshot::default();
     };
-    let desktop_count = u32::try_from(disp.desktop_count()).unwrap_or(u32::MAX);
     let active_id = disp.current_space.get();
-    let active_desktop = disp
-        .spaces
-        .iter()
-        .find(|s| s.id.get() == active_id || s.id.get() == active_space_id)
-        .and_then(|s| s.desktop_number);
+    let (desktop_count, active_rec) =
+        disp.spaces.iter().fold((0u32, None), |(count, active), s| {
+            let next_count = count.saturating_add(u32::from(s.kind.is_desktop()));
+            let next_active = active.or_else(|| {
+                (s.id.get() == active_id || s.id.get() == active_space_id).then_some(s)
+            });
+            (next_count, next_active)
+        });
     MenuDesktopSnapshot {
         desktop_count,
-        active_desktop,
+        active_desktop: active_rec.and_then(|s| s.desktop_number),
     }
+}
+
+/// Fixed insertion offset for the optional `"Desktops"` section inside
+/// `MenuBarManager::menu`, immediately after `"Paneru — Running"` and its
+/// trailing separator.
+const DESKTOP_SECTION_START: NSInteger = 2;
+
+struct DesktopMenuSection {
+    header: Retained<NSMenuItem>,
+    rows: Vec<(u32, Retained<NSMenuItem>)>,
+    create_item: Retained<NSMenuItem>,
+    destroy_item: Retained<NSMenuItem>,
+    separator: Retained<NSMenuItem>,
 }
 
 pub struct MenuBarManager {
@@ -304,8 +319,7 @@ pub struct MenuBarManager {
     menu: Retained<NSMenu>,
     action_target: Retained<MenuActionTarget>,
     width_items: Vec<(i32, Retained<NSMenuItem>)>,
-    desktop_items: Vec<(u32, Retained<NSMenuItem>)>,
-    destroy_desktop_item: Option<Retained<NSMenuItem>>,
+    desktop_section: Option<DesktopMenuSection>,
     managed_window_items: Vec<Retained<NSMenuItem>>,
     manage_item: Option<Retained<NSMenuItem>>,
     copy_rule_item: Option<Retained<NSMenuItem>>,
@@ -368,8 +382,7 @@ impl MenuBarManager {
             menu,
             action_target,
             width_items: Vec::new(),
-            desktop_items: Vec::new(),
-            destroy_desktop_item: None,
+            desktop_section: None,
             managed_window_items: Vec::new(),
             manage_item: None,
             copy_rule_item: None,
@@ -429,23 +442,22 @@ impl MenuBarManager {
     ) {
         let preset_widths = config.preset_column_widths();
         let widths = normalized_width_percentages(&preset_widths);
-        if self.configured_widths != widths
-            || self.configured_desktop_count != desktops.desktop_count
-            || self.manage_item.is_none()
-        {
+        if self.configured_widths != widths || self.manage_item.is_none() {
             self.rebuild_menu(&widths, desktops.desktop_count);
+        } else if self.configured_desktop_count != desktops.desktop_count {
+            self.sync_desktop_section(desktops.desktop_count);
         }
 
         if self.current_desktop.as_ref() != Some(desktops) {
-            for (number, item) in &self.desktop_items {
-                item.setState(if desktops.active_desktop == Some(*number) {
-                    NSControlStateValueOn
-                } else {
-                    NSControlStateValueOff
-                });
-            }
-            if let Some(destroy_item) = &self.destroy_desktop_item {
-                destroy_item.setEnabled(desktops.can_close_active());
+            if let Some(section) = &self.desktop_section {
+                for (number, item) in &section.rows {
+                    item.setState(if desktops.active_desktop == Some(*number) {
+                        NSControlStateValueOn
+                    } else {
+                        NSControlStateValueOff
+                    });
+                }
+                section.destroy_item.setEnabled(desktops.can_close_active());
             }
             self.current_desktop = Some(desktops.clone());
         }
@@ -487,8 +499,8 @@ impl MenuBarManager {
     fn rebuild_menu(&mut self, widths: &[i32], desktop_count: u32) {
         self.menu.removeAllItems();
         self.width_items.clear();
-        self.desktop_items.clear();
-        self.destroy_desktop_item = None;
+        self.desktop_section = None;
+        self.configured_desktop_count = 0;
         self.managed_window_items.clear();
         self.manage_item = None;
         self.copy_rule_item = None;
@@ -496,22 +508,6 @@ impl MenuBarManager {
         let status = self.add_item("Paneru — Running", None);
         status.setEnabled(false);
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-
-        if desktop_count > 0 {
-            let desktop_header = self.add_item("Desktops", None);
-            desktop_header.setEnabled(false);
-            for number in 1..=desktop_count {
-                let item = self.add_item(&format!("Desktop {number}"), Some(sel!(selectDesktop:)));
-                if let Ok(tag) = isize::try_from(number) {
-                    item.setTag(tag);
-                }
-                self.desktop_items.push((number, item));
-            }
-            self.add_item("New Desktop", Some(sel!(createDesktop:)));
-            self.destroy_desktop_item =
-                Some(self.add_item("Close Desktop", Some(sel!(destroyDesktop:))));
-            self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
-        }
 
         let width_header = self.add_item("Window width", None);
         width_header.setEnabled(false);
@@ -537,11 +533,131 @@ impl MenuBarManager {
             "Show again with: paneru showmenu",
         )));
         self.add_item("Quit Paneru", Some(sel!(quitPaneru:)));
+
+        self.sync_desktop_section(desktop_count);
         self.configured_widths = widths.to_vec();
-        self.configured_desktop_count = desktop_count;
         self.current_enablement = None;
         self.current_desktop = None;
         self.selected_widths = None;
+    }
+
+    /// Updates only the `"Desktops"` section in-place so cross-display focus
+    /// moves between displays with different Desktop counts never rebuild the
+    /// entire `NSMenu`.
+    fn sync_desktop_section(&mut self, desktop_count: u32) {
+        if self.configured_desktop_count == desktop_count {
+            return;
+        }
+        if desktop_count == 0 {
+            if let Some(section) = self.desktop_section.take() {
+                self.menu.removeItem(&section.header);
+                for (_, item) in section.rows {
+                    self.menu.removeItem(&item);
+                }
+                self.menu.removeItem(&section.create_item);
+                self.menu.removeItem(&section.destroy_item);
+                self.menu.removeItem(&section.separator);
+            }
+            self.configured_desktop_count = 0;
+            self.current_desktop = None;
+            return;
+        }
+
+        if let Some(section) = &mut self.desktop_section {
+            let target_len = usize::try_from(desktop_count).unwrap_or(usize::MAX);
+            while section.rows.len() > target_len {
+                if let Some((_, item)) = section.rows.pop() {
+                    self.menu.removeItem(&item);
+                }
+            }
+            let existing = u32::try_from(section.rows.len()).unwrap_or(u32::MAX);
+            for number in existing.saturating_add(1)..=desktop_count {
+                let insert_at = self.menu.indexOfItem(&section.create_item);
+                let item =
+                    Self::insert_desktop_item(&self.menu, &self.action_target, number, insert_at);
+                section.rows.push((number, item));
+            }
+        } else {
+            let mut idx = DESKTOP_SECTION_START;
+            let header = Self::insert_item(&self.menu, &self.action_target, "Desktops", None, idx);
+            header.setEnabled(false);
+            idx += 1;
+            let rows: Vec<(u32, Retained<NSMenuItem>)> = (1..=desktop_count)
+                .map(|number| {
+                    let item =
+                        Self::insert_desktop_item(&self.menu, &self.action_target, number, idx);
+                    idx += 1;
+                    (number, item)
+                })
+                .collect();
+            let create_item = Self::insert_item(
+                &self.menu,
+                &self.action_target,
+                "New Desktop",
+                Some(sel!(createDesktop:)),
+                idx,
+            );
+            idx += 1;
+            let destroy_item = Self::insert_item(
+                &self.menu,
+                &self.action_target,
+                "Close Desktop",
+                Some(sel!(destroyDesktop:)),
+                idx,
+            );
+            idx += 1;
+            let separator = NSMenuItem::separatorItem(self.mtm);
+            self.menu.insertItem_atIndex(&separator, idx);
+            self.desktop_section = Some(DesktopMenuSection {
+                header,
+                rows,
+                create_item,
+                destroy_item,
+                separator,
+            });
+        }
+        self.configured_desktop_count = desktop_count;
+        self.current_desktop = None;
+    }
+
+    fn insert_desktop_item(
+        menu: &NSMenu,
+        action_target: &MenuActionTarget,
+        number: u32,
+        index: NSInteger,
+    ) -> Retained<NSMenuItem> {
+        let item = Self::insert_item(
+            menu,
+            action_target,
+            &format!("Desktop {number}"),
+            Some(sel!(selectDesktop:)),
+            index,
+        );
+        if let Ok(tag) = isize::try_from(number) {
+            item.setTag(tag);
+        }
+        item
+    }
+
+    fn insert_item(
+        menu: &NSMenu,
+        action_target: &MenuActionTarget,
+        title: &str,
+        action: Option<objc2::runtime::Sel>,
+        index: NSInteger,
+    ) -> Retained<NSMenuItem> {
+        let item = unsafe {
+            menu.insertItemWithTitle_action_keyEquivalent_atIndex(
+                &NSString::from_str(title),
+                action,
+                &NSString::from_str(""),
+                index,
+            )
+        };
+        if action.is_some() {
+            unsafe { item.setTarget(Some(action_target)) };
+        }
+        item
     }
 
     fn add_item(&self, title: &str, action: Option<objc2::runtime::Sel>) -> Retained<NSMenuItem> {

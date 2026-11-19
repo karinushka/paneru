@@ -224,19 +224,33 @@ impl QueryState {
     /// The same slice as [`Self::to_query_json`], typed for the wire.
     ///
     /// This is what actually crosses between processes; the two JSON spellings
-    /// above are for a terminal and for the embedded Lua runtime.
+    /// above are for a terminal and for the embedded Lua runtime. Takes `self`
+    /// by value so wire replies move fields out without cloning.
     #[must_use]
-    pub fn to_query_payload(&self, kind: StateQueryKind) -> crate::types::wire::QueryPayload {
+    pub fn into_query_payload(self, kind: StateQueryKind) -> crate::types::wire::QueryPayload {
         use crate::types::wire::QueryPayload;
         match kind {
-            StateQueryKind::State => QueryPayload::State(Box::new(self.clone())),
+            StateQueryKind::State => QueryPayload::State(Box::new(self)),
             StateQueryKind::VirtualWorkspaces => {
-                QueryPayload::VirtualWorkspaces(self.virtual_workspaces.clone())
+                QueryPayload::VirtualWorkspaces(self.virtual_workspaces)
             }
-            StateQueryKind::Desktops => QueryPayload::Desktops(self.desktops.clone()),
-            StateQueryKind::Active => QueryPayload::Active(Box::new(self.active.clone())),
+            StateQueryKind::Desktops => QueryPayload::Desktops(self.desktops),
+            StateQueryKind::Active => QueryPayload::Active(Box::new(self.active)),
             StateQueryKind::OnScreen => {
-                QueryPayload::OnScreen(self.on_screen().into_iter().cloned().collect())
+                let mut on_screen: Vec<WindowState> = self
+                    .virtual_workspaces
+                    .into_iter()
+                    .flat_map(|workspace| workspace.windows)
+                    .filter(|window| window.visible)
+                    .collect();
+                on_screen.sort_by_key(|window| {
+                    (
+                        window.display_id,
+                        window.frame.map(|frame| frame.x),
+                        window.window_id,
+                    )
+                });
+                QueryPayload::OnScreen(on_screen)
             }
         }
     }

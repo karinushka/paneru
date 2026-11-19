@@ -3,9 +3,7 @@
 
 pub mod bridge;
 
-#[cfg(test)]
-use std::collections::HashMap;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::num::NonZeroU64;
 use std::ops::{Deref, DerefMut};
@@ -85,8 +83,6 @@ pub struct SpaceRecord {
     pub id: SpaceId,
     pub uuid: String,
     pub display_id: CGDirectDisplayID,
-    /// Opaque `"Display Identifier"` string reported by `SkyLight` (`"Main"` or UUID).
-    pub skylight_display: String,
     /// 0-based position within `display_id`'s managed `"Spaces"` array (includes Fullscreen).
     pub space_index: usize,
     /// 1-based ordinal among ordinary Desktops (`SpaceKind::Desktop`) on `display_id`,
@@ -201,7 +197,6 @@ impl SpaceCensus {
                             id,
                             uuid,
                             display_id: raw.display_id,
-                            skylight_display: raw.skylight_display.clone(),
                             space_index,
                             desktop_number,
                             kind,
@@ -258,24 +253,24 @@ impl SpaceCensus {
 /// 2. Active-Space match (`current_space` matches `SLSManagedDisplayGetCurrentSpace` for that display).
 /// 3. `"Main"` fallback to `main_display_id` (`CGMainDisplayID()`).
 #[must_use]
-pub fn resolve_skylight_display_id(
+pub fn resolve_skylight_display_id<S: AsRef<str>>(
     identifier: &str,
     current_space: WorkspaceId,
     main_display_id: CGDirectDisplayID,
-    active_displays: &[(CGDirectDisplayID, &str, WorkspaceId)],
+    active_displays: &[(CGDirectDisplayID, S, WorkspaceId)],
 ) -> Option<CGDirectDisplayID> {
-    if let Some(&(id, _, _)) = active_displays
+    if let Some((id, _, _)) = active_displays
         .iter()
-        .find(|(_, uuid, _)| !uuid.is_empty() && *uuid == identifier)
+        .find(|(_, uuid, _)| !uuid.as_ref().is_empty() && uuid.as_ref() == identifier)
     {
-        return Some(id);
+        return Some(*id);
     }
     if current_space != 0
-        && let Some(&(id, _, _)) = active_displays
+        && let Some((id, _, _)) = active_displays
             .iter()
             .find(|(_, _, active_sid)| *active_sid == current_space)
     {
-        return Some(id);
+        return Some(*id);
     }
     (identifier == "Main" && main_display_id != 0).then_some(main_display_id)
 }
@@ -375,6 +370,13 @@ pub trait DesktopBridgeApi {
         include_minimized: bool,
     ) -> Result<Vec<WinID>, SpaceError>;
     fn window_is_sticky(&self, window_id: WinID) -> Option<bool>;
+    /// Batched `0x800` sticky-tag lookup across `windows` in a single `WindowServer` query.
+    fn sticky_windows(&self, windows: &[WinID]) -> HashMap<WinID, bool> {
+        windows
+            .iter()
+            .filter_map(|&wid| self.window_is_sticky(wid).map(|sticky| (wid, sticky)))
+            .collect()
+    }
     fn associated_windows(&self, window_id: WinID) -> Result<Vec<WinID>, SpaceError>;
     fn window_meta(&self, window_id: WinID) -> Option<WindowServerMeta>;
     fn windows_for_pid(&self, pid: Pid) -> Vec<WinID>;
@@ -880,7 +882,7 @@ mod tests {
             SpaceErrorKind::QueryFailed
         );
 
-        assert_eq!(resolve_skylight_display_id("Main", 1, 0, &[]), None);
+        assert_eq!(resolve_skylight_display_id::<&str>("Main", 1, 0, &[]), None);
     }
 
     #[test]

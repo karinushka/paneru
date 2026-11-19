@@ -325,9 +325,10 @@ impl WindowManagerApi for WindowManagerOS {
         if displays.is_empty() {
             return vec![];
         }
-        let Some(census) = spaces::bridge::read_managed_display_spaces(self.main_cid)
-            .inspect_err(|err| warn!("unable to read managed display spaces: {err}"))
-            .ok()
+        let Some(census) =
+            spaces::bridge::read_managed_display_spaces_for_displays(self.main_cid, &displays)
+                .inspect_err(|err| warn!("unable to read managed display spaces: {err}"))
+                .ok()
         else {
             return vec![];
         };

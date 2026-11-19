@@ -288,7 +288,7 @@ impl Command {
             }
             Command::Desktop(operation) => {
                 let mut argv = vec!["desktop".to_string()];
-                argv.extend(operation.to_argv());
+                operation.push_argv(&mut argv);
                 argv
             }
             Command::Mouse(MouseMove::ToNextDisplay) => {
@@ -372,92 +372,89 @@ impl Operation {
 }
 
 impl DesktopTarget {
-    fn to_argv(&self) -> Vec<String> {
+    fn push_argv(&self, out: &mut Vec<String>) {
         match self {
-            DesktopTarget::SpaceId(id) => vec!["id".to_string(), id.to_string()],
+            DesktopTarget::SpaceId(id) => {
+                out.push("id".to_string());
+                out.push(id.to_string());
+            }
             DesktopTarget::Direction { direction, display } => {
-                let mut out = vec![direction.token()];
+                out.push(direction.token());
                 if let Some(disp) = display {
                     out.push("display".to_string());
                     out.push(disp.to_string());
                 }
-                out
             }
             DesktopTarget::Number { number, display } => {
-                let mut out = vec![number.to_string()];
+                out.push(number.to_string());
                 if let Some(disp) = display {
                     out.push("display".to_string());
                     out.push(disp.to_string());
                 }
-                out
             }
         }
     }
 }
 
 impl DesktopOperation {
-    fn to_argv(&self) -> Vec<String> {
+    fn push_argv(&self, out: &mut Vec<String>) {
         match self {
             DesktopOperation::Focus(target) => {
-                let mut out = vec!["focus".to_string()];
-                out.extend(target.to_argv());
-                out
+                out.push("focus".to_string());
+                target.push_argv(out);
             }
             DesktopOperation::MoveWindow { target, move_focus } => {
                 let verb = match move_focus {
                     MoveFocus::Follow => "move",
                     MoveFocus::Stay => "send",
                 };
-                let mut out = vec![verb.to_string()];
-                out.extend(target.to_argv());
-                out
+                out.push(verb.to_string());
+                target.push_argv(out);
             }
-            DesktopOperation::Create { focus: false } => vec!["create".to_string()],
-            DesktopOperation::Create { focus: true } => {
-                vec!["create".to_string(), "focus".to_string()]
+            DesktopOperation::Create { focus } => {
+                out.push("create".to_string());
+                if *focus {
+                    out.push("focus".to_string());
+                }
             }
             DesktopOperation::Destroy { target, empty_only } => {
-                let mut out = vec!["destroy".to_string()];
+                out.push("destroy".to_string());
                 if let Some(target) = target {
-                    out.extend(target.to_argv());
+                    target.push_argv(out);
                 }
                 if *empty_only {
                     out.push("empty".to_string());
                 }
-                out
             }
             DesktopOperation::Reorder(target) => {
-                let mut out = vec!["reorder".to_string()];
-                out.extend(target.to_argv());
-                out
+                out.push("reorder".to_string());
+                target.push_argv(out);
             }
             DesktopOperation::Swap(target) => {
-                let mut out = vec!["swap".to_string()];
-                out.extend(target.to_argv());
-                out
+                out.push("swap".to_string());
+                target.push_argv(out);
             }
             DesktopOperation::Pin(DesktopPinTarget::All) => {
-                vec!["pin".to_string(), "all".to_string()]
+                out.push("pin".to_string());
+                out.push("all".to_string());
             }
             DesktopOperation::Pin(DesktopPinTarget::Desktop(target)) => {
-                let mut out = vec!["pin".to_string()];
-                out.extend(target.to_argv());
-                out
+                out.push("pin".to_string());
+                target.push_argv(out);
             }
-            DesktopOperation::Unpin => vec!["unpin".to_string()],
+            DesktopOperation::Unpin => out.push("unpin".to_string()),
             DesktopOperation::Assign { target, pid } => {
-                let mut out = vec!["assign".to_string()];
+                out.push("assign".to_string());
                 match target {
                     DesktopAssignTarget::All => out.push("all".to_string()),
                     DesktopAssignTarget::This => out.push("this".to_string()),
                     DesktopAssignTarget::None => out.push("none".to_string()),
-                    DesktopAssignTarget::Desktop(t) => out.extend(t.to_argv()),
+                    DesktopAssignTarget::Desktop(t) => t.push_argv(out),
                 }
                 if let Some(pid) = pid {
                     out.push("pid".to_string());
                     out.push(pid.to_string());
                 }
-                out
             }
         }
     }

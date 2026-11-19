@@ -14,7 +14,7 @@ use super::{Command, DesktopOperation, Operation};
 
 use crate::ecs::state::{
     PaneruActiveState, PaneruDesktopState, PaneruQueryState, PaneruVirtualWorkspaceState,
-    PaneruWindowState, QueryStateParams, StateEvent,
+    PaneruWindowState, QueryStateParams, StateEvent, StateQueryKind,
 };
 use crate::ecs::{ActiveWorkspaceMarker, FocusedMarker, Unmanaged};
 use crate::events::Event;
@@ -264,12 +264,21 @@ fn state_query_handler(mut messages: MessageReader<Event>, state: QueryStatePara
 
     for event in messages.read() {
         match event {
+            Event::StateQuery {
+                kind: StateQueryKind::Desktops,
+                respond_to,
+            } => reply(
+                respond_to,
+                Ok(Response::Query(wire::QueryPayload::Desktops(
+                    state.extract_desktops(),
+                ))),
+            ),
             Event::StateQuery { kind, respond_to } => reply(
                 respond_to,
                 state
                     .extract()
                     .map_err(|err| err.to_string())
-                    .map(|state| Response::Query(state.to_query_payload(*kind))),
+                    .map(|state| Response::Query(state.into_query_payload(*kind))),
             ),
             Event::WindowSetQuery { respond_to } => reply(
                 respond_to,

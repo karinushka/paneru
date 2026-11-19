@@ -20,8 +20,8 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, OpenedFrom, Position,
-    SelectedVirtualMarker, SpawnCommandsExt as _, Unmanaged, Window,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, OpenedFrom, SelectedVirtualMarker,
+    SpawnCommandsExt as _, Unmanaged, Window,
 };
 use crate::events::Event;
 use crate::manager::Display;
@@ -36,7 +36,6 @@ pub(super) type DesktopStrips<'w, 's> = Query<
     (
         Entity,
         &'static mut LayoutStrip,
-        &'static Position,
         Option<&'static PreviousStripPosition>,
         Has<ActiveWorkspaceMarker>,
         Has<SelectedVirtualMarker>,
@@ -145,9 +144,9 @@ pub(super) fn preferred_focus_on_space(
     let raw = space_id.get();
     let target_strip = strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw)
-        .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index));
-    if let Some((_, strip, _, prev, _, _)) = target_strip {
+        .filter(|(_, s, _, _, _)| s.id() == raw)
+        .min_by_key(|(_, s, _, _, selected)| (!*selected, s.virtual_index));
+    if let Some((_, strip, prev, _, _)) = target_strip {
         if let Some(prev_focus) = prev.and_then(|p| p.focus).filter(|&e| strip.contains(e)) {
             return Some(prev_focus);
         }
@@ -179,7 +178,7 @@ pub(super) fn save_active_strip_focus(
     let Some(history) = focus_history else {
         return;
     };
-    let Some((_, strip, _, _, _, _)) = strips.iter().find(|(_, _, _, _, active, _)| *active) else {
+    let Some((_, strip, _, _, _)) = strips.iter().find(|(_, _, _, active, _)| *active) else {
         return;
     };
     if let Some(entity) = focused_entity {
@@ -282,8 +281,11 @@ fn dispatch_focus_space(
         }
         return true;
     }
+    let Some(disp) = census.display(target.display_id) else {
+        return false;
+    };
     let hide = sibling_space_ids(census, target);
-    if let Err(err) = bridge.activate_space(&target.skylight_display, target.id, &hide) {
+    if let Err(err) = bridge.activate_space(&disp.skylight_display, target.id, &hide) {
         warn!("desktop focus {} failed: {err}", target.id);
         if err.request_may_have_applied {
             refresh_census_from_bridge(bridge, &mut world.census);
@@ -347,50 +349,68 @@ fn handle_focus(target: &DesktopTarget, bridge: &mut DesktopBridge, world: &mut 
     );
 }
 
-pub(super) fn relocate_tiled_group_to_space(
+struct RelocationPlan {
+    group: Option<crate::ecs::layout::RelocationGroup>,
+    moving_entities: Vec<Entity>,
+    heir: Option<Entity>,
+    managed: bool,
+}
+
+fn plan_relocation(focused_entity: Entity, world: &DesktopOpWorld) -> RelocationPlan {
+    if let Some((_, strip, _, _, _)) = world
+        .strips
+        .iter()
+        .find(|(_, s, _, _, _)| s.contains(focused_entity))
+    {
+        let group = strip.relocation_group(focused_entity);
+        let opener = world.opened_from.get(focused_entity).ok().map(|o| o.0);
+        let heir = strip.heir(focused_entity, opener);
+        let moving_entities = group
+            .as_ref()
+            .map_or_else(|| vec![focused_entity], |g| g.members().to_vec());
+        return RelocationPlan {
+            group,
+            moving_entities,
+            heir,
+            managed: true,
+        };
+    }
+    let managed = matches!(
+        world.windows.get_managed(focused_entity),
+        Some((_, _, None))
+    );
+    RelocationPlan {
+        group: None,
+        moving_entities: vec![focused_entity],
+        heir: None,
+        managed,
+    }
+}
+
+fn apply_relocation_plan(
     focused_entity: Entity,
     dest_space: SpaceId,
     dest_display_id: CGDirectDisplayID,
+    plan: &RelocationPlan,
     world: &mut DesktopOpWorld,
-) -> (Vec<Entity>, Option<Entity>) {
-    let source_info = world
-        .strips
-        .iter()
-        .find(|(_, s, _, _, _, _)| s.contains(focused_entity))
-        .map(|(_, strip, _, _, _, _)| {
-            let group = strip.relocation_group(focused_entity);
-            let opener = world.opened_from.get(focused_entity).ok().map(|o| o.0);
-            let heir = strip.heir(focused_entity, opener);
-            (group, heir)
-        });
-    let (group, heir) = match source_info {
-        Some(pair) => pair,
-        None if matches!(
-            world.windows.get_managed(focused_entity),
-            Some((_, _, None))
-        ) =>
-        {
-            (None, None)
-        }
-        None => return (vec![focused_entity], None),
-    };
-    let moving_entities = group
-        .as_ref()
-        .map_or_else(|| vec![focused_entity], |g| g.members().to_vec());
+) {
+    if !plan.managed {
+        return;
+    }
 
     let raw_dest = dest_space.get();
     let existing_dest = world
         .strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_dest && !s.is_fullscreen())
-        .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index))
-        .map(|(entity, _, _, _, _, _)| entity);
+        .filter(|(_, s, _, _, _)| s.id() == raw_dest && !s.is_fullscreen())
+        .min_by_key(|(_, s, _, _, selected)| (!*selected, s.virtual_index))
+        .map(|(entity, _, _, _, _)| entity);
 
-    for (entity, mut strip, _, _, _, _) in &mut world.strips {
+    for (entity, mut strip, _, _, _) in &mut world.strips {
         if Some(entity) == existing_dest {
-            strip.append_relocation_group(focused_entity, group.as_ref());
-        } else {
-            for &moving in &moving_entities {
+            strip.append_relocation_group(focused_entity, plan.group.as_ref());
+        } else if plan.moving_entities.iter().any(|&m| strip.contains(m)) {
+            for &moving in &plan.moving_entities {
                 strip.remove(moving);
             }
         }
@@ -403,14 +423,23 @@ pub(super) fn relocate_tiled_group_to_space(
             .find(|(_, d, _)| d.id() == dest_display_id)
     {
         let mut new_strip = LayoutStrip::new(raw_dest, 0);
-        new_strip.append_relocation_group(focused_entity, group.as_ref());
+        new_strip.append_relocation_group(focused_entity, plan.group.as_ref());
         world
             .commands
             .spawn_layout_strip(new_strip, disp.bounds().min, disp_entity, false)
             .insert((SelectedVirtualMarker, ChildOf(disp_entity)));
     }
+}
 
-    (moving_entities, heir)
+pub(super) fn relocate_tiled_group_to_space(
+    focused_entity: Entity,
+    dest_space: SpaceId,
+    dest_display_id: CGDirectDisplayID,
+    world: &mut DesktopOpWorld,
+) -> (Vec<Entity>, Option<Entity>) {
+    let plan = plan_relocation(focused_entity, world);
+    apply_relocation_plan(focused_entity, dest_space, dest_display_id, &plan, world);
+    (plan.moving_entities, plan.heir)
 }
 
 fn handle_move_window(
@@ -437,13 +466,9 @@ fn handle_move_window(
         return;
     };
 
-    let moving_entities: Vec<Entity> = world
-        .strips
-        .iter()
-        .find(|(_, s, _, _, _, _)| s.contains(focused_entity))
-        .and_then(|(_, s, _, _, _, _)| s.relocation_group(focused_entity))
-        .map_or_else(|| vec![focused_entity], |g| g.members().to_vec());
-    let moving_wids: Vec<WinID> = moving_entities
+    let plan = plan_relocation(focused_entity, world);
+    let moving_wids: Vec<WinID> = plan
+        .moving_entities
         .iter()
         .filter_map(|&e| world.windows.get(e).map(|w| w.id()))
         .collect();
@@ -487,11 +512,10 @@ fn handle_move_window(
         return;
     }
 
-    let (moved, heir) =
-        relocate_tiled_group_to_space(focused_entity, dest.id, dest.display_id, world);
+    apply_relocation_plan(focused_entity, dest.id, dest.display_id, &plan, world);
     if let Some(history) = world.focus_history.as_deref_mut() {
-        for entity in moved {
-            history.forget(entity);
+        for entity in &plan.moving_entities {
+            history.forget(*entity);
         }
         history.forget(focused_entity);
     }
@@ -499,7 +523,7 @@ fn handle_move_window(
     finish_move_window(
         move_focus,
         focused_entity,
-        heir,
+        plan.heir,
         moving_wids,
         dest,
         &census,
@@ -518,8 +542,8 @@ pub(super) fn focus_heir_on_active_strip(
         world
             .strips
             .iter()
-            .find(|(_, _, _, _, active, _)| *active)
-            .and_then(|(_, s, _, _, _, _)| s.first())
+            .find(|(_, _, _, active, _)| *active)
+            .and_then(|(_, s, _, _, _)| s.first())
     });
     if let Some(next_entity) = next_focus {
         world.commands.focus_entity(next_entity, true);
@@ -585,24 +609,28 @@ pub(super) fn desktop_command_handler(
     bridge: Option<NonSendMut<DesktopBridge>>,
     mut world: DesktopOpWorld,
 ) {
-    let ops: Vec<DesktopOperation> = messages
-        .read()
-        .filter_map(|event| match event {
-            Event::Command {
-                command: Command::Desktop(op),
-            } => Some(op.clone()),
-            _ => None,
-        })
-        .collect();
-    if ops.is_empty() {
-        return;
-    }
     let Some(mut bridge) = bridge else {
-        warn!("desktop command ignored: native DesktopBridge unavailable");
+        if messages.read().any(|event| {
+            matches!(
+                event,
+                Event::Command {
+                    command: Command::Desktop(_),
+                }
+            )
+        }) {
+            warn!("desktop command ignored: native DesktopBridge unavailable");
+        }
+        messages.clear();
         return;
     };
 
-    for op in &ops {
+    for event in messages.read() {
+        let Event::Command {
+            command: Command::Desktop(op),
+        } = event
+        else {
+            continue;
+        };
         match op {
             DesktopOperation::Focus(target) => handle_focus(target, &mut bridge, &mut world),
             DesktopOperation::MoveWindow { target, move_focus } => {

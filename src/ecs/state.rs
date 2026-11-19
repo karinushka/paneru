@@ -460,6 +460,15 @@ impl QueryStateParams<'_, '_> {
             .is_some_and(bevy::ecs::change_detection::DetectChanges::is_changed)
     }
 
+    /// Builds only the native Desktops snapshot from [`DesktopCensus`] without
+    /// enumerating windows or calling into the window server.
+    #[must_use]
+    pub fn extract_desktops(&self) -> Vec<PaneruDesktopState> {
+        self.desktop_census
+            .as_deref()
+            .map_or_else(Vec::new, |census| extract_desktop_states(&census.0))
+    }
+
     /// Builds the state document from the current world.
     ///
     /// # Errors

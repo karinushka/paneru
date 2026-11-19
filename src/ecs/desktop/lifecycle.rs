@@ -68,35 +68,27 @@ fn adjacent_desktop(disp: &DisplaySpaces, target_id: SpaceId) -> Option<&SpaceRe
 }
 
 /// Inspects application windows on `space_id` (`0x7` including minimized, §5.5).
-/// Fails closed if any window's `CGWindowList` metadata is unreadable.
+/// `windows_in_space(space_id, true)` already filters to manageable app windows
+/// and fails closed on missing `CGWindow` metadata; sticky tags are queried in a
+/// single batched IPC only when `empty_only` is requested.
 fn inspect_space_windows_for_destroy(
     space_id: SpaceId,
     empty_only: bool,
     bridge: &DesktopBridge,
 ) -> Result<Vec<WinID>, String> {
-    let raw_ids = bridge
+    let app_windows = bridge
         .windows_in_space(space_id, true)
         .map_err(|e| format!("enumerating windows in space {space_id}: {e}"))?;
-    let mut app_windows = Vec::new();
-    let mut has_non_sticky = false;
-    for wid in raw_ids {
-        let Some(meta) = bridge.window_meta(wid) else {
+    if empty_only && !app_windows.is_empty() {
+        let sticky_map = bridge.sticky_windows(&app_windows);
+        if app_windows
+            .iter()
+            .any(|wid| sticky_map.get(wid) != Some(&true))
+        {
             return Err(format!(
-                "missing WindowServer metadata for window {wid} on space {space_id}"
+                "desktop {space_id} is not empty; refusing --empty-only destroy"
             ));
-        };
-        if !meta.is_app_window() {
-            continue;
         }
-        if bridge.window_is_sticky(wid) != Some(true) {
-            has_non_sticky = true;
-        }
-        app_windows.push(wid);
-    }
-    if empty_only && has_non_sticky {
-        return Err(format!(
-            "desktop {space_id} is not empty; refusing --empty-only destroy"
-        ));
     }
     Ok(app_windows)
 }
@@ -114,8 +106,8 @@ fn migrate_strips_to_survivor(
     let mut source_entities: Vec<(u32, Entity)> = world
         .strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_src && s.len() > 0)
-        .map(|(entity, s, _, _, _, _)| (s.virtual_index, entity))
+        .filter(|(_, s, _, _, _)| s.id() == raw_src && s.len() > 0)
+        .map(|(entity, s, _, _, _)| (s.virtual_index, entity))
         .collect();
     if source_entities.is_empty() {
         return None;
@@ -124,7 +116,7 @@ fn migrate_strips_to_survivor(
 
     let mut combined = LayoutStrip::new(raw_dst, 0);
     for (_, src_entity) in source_entities {
-        if let Ok((_, mut src_strip, _, _, _, _)) = world.strips.get_mut(src_entity) {
+        if let Ok((_, mut src_strip, _, _, _)) = world.strips.get_mut(src_entity) {
             combined.append_strip(&mut src_strip);
         }
     }
@@ -136,11 +128,11 @@ fn migrate_strips_to_survivor(
     let existing_dest = world
         .strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_dst && !s.is_fullscreen())
-        .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index))
-        .map(|(entity, _, _, _, _, _)| entity);
+        .filter(|(_, s, _, _, _)| s.id() == raw_dst && !s.is_fullscreen())
+        .min_by_key(|(_, s, _, _, selected)| (!*selected, s.virtual_index))
+        .map(|(entity, _, _, _, _)| entity);
     if let Some(dest_entity) = existing_dest {
-        if let Ok((_, mut dest_strip, _, _, _, _)) = world.strips.get_mut(dest_entity) {
+        if let Ok((_, mut dest_strip, _, _, _)) = world.strips.get_mut(dest_entity) {
             dest_strip.append_strip(&mut combined);
         }
     } else if let Some((disp_entity, disp, _)) =
@@ -239,7 +231,7 @@ fn destroy_active_desktop(
         return;
     };
     let hide = sibling_space_ids(census, neighbor);
-    if let Err(err) = bridge.activate_space(&neighbor.skylight_display, neighbor.id, &hide) {
+    if let Err(err) = bridge.activate_space(&disp.skylight_display, neighbor.id, &hide) {
         warn!("desktop destroy switch to {} failed: {err}", neighbor.id);
         if err.request_may_have_applied {
             refresh_census_from_bridge(bridge, &mut world.census);

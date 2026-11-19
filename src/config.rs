@@ -484,12 +484,7 @@ impl Config {
     /// process be forcibly managed even when macOS reports it as unobservable.
     pub fn should_force_manage_process(&self, process: &dyn ProcessApi) -> bool {
         self.inner().windows.as_ref().is_some_and(|windows| {
-            let Some(bundle_id) = process
-                .application()
-                .as_ref()
-                .and_then(|app| app.bundleIdentifier())
-                .map(|id| id.to_string())
-            else {
+            let Some(bundle_id) = process.bundle_id() else {
                 return false;
             };
             windows.values().any(|params| {

@@ -991,20 +991,18 @@ impl MockState {
         let mut mp = MockProcessApi::new();
         let s = self.clone();
 
-        let name = self
-            .inner
-            .force_read()
-            .apps
-            .get(&pid)
-            .map(|a| a.name.clone())
-            .unwrap();
+        let (name, bundle_id) = {
+            let inner = self.inner.force_read();
+            let app = inner.apps.get(&pid).unwrap();
+            (app.name.clone(), app.bundle_id.clone())
+        };
         mp.expect_name().return_const(name);
 
         mp.expect_pid().return_const(pid);
         mp.expect_psn()
             .returning(move || s.inner.force_read().apps.get(&pid).map(|a| a.psn).unwrap());
         mp.expect_is_observable().returning(|| true);
-        mp.expect_application().return_const(None);
+        mp.expect_bundle_id().return_const(Some(bundle_id));
         mp.expect_ready().return_const(true);
         mp.expect_force_manage().return_const(());
 

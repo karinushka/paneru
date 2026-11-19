@@ -84,13 +84,9 @@ pub trait ProcessApi: Send + Sync {
     fn pid(&self) -> Pid;
     /// Returns the process serial number (`ProcessSerialNumber`) of the process.
     fn psn(&self) -> ProcessSerialNumber;
-    /// Returns an optional `NSRunningApplication` instance associated with this process.
-    /// This provides access to higher-level application properties.
-    ///
-    /// # Returns
-    ///
-    /// `Some(Retained<NSRunningApplication>)` if an `NSRunningApplication` is available, otherwise `None`.
-    fn application(&self) -> Option<Retained<NSRunningApplication>>;
+    /// Returns the bundle identifier associated with this process, if an
+    /// `NSRunningApplication` has been resolved and reports one.
+    fn bundle_id(&self) -> Option<String>;
     /// Checks if the process is ready for full window management.
     /// This typically involves ensuring the application has finished launching and is observable.
     ///
@@ -136,9 +132,9 @@ impl ProcessApi for ProcessOS {
         self.inner.psn
     }
 
-    /// Returns the `NSRunningApplication` instance of the inner `Process`.
-    fn application(&self) -> Option<Retained<NSRunningApplication>> {
-        self.inner.application.clone()
+    /// Returns the bundle identifier of the inner `Process`, if known.
+    fn bundle_id(&self) -> Option<String> {
+        self.inner.bundle_id()
     }
 
     /// Delegates the `ready` call to the inner `Process`.
@@ -193,6 +189,12 @@ impl Drop for Process {
     }
 }
 
+fn lookup_running_application(pid: Pid) -> Option<Retained<NSRunningApplication>> {
+    (pid > 0)
+        .then(|| NSRunningApplication::runningApplicationWithProcessIdentifier(pid))
+        .flatten()
+}
+
 impl Process {
     /// Creates a new `Process` instance. It retrieves process information (PID, name) and attempts to get an `NSRunningApplication` instance.
     /// It also initializes the observation flags for application launch and activation policy.
@@ -217,7 +219,7 @@ impl Process {
             .unwrap_or_default();
 
         // [[NSRunningApplication runningApplicationWithProcessIdentifier:process->pid] retain];
-        let apps = NSRunningApplication::runningApplicationWithProcessIdentifier(pid);
+        let apps = lookup_running_application(pid);
 
         Box::pin(Process {
             psn: *psn,
@@ -230,6 +232,14 @@ impl Process {
             observing_activated: AtomicBool::new(false),
             force_manage: false,
         })
+    }
+
+    /// Returns the bundle identifier of the associated `NSRunningApplication`, if known.
+    pub fn bundle_id(&self) -> Option<String> {
+        self.application
+            .as_ref()
+            .and_then(|app| app.bundleIdentifier())
+            .map(|id| id.to_string())
     }
 
     /// Checks if the application associated with this process is observable (i.e., has a regular activation policy).
@@ -276,7 +286,7 @@ impl Process {
     ///
     /// - Adds a KVO observer to the `NSRunningApplication`.
     pub fn observe_finished_launching(&self) {
-        if !self.observing_launched.swap(true, Ordering::Acquire) {
+        if self.application.is_some() && !self.observing_launched.swap(true, Ordering::Acquire) {
             self.observe("finishedLaunching");
         }
     }
@@ -299,7 +309,7 @@ impl Process {
     ///
     /// - Adds a KVO observer to the `NSRunningApplication`.
     pub fn observe_activation_policy(&self) {
-        if !self.observing_activated.swap(true, Ordering::Acquire) {
+        if self.application.is_some() && !self.observing_activated.swap(true, Ordering::Acquire) {
             self.observe("activationPolicy");
         }
     }
@@ -376,13 +386,18 @@ impl Process {
     ///
     /// - Adds or removes KVO observers based on the application's launch and activation state.
     pub fn ready(&mut self) -> bool {
+        self.ready_with(lookup_running_application)
+    }
+
+    fn ready_with(
+        &mut self,
+        lookup: impl FnOnce(Pid) -> Option<Retained<NSRunningApplication>>,
+    ) -> bool {
         // macOS can announce a launch before NSRunningApplication knows the
         // pid, and without it no KVO can ever report readiness. Return before
-        // the observe calls below, which would mark observers that were never
-        // added and later remove them from the found application.
+        // the observe calls below, which have nothing to attach to yet.
         if self.application.is_none() {
-            self.application =
-                NSRunningApplication::runningApplicationWithProcessIdentifier(self.pid);
+            self.application = lookup(self.pid);
             if self.application.is_none() {
                 return false;
             }
@@ -407,5 +422,81 @@ impl Process {
         }
         self.unobserve_activation_policy();
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::events::EventSender;
+
+    fn test_process(pid: Pid) -> Pin<Box<Process>> {
+        let (events, _receiver) = EventSender::new();
+        Box::pin(Process {
+            psn: ProcessSerialNumber {
+                high: 0,
+                low: pid.max(0).cast_unsigned(),
+            },
+            pid,
+            name: "TestApp".to_string(),
+            application: None,
+            policy: NSApplicationActivationPolicy::Prohibited,
+            observer: WorkspaceObserver::new(events),
+            observing_launched: AtomicBool::new(false),
+            observing_activated: AtomicBool::new(false),
+            force_manage: false,
+        })
+    }
+
+    #[test]
+    fn observe_methods_ignore_missing_application() {
+        let mut process = test_process(42);
+        process.observe_finished_launching();
+        process.observe_activation_policy();
+        assert!(!process.observing_launched.load(Ordering::Relaxed));
+        assert!(!process.observing_activated.load(Ordering::Relaxed));
+
+        // Attaching an application later and dropping must not attempt to
+        // remove KVO observers that were never registered.
+        process.application = Some(NSRunningApplication::currentApplication());
+        drop(process);
+    }
+
+    #[test]
+    fn ready_with_retries_lookup_and_caches_resolved_application() {
+        let mut process = test_process(42);
+
+        let mut queried_pid = None;
+        assert!(!process.ready_with(|pid| {
+            queried_pid = Some(pid);
+            None
+        }));
+        assert_eq!(queried_pid, Some(42));
+        assert!(process.application.is_none());
+        assert!(!process.observing_launched.load(Ordering::Relaxed));
+        assert!(!process.observing_activated.load(Ordering::Relaxed));
+
+        let _ = process.ready_with(|pid| {
+            assert_eq!(pid, 42);
+            Some(NSRunningApplication::currentApplication())
+        });
+        assert!(process.application.is_some());
+
+        // Once resolved, subsequent readiness checks must reuse the cached application.
+        let _ = process.ready_with(|_| panic!("lookup must not rerun once application is cached"));
+    }
+
+    #[test]
+    fn lookup_running_application_ignores_non_positive_pid() {
+        assert!(lookup_running_application(0).is_none());
+        assert!(lookup_running_application(-1).is_none());
+
+        let mut zero_pid = test_process(0);
+        assert!(!zero_pid.ready());
+        assert!(zero_pid.application.is_none());
+
+        let mut negative_pid = test_process(-1);
+        assert!(!negative_pid.ready());
+        assert!(negative_pid.application.is_none());
     }
 }

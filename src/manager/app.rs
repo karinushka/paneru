@@ -226,11 +226,7 @@ impl ApplicationOS {
             AXUIElementSetMessagingTimeout(ptr, AX_MESSAGING_TIMEOUT_SEC);
             AXUIWrapper::from_retained(ptr)?
         };
-        let bundle_id = process
-            .application()
-            .as_ref()
-            .and_then(|app| app.bundleIdentifier())
-            .map(|id| id.to_string());
+        let bundle_id = process.bundle_id();
         Ok(Self {
             element: refer,
             psn: process.psn(),

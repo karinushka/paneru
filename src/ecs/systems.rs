@@ -35,7 +35,7 @@ use crate::ecs::{
 };
 use crate::events::{Event, InputEvent, OverviewEvent};
 use crate::manager::{
-    Application, Display, Origin, Process, Size, Window, WindowManager, WindowOS,
+    Application, Display, Origin, Process, ProcessApi, Size, Window, WindowManager, WindowOS,
     bruteforce_windows,
 };
 use crate::overlay::{FlashMessageManager, OverlayManager, TabIndicatorGroup, TabIndicatorManager};
@@ -427,6 +427,19 @@ pub(crate) fn finish_setup(
     commands.trigger(RestoreWindowState);
 }
 
+fn check_force_manage(config: &Config, process: &mut dyn ProcessApi) -> bool {
+    if config.should_force_manage_process(process) {
+        debug!(
+            "Forcing management of launched process '{}' despite unobservable policy.",
+            process.name()
+        );
+        process.force_manage(true);
+        true
+    } else {
+        false
+    }
+}
+
 /// Handles the event when a new application is launched. It creates a `Process` and `Application` object,
 /// observes the application for events, and adds its windows to the manager.
 /// This system processes `BProcess` entities marked with `FreshMarker`.
@@ -454,16 +467,16 @@ pub(super) fn add_launched_process(
             continue;
         }
 
-        if config.should_force_manage_process(process) {
-            debug!(
-                "Forcing management of launched process '{}' despite unobservable policy.",
-                process.name()
-            );
-            process.force_manage(true);
-        }
-
+        let forced = check_force_manage(&config, process);
         if !process.ready() {
-            continue;
+            // `ready()` may have just resolved `NSRunningApplication` for a
+            // process that lacked one at launch, making its bundle ID available
+            // for `manage = true` rules. Re-check once and retry readiness so
+            // force-managed accessory apps are adopted immediately without
+            // leaving an activationPolicy KVO observer behind.
+            if forced || !check_force_manage(&config, process) || !process.ready() {
+                continue;
+            }
         }
 
         if children {

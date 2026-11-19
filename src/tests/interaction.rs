@@ -2469,6 +2469,233 @@ fn test_mid_strip_insertion_preserves_window_x() {
     assert_eq!(position.x, previous_offset);
 }
 
+/// A background window rule (`dont_focus = true`, `index = 0`) that inserts to
+/// the left of the focused window must keep the focused window at its exact
+/// screen x — both on an unscrolled strip and on a scrolled strip — by shifting
+/// the strip origin by the inserted column's width.
+#[test]
+fn test_left_edge_insertion_keeps_focused_window_x_unscrolled_and_scrolled() {
+    for (auto_center, focused_id, expect_scrolled) in [(true, 1, false), (false, 2, true)] {
+        let config = Config::try_from(
+            format!(
+                r#"
+[options]
+auto_center = {auto_center}
+
+[bindings]
+
+[windows.leftedge]
+title = ".*"
+subrole = "AXLeftEdge"
+index = 0
+dont_focus = true
+"#
+            )
+            .as_str(),
+        )
+        .expect("config should parse");
+
+        let commands = vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::WindowFocused {
+                window_id: focused_id,
+            },
+        ];
+
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        harness = harness
+            .on_iteration(0, move |_world, state| {
+                state.set_focused_window(focused_id);
+            })
+            .on_iteration(1, move |world, _state| {
+                assert_focused!(world, focused_id);
+            });
+        harness.run(commands);
+        harness.advance(Duration::from_millis(500));
+
+        let (focused_x, initial_strip_origin) = {
+            let world = harness.world();
+            let entity = find_window_entity(focused_id, world);
+            let focused_x = world.get::<Position>(entity).expect("a position").x;
+            let strip_entity = active_strip_entity(world);
+            let strip_origin = world
+                .get::<Position>(strip_entity)
+                .expect("strip position")
+                .x;
+            (focused_x, strip_origin)
+        };
+        if expect_scrolled {
+            assert_ne!(
+                initial_strip_origin, 0,
+                "scrolled case needs a non-zero initial strip origin"
+            );
+        }
+
+        harness = harness.with_window(9, |window| {
+            window.subrole = "AXLeftEdge".to_string();
+        });
+        harness.advance(Duration::from_millis(500));
+
+        let world = harness.world();
+        assert_focused!(world, focused_id);
+        let focused = find_window_entity(focused_id, world);
+        assert_eq!(
+            world.get::<Position>(focused).map(|position| position.x),
+            Some(focused_x),
+            "left-edge insertion must not move the focused window (scrolled={expect_scrolled})"
+        );
+        let new_entity = find_window_entity(9, world);
+        let strip_entity = active_strip_entity(world);
+        let strip = world
+            .get::<LayoutStrip>(strip_entity)
+            .expect("the active strip");
+        assert_eq!(strip.len(), 4);
+        assert_eq!(strip.index_of(new_entity).ok(), Some(0));
+        assert_eq!(
+            world
+                .get::<Position>(strip_entity)
+                .expect("strip position")
+                .x,
+            initial_strip_origin - TEST_WINDOW_WIDTH,
+            "strip origin must shift left by the inserted column width"
+        );
+    }
+}
+
+/// Spawning both a left-of-focus background window and a right-of-focus
+/// background window in the same tick must still keep the focused window's
+/// screen x intact.
+#[test]
+fn test_same_tick_left_and_right_insertions_keep_focused_window_x() {
+    let config = Config::try_from(
+        r#"
+[options]
+auto_center = false
+
+[bindings]
+
+[windows.leftedge]
+title = ".*"
+subrole = "AXLeftEdge"
+index = 0
+dont_focus = true
+
+[windows.rightside]
+title = ".*"
+subrole = "AXRightSide"
+dont_focus = true
+"#,
+    )
+    .expect("config should parse");
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::WindowFocused { window_id: 1 },
+    ];
+
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness = harness
+        .on_iteration(0, |_world, state| state.set_focused_window(1))
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 1);
+        });
+    harness.run(commands);
+    harness.advance(Duration::from_millis(500));
+
+    let focused_x = {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        world.get::<Position>(entity).expect("a position").x
+    };
+
+    // Spawn left-edge and right-of-focus windows before advancing a single tick.
+    harness = harness
+        .with_window(9, |window| {
+            window.subrole = "AXLeftEdge".to_string();
+        })
+        .with_window(10, |window| {
+            window.subrole = "AXRightSide".to_string();
+        });
+    harness.advance(Duration::from_millis(500));
+
+    let world = harness.world();
+    assert_focused!(world, 1);
+    let focused = find_window_entity(1, world);
+    assert_eq!(
+        world.get::<Position>(focused).map(|position| position.x),
+        Some(focused_x),
+        "a right-of-focus insertion in the same tick must not cancel the left-edge shift"
+    );
+}
+
+/// A left-edge background insertion arriving while the strip is mid-animation
+/// must shift the strip's in-flight `RepositionMarker` target too, so the
+/// focused window still lands at its intended screen x once the slide finishes.
+#[test]
+fn test_left_edge_insertion_during_strip_animation_preserves_target_x() {
+    let config = Config::try_from(
+        r#"
+[options]
+auto_center = false
+animation_speed = 8.0
+
+[bindings]
+
+[windows.leftedge]
+title = ".*"
+subrole = "AXLeftEdge"
+index = 0
+dont_focus = true
+"#,
+    )
+    .expect("config should parse");
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::WindowFocused { window_id: 3 },
+    ];
+
+    let mut harness = TestHarness::new().with_config(config).with_windows(4);
+    harness = harness
+        .on_iteration(0, |_world, state| state.set_focused_window(3))
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 3);
+        });
+    harness.run(commands);
+
+    // Strip should still be animating toward window 3.
+    let expected_focused_x = {
+        let world = harness.world();
+        let strip_entity = active_strip_entity(world);
+        let target_x = world
+            .get::<crate::ecs::RepositionMarker>(strip_entity)
+            .expect("strip must be mid-animation")
+            .0
+            .x;
+        let focused = find_window_entity(3, world);
+        let layout_x = world
+            .get::<crate::ecs::LayoutPosition>(focused)
+            .expect("layout position")
+            .0
+            .x;
+        layout_x + target_x
+    };
+
+    harness = harness.with_window(9, |window| {
+        window.subrole = "AXLeftEdge".to_string();
+    });
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_focused!(world, 3);
+    let focused = find_window_entity(3, world);
+    assert_eq!(
+        world.get::<Position>(focused).map(|position| position.x),
+        Some(expected_focused_x),
+        "mid-animation left-edge insertion must preserve the focused window's landing x"
+    );
+}
+
 /// Without the flag (the default), a moved window is appended to the end of the
 /// destination strip, preserving arrival order.
 #[test]

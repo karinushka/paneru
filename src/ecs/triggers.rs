@@ -1367,16 +1367,25 @@ fn remember_opener(
     }
 }
 
+type SpawnStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static mut LayoutStrip,
+        &'static mut Position,
+        Option<&'static mut RepositionMarker>,
+        Has<ActiveWorkspaceMarker>,
+        Has<SelectedVirtualMarker>,
+    ),
+    Without<Window>,
+>;
+
 #[instrument(level = Level::DEBUG, skip_all)]
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn apply_window_positions(
     added: Populated<Entity, Added<Window>>,
-    mut workspaces: Query<(
-        Entity,
-        &mut LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Has<SelectedVirtualMarker>,
-    )>,
+    mut workspaces: SpawnStrips,
     window_manager: Res<WindowManager>,
     apps: Query<&Application>,
     initializing: Option<Res<Initializing>>,
@@ -1388,7 +1397,7 @@ pub(super) fn apply_window_positions(
     for entity in added {
         if workspaces
             .iter()
-            .any(|(_, strip, _, _)| strip.tabbed(entity))
+            .any(|(_, strip, _, _, _, _)| strip.tabbed(entity))
         {
             debug!("Ignoring tabbed {entity} attributes.");
             continue;
@@ -1420,7 +1429,7 @@ pub(super) fn apply_window_positions(
         if properties.floating() {
             if let Some(mut strip) = workspaces
                 .iter_mut()
-                .find_map(|(_, strip, _, _)| strip.contains(entity).then_some(strip))
+                .find_map(|(_, strip, _, _, _, _)| strip.contains(entity).then_some(strip))
             {
                 strip.remove(entity);
             }
@@ -1444,7 +1453,7 @@ pub(super) fn apply_window_positions(
         // (or placed on an inactive Desktop strip by `apply_window_desktop_rules`).
         let existing_strip_active = workspaces
             .iter()
-            .find_map(|(_, strip, active, _)| strip.contains(entity).then_some(active));
+            .find_map(|(_, strip, _, _, active, _)| strip.contains(entity).then_some(active));
         let allready_inserted = existing_strip_active.is_some();
         let sent_to_inactive = sent_hidden.contains(entity);
         let mut on_hidden_space = existing_strip_active == Some(false) || sent_to_inactive;
@@ -1453,32 +1462,47 @@ pub(super) fn apply_window_positions(
             && !sent_to_inactive
             && let Some((target, is_active)) = home_strip(
                 window.id(),
-                &workspaces.iter().collect::<Vec<_>>(),
+                &workspaces
+                    .iter()
+                    .map(|(e, s, _, _, active, sel)| (e, s, active, sel))
+                    .collect::<Vec<_>>(),
                 &window_manager,
             )
-            && let Ok((_, mut strip, _, _)) = workspaces.get_mut(target)
+            && let Ok((_, mut strip, mut strip_position, strip_reposition, _, _)) =
+                workspaces.get_mut(target)
         {
             if is_active {
+                let focused_index = ctx
+                    .windows
+                    .focused()
+                    .and_then(|(_, focused)| strip.index_of(focused).ok());
                 // Attempt inserting the window at a pre-defined position.
-                let insert_at = properties.insertion().map_or_else(
-                    || {
-                        // Otherwise attempt inserting it after the current focus.
-                        let focused_window = ctx.windows.focused();
-                        // Insert to the right of the currently focused window
-                        focused_window
-                            .and_then(|(_, entity)| strip.index_of(entity).ok())
-                            .and_then(|insert_at| {
-                                (insert_at + 1 < strip.len()).then_some(insert_at + 1)
-                            })
-                    },
-                    Some,
-                );
+                let insert_at = properties.insertion().or_else(|| {
+                    // Otherwise attempt inserting it after the current focus.
+                    focused_index.and_then(|idx| (idx + 1 < strip.len()).then_some(idx + 1))
+                });
 
                 debug!("New window {entity} adding at {}", *strip);
                 match insert_at {
                     Some(after) => {
                         debug!("New window inserted at {after}");
-                        strip.insert_at(after, entity);
+                        let insertion = after.min(strip.len());
+                        strip.insert_at(insertion, entity);
+                        // Keep the focused column at the same screen x when a
+                        // background window lands at or left of it: shifting the
+                        // strip origin (and any in-flight animation target) by
+                        // the new column's width absorbs the slot shift on the
+                        // left without moving existing windows.
+                        if properties.dont_focus()
+                            && focused_index.is_some_and(|idx| insertion <= idx)
+                            && let Some(width) =
+                                ctx.windows.moving_frame(entity).map(|frame| frame.width())
+                        {
+                            strip_position.0.x -= width;
+                            if let Some(mut target) = strip_reposition {
+                                target.0.x -= width;
+                            }
+                        }
                     }
                     None => strip.append(entity),
                 }

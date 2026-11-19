@@ -1555,12 +1555,19 @@ pub(super) fn layout_strip_changed(
         // (removed, or moved to another strip by `extract_windows_into`)
         // produces no frame in `changed`, the zip below fails, and the rebase
         // silently does nothing rather than shifting by a stale position.
+        //
+        // `old_x` is the anchor's on-screen x while `new_x` is its new
+        // layout-relative slot, so the strip origin is *assigned*
+        // `old_x - new_x`: the one origin at which the anchor's screen
+        // position is unchanged. Adding the delta to the previous origin
+        // instead is correct only when that origin was already 0, and is
+        // silently off by it on a scrolled strip.
         if let Some((old_x, new_x)) = old_anchor_x.zip(anchor.and_then(|anchor| {
             changed
                 .iter()
                 .find_map(|(entity, frame)| (*entity == anchor).then_some(frame.min.x))
         })) {
-            strip_position.0.x += old_x - new_x;
+            strip_position.0.x = old_x - new_x;
         }
 
         for (entity, frame) in changed {

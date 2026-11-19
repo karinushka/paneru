@@ -535,4 +535,49 @@ mod delayed_readiness_tests {
             "headless process must be despawned once the recovery window expires"
         );
     }
+
+    #[test]
+    fn readiness_looks_up_application_missing_at_launch() {
+        let pid = NSWorkspace::sharedWorkspace()
+            .runningApplications()
+            .iter()
+            .find(|app| {
+                app.isFinishedLaunching()
+                    && app.activationPolicy() == NSApplicationActivationPolicy::Regular
+            })
+            .expect("a regular application must be running")
+            .processIdentifier();
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.advance(Duration::from_secs(1));
+        harness
+            .mock_state
+            .spawn_app(pid, "com.example.Late", "Late");
+        let mut wm = harness.mock_state.create_window_manager();
+        let state = harness.mock_state.clone();
+        wm.expect_new_application()
+            .returning(move |process| Ok(state.create_application(process.pid())));
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+        // macOS announced the launch before NSRunningApplication knew the pid.
+        let (events, _receiver) = crate::events::EventSender::new();
+        let mut process = Process::new(
+            &crate::platform::ProcessSerialNumber::default(),
+            WorkspaceObserver::new(events),
+        );
+        process.pid = pid;
+        assert!(process.application.is_none());
+        harness
+            .world()
+            .spawn((crate::ecs::FreshMarker, BProcess::from(process)));
+
+        harness.advance(Duration::from_secs(2));
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&Application>()
+                .iter(world)
+                .any(|app| app.pid() == pid),
+            "a process must become ready once NSRunningApplication knows it"
+        );
+    }
 }

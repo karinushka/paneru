@@ -31,7 +31,7 @@ use crate::config::{CONFIGURATION_FILE, Config, InitialWindowWidth, WindowParams
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::state::PaneruState;
 use crate::errors::Result;
-use crate::events::{Event, EventSender, InputEvent};
+use crate::events::{Event, EventSender, InputEvent, OverviewEvent};
 #[cfg(feature = "lua")]
 use crate::lua;
 use crate::manager::{
@@ -45,6 +45,7 @@ pub mod focus;
 pub mod layout;
 pub mod layout_ops;
 pub mod mouse;
+pub mod overview;
 pub mod params;
 pub(crate) mod restore;
 pub mod script_state;
@@ -267,6 +268,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // Registered with `add_message`, not `init_resource`, so the buffer is
     // double-buffered and dropped after a frame like any other message stream.
     app.add_message::<InputEvent>();
+    app.add_message::<OverviewEvent>();
     // Sample Bevy time after the blocking OS wait, so this frame uses its own
     // elapsed interval rather than the previous frame's sleep.
     app.add_systems(First, systems::pump_events.in_set(FirstSet::Pump));
@@ -975,7 +977,12 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(focus::FocusEventsPlugin)
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins(setups::DisplaySetupsPlugin)
-        .add_plugins((register_triggers, register_systems, register_commands));
+        .add_plugins((
+            register_triggers,
+            register_systems,
+            register_commands,
+            overview::register_overview,
+        ));
 
     // Run every schedule inline rather than fanning systems out across the task
     // pool: the task-pool handoff measured ~45% of main-thread time against
@@ -1002,6 +1009,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     crate::menubar::load_menu_bar_preference(&mut app);
     let menu_events = sender.clone();
     let tab_indicator_events = sender.clone();
+    let overview_events = sender.clone();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     let initial_config = platform_callbacks.setup_handlers()?;
     let mtm = platform_callbacks.main_thread_marker;
@@ -1012,6 +1020,10 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .insert_non_send(overlay_manager)
         .insert_non_send(flash_message_manager)
         .insert_non_send(tab_indicator_manager)
+        .insert_non_send(crate::overview::view::OverviewManager::new(
+            mtm,
+            overview_events,
+        ))
         .insert_non_send(receiver);
 
     // `CONFIGURATION_FILE` is `None` exactly when an `init.lua` took the TOML

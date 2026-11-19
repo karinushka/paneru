@@ -592,6 +592,38 @@ impl Config {
         (paging, fingers, direction, distance_cm, haptics)
     }
 
+    /// Finger count for the overview gesture, if enabled and distinct from
+    /// the window-swipe count.
+    pub fn overview_gesture_fingers(&self) -> Option<usize> {
+        let config = self.inner();
+        config
+            .swipe
+            .as_ref()
+            .and_then(|swipe| swipe.gesture.as_ref())
+            .and_then(|gesture| gesture.overview_fingers)
+            .filter(|fingers| *fingers >= 3 && Some(*fingers) != self.swipe_gesture_fingers())
+    }
+
+    /// Most windows streaming live in the overview at once.
+    pub fn overview_live_previews(&self) -> usize {
+        self.inner()
+            .overview
+            .as_ref()
+            .and_then(|o| o.live_previews)
+            .unwrap_or(4)
+    }
+
+    /// See [`OverviewOptions::live_margin`].
+    pub fn overview_live_margin(&self) -> f64 {
+        self.inner()
+            .overview
+            .as_ref()
+            .and_then(|o| o.live_margin)
+            .filter(|m| m.is_finite())
+            .unwrap_or(0.0)
+            .max(0.0)
+    }
+
     pub fn swipe_vertical(&self) -> bool {
         let config = self.inner();
         config
@@ -1241,6 +1273,20 @@ struct InnerConfig {
     swipe: Option<swipe::SwipeOptions>,
     padding: Option<padding::PaddingOptions>,
     restore: Option<RestoreOptions>,
+    overview: Option<OverviewOptions>,
+}
+
+/// `[overview]`: the niri-style overview.
+#[derive(Deserialize, Debug, Default, Clone)]
+#[cfg_attr(test, derive(serde::Serialize))]
+pub struct OverviewOptions {
+    /// How many windows show live (streamed) previews at once; the others
+    /// show snapshots. 0 turns live previews off. Default: 4.
+    pub live_previews: Option<usize>,
+    /// How far past the screen edge (as a fraction of the display height)
+    /// a card keeps streaming, so cards scrolled just out of view don't
+    /// stop and restart. Default: 0.
+    pub live_margin: Option<f64>,
 }
 
 impl InnerConfig {
@@ -2384,6 +2430,18 @@ window_virtualsendnum_3 = "cmd + alt + shift - 3"
 }
 
 #[test]
+fn test_overview_binding() {
+    let config = Config::try_from("[bindings]\noverview = \"alt - o\"\n").expect("parses");
+    let keycode = virtual_keycode()
+        .find_map(|(s, v)| (*s == "o").then_some(*v))
+        .unwrap();
+    assert!(matches!(
+        config.find_keybind(keycode, Modifiers::ALT),
+        Some(Command::Overview)
+    ));
+}
+
+#[test]
 fn test_parse_resize_commands() {
     assert!(matches!(
         parse_command(&["window", "resize"]).unwrap(),
@@ -3036,4 +3094,24 @@ fn gesture_page_distance_rejects_nonpositive_and_nonfinite_values() {
             "accepted {value}"
         );
     }
+}
+
+#[test]
+#[allow(clippy::float_cmp)]
+fn test_overview_live_preview_config() {
+    let defaults = Config::try_from("").expect("empty config parses");
+    assert_eq!(defaults.overview_live_previews(), 4);
+    assert_eq!(defaults.overview_live_margin(), 0.0);
+    let config = Config::try_from(
+        r"
+[overview]
+live_previews = 7
+live_margin = 0.5
+",
+    )
+    .expect("overview section parses");
+    assert_eq!(config.overview_live_previews(), 7);
+    assert_eq!(config.overview_live_margin(), 0.5);
+    let negative = Config::try_from("[overview]\nlive_margin = -1.0\n").expect("parses");
+    assert_eq!(negative.overview_live_margin(), 0.0);
 }

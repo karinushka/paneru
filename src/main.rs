@@ -22,9 +22,11 @@ mod lua;
 mod manager;
 mod menubar;
 mod overlay;
+mod overview;
 mod pasteboard;
 mod platform;
 mod reader;
+mod screen_capture;
 mod tab_indicator;
 mod util;
 

@@ -13,11 +13,10 @@ use objc2_core_foundation::{
 };
 use objc2_core_graphics::{
     CGAssociateMouseAndMouseCursorPosition, CGDirectDisplayID, CGDisplayBounds,
-    CGGetActiveDisplayList, CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo,
-    CGWindowListOption, kCGNullWindowID, kCGWindowNumber,
+    CGWarpMouseCursorPosition, CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID,
+    kCGWindowNumber,
 };
 use std::path::Path;
-use std::ptr::null_mut;
 use std::slice::from_raw_parts_mut;
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -298,9 +297,15 @@ impl WindowManagerApi for WindowManagerOS {
     #[instrument(level = Level::TRACE, skip(self), ret)]
     fn get_associated_windows(&self, window_id: WinID) -> Vec<WinID> {
         trace!("for window {window_id}");
-        let windows =
-            unsafe { CFRetained::from_raw(SLSCopyAssociatedWindows(self.main_cid, window_id)) };
-        windows.into_iter().filter_map(|id| id.as_i32()).collect()
+        let Some(ptr) = NonNull::new(unsafe { SLSCopyAssociatedWindows(self.main_cid, window_id) })
+        else {
+            return Vec::new();
+        };
+        let windows = unsafe { CFRetained::from_raw(ptr) };
+        windows
+            .iter()
+            .filter_map(|v| v.downcast_ref::<CFNumber>()?.as_i32())
+            .collect()
     }
 
     /// Retrieves a list of all currently present displays, along with their associated spaces.
@@ -316,32 +321,26 @@ impl WindowManagerApi for WindowManagerOS {
     }
 
     fn present_displays(&self) -> Vec<(Display, Vec<WorkspaceId>)> {
-        let mut count = 0u32;
-        unsafe {
-            CGGetActiveDisplayList(0, null_mut(), &raw mut count);
-        }
-        if count < 1 {
+        let displays = spaces::bridge::active_display_ids();
+        if displays.is_empty() {
             return vec![];
         }
-        let mut displays = Vec::with_capacity(count.try_into().unwrap());
-        unsafe {
-            CGGetActiveDisplayList(count, displays.as_mut_ptr(), &raw mut count);
-            displays.set_len(count.try_into().unwrap());
-        }
-        let census = spaces::bridge::read_managed_display_spaces(self.main_cid)
+        let Some(census) = spaces::bridge::read_managed_display_spaces(self.main_cid)
             .inspect_err(|err| warn!("unable to read managed display spaces: {err}"))
-            .ok();
+            .ok()
+        else {
+            return vec![];
+        };
         displays
             .into_iter()
             .filter_map(|id| {
+                let workspaces: Vec<WorkspaceId> = census
+                    .display(id)
+                    .map(|d| d.spaces.iter().map(|s| s.id.get()).collect())?;
                 let bounds = CGDisplayBounds(id);
                 let mut menubar_height: u32 = 0;
                 unsafe { SLSGetDisplayMenubarHeight(id, &raw mut menubar_height) };
                 debug!("menubar height: {menubar_height}");
-                let workspaces: Vec<WorkspaceId> = census
-                    .as_ref()
-                    .and_then(|c| c.display(id))
-                    .map(|d| d.spaces.iter().map(|s| s.id.get()).collect())?;
 
                 Some((
                     Display::new(id, irect_from(bounds), menubar_height.cast_signed()),
@@ -651,21 +650,33 @@ fn window_iterator_for_connection(
         )));
     }
 
-    let query = unsafe {
-        CFRetained::from_raw(SLSWindowQueryWindows(
-            main_cid,
-            &raw const *window_list_ref,
-            count,
+    let query_ptr = NonNull::new(unsafe {
+        SLSWindowQueryWindows(main_cid, &raw const *window_list_ref, count)
+    })
+    .ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "{}: nullptr returned from SLSWindowQueryWindows.",
+            function_name!()
         ))
-    };
-    Ok(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
+    })?;
+    let query = unsafe { CFRetained::from_raw(query_ptr) };
+    let iter_ptr = NonNull::new(unsafe { SLSWindowQueryResultCopyWindows(query.deref().into()) })
+        .ok_or_else(|| {
+        Error::InvalidInput(format!(
+            "{}: nullptr returned from SLSWindowQueryResultCopyWindows.",
+            function_name!()
+        ))
+    })?;
+    Ok(unsafe { CFRetained::from_raw(iter_ptr) })
 }
 
 pub fn window_iterator_for_id(window_id: WinID) -> Option<CFRetained<CFType>> {
     let cid = unsafe { SLSMainConnectionID() };
     let windows = create_array(&[window_id], CFNumberType::SInt32Type).ok()?;
-    let query = unsafe { CFRetained::from_raw(SLSWindowQueryWindows(cid, &raw const *windows, 1)) };
-    Some(unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) })
+    let query_ptr = NonNull::new(unsafe { SLSWindowQueryWindows(cid, &raw const *windows, 1) })?;
+    let query = unsafe { CFRetained::from_raw(query_ptr) };
+    let iter_ptr = NonNull::new(unsafe { SLSWindowQueryResultCopyWindows(query.deref().into()) })?;
+    Some(unsafe { CFRetained::from_raw(iter_ptr) })
 }
 
 /// Determines if a window is valid based on its parent ID, attributes, and tags.

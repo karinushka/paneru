@@ -11,7 +11,10 @@ use bevy::ecs::system::{Commands, NonSendMut, Populated, Query, Res, ResMut, Sys
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
-use super::ops::{DesktopOpWorld, active_display_id, resolve_desktop_target};
+use super::ops::{
+    DesktopOpWorld, active_display_id, focus_heir_on_active_strip, relocate_tiled_group_to_space,
+    resolve_desktop_target,
+};
 use super::{
     ConfirmCondition, DesktopCensus, PendingDesktopOp, PendingDesktopOps, PostConfirmAction,
     StickyWindowMarker, refresh_census_from_bridge,
@@ -163,6 +166,13 @@ pub(super) fn handle_pin(
                 );
                 return;
             }
+            if memberships.as_slice() == [dest.id] {
+                debug!(
+                    "desktop pin: window {wid} is already solely on desktop {}",
+                    dest.id
+                );
+                return;
+            }
             if !memberships.contains(&dest.id)
                 && let Err(err) = bridge.add_windows_to_space(&[wid], dest.id, false)
             {
@@ -208,25 +218,34 @@ fn pin_window_to_all_desktops(
         .filter(|s| s.kind.is_desktop())
         .map(|s| s.id)
         .collect();
+    let mut added = Vec::new();
+    let mut partial_failure = false;
     for &sid in &desktops {
-        if !memberships.contains(&sid)
-            && let Err(err) = bridge.add_windows_to_space(&[wid], sid, false)
-        {
+        if memberships.contains(&sid) {
+            continue;
+        }
+        if let Err(err) = bridge.add_windows_to_space(&[wid], sid, false) {
             warn!("desktop pin all failed adding {wid} to {sid}: {err}");
             if err.request_may_have_applied {
                 refresh_census_from_bridge(bridge, &mut world.census);
             }
-            return;
+            partial_failure = true;
+            break;
         }
+        added.push(sid);
     }
-    detach_and_float_window(
-        focused_entity,
-        Some(PinnedDesktopWindow::AllDesktops {
+    if partial_failure && added.is_empty() && memberships.len() <= 1 {
+        return;
+    }
+    let pin_marker = if partial_failure {
+        PinnedDesktopWindow::SpecificDesktops
+    } else {
+        PinnedDesktopWindow::AllDesktops {
             display_id: disp_id,
-        }),
-        world,
-    );
-    let expected: HashSet<SpaceId> = memberships.into_iter().chain(desktops).collect();
+        }
+    };
+    detach_and_float_window(focused_entity, Some(pin_marker), world);
+    let expected: HashSet<SpaceId> = memberships.into_iter().chain(added).collect();
     world.pending.push(PendingDesktopOp::new(
         format!("pin window {wid} to all desktops on display {disp_id}"),
         ConfirmCondition::WindowMemberships {
@@ -439,40 +458,52 @@ fn assign_pid_space(
         return;
     }
 
-    let raw_dest = dest.id.get();
-    let dest_strip_entity = world
-        .strips
-        .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_dest)
-        .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index))
-        .map(|(e, _, _, _, _, _)| e);
-
-    let win_entities: Vec<(WinID, Entity, bool)> = pid_windows
+    let focused_entity = world.windows.focused().map(|(_, e)| e);
+    let win_entities: Vec<(Entity, bool)> = pid_windows
         .iter()
         .filter_map(|&(wid, ..)| {
             world.windows.find(wid).and_then(|(_, e)| {
                 world
                     .windows
                     .get_managed(e)
-                    .map(|(_, _, u)| (wid, e, u.is_none()))
+                    .map(|(_, _, u)| (e, u.is_none()))
             })
         })
         .collect();
 
-    for &(_, entity, managed) in &win_entities {
+    let mut moved_all = HashSet::new();
+    let mut active_heir = None;
+    let active_space_id = world
+        .strips
+        .iter()
+        .find(|(_, _, _, _, active, _)| *active)
+        .map(|(_, s, _, _, _, _)| s.id());
+    for &(entity, managed) in &win_entities {
         if let Ok(mut ec) = world.commands.get_entity(entity) {
             ec.try_remove::<PinnedDesktopWindow>()
                 .try_remove::<StickyWindowMarker>();
         }
-        if managed {
-            for (strip_entity, mut strip, _, _, _, _) in &mut world.strips {
-                if Some(strip_entity) == dest_strip_entity {
-                    strip.append(entity);
-                } else if strip.contains(entity) {
-                    strip.remove(entity);
-                }
+        if managed && !moved_all.contains(&entity) {
+            let (moved, heir) =
+                relocate_tiled_group_to_space(entity, dest.id, dest.display_id, world);
+            if Some(entity) == focused_entity && active_space_id != Some(dest.id.get()) {
+                active_heir = heir;
             }
+            moved_all.extend(moved);
+        } else {
+            moved_all.insert(entity);
         }
+    }
+    if let Some(history) = world.focus_history.as_deref_mut() {
+        for &entity in &moved_all {
+            history.forget(entity);
+        }
+    }
+    if let Some(focused) = focused_entity
+        && moved_all.contains(&focused)
+        && active_space_id != Some(dest.id.get())
+    {
+        focus_heir_on_active_strip(focused, active_heir, world);
     }
 
     let wids: Vec<WinID> = pid_windows.iter().map(|&(wid, ..)| wid).collect();
@@ -494,18 +525,13 @@ fn assign_pid_clear(
     world: &mut DesktopOpWorld,
 ) {
     let mut expected_pairs = Vec::with_capacity(pid_windows.len());
+    let mut clear_sticky = Vec::new();
     for (wid, disp_id, prior) in pid_windows {
         let Some(disp) = census.display(*disp_id) else {
             return;
         };
-        let desktops: HashSet<SpaceId> = disp
-            .spaces
-            .iter()
-            .filter(|s| s.kind.is_desktop())
-            .map(|s| s.id)
-            .collect();
-        let was_all = desktops.len() > 1 && desktops.is_subset(prior);
-        if was_all {
+        let is_sticky = bridge.window_is_sticky(*wid) == Some(true);
+        if is_sticky {
             if !census
                 .find_space(disp.current_space)
                 .is_some_and(|s| s.kind.is_desktop())
@@ -516,6 +542,7 @@ fn assign_pid_clear(
                 return;
             }
             expected_pairs.push((*wid, HashSet::from([disp.current_space])));
+            clear_sticky.push(*wid);
         } else {
             expected_pairs.push((*wid, prior.clone()));
         }
@@ -529,8 +556,7 @@ fn assign_pid_clear(
         return;
     }
 
-    let wids: Vec<WinID> = pid_windows.iter().map(|&(wid, ..)| wid).collect();
-    for &wid in &wids {
+    for &wid in &clear_sticky {
         if let Some((_, entity)) = world.windows.find(wid)
             && let Ok(mut ec) = world.commands.get_entity(entity)
         {
@@ -540,8 +566,11 @@ fn assign_pid_clear(
 
     world.pending.push(PendingDesktopOp::new(
         format!("clear desktop assignment for pid {pid}"),
-        ConfirmCondition::PerWindowMemberships(expected_pairs),
-        Some(PostConfirmAction::ReconcileStickyMarkers(wids)),
+        ConfirmCondition::AssignClear {
+            memberships: expected_pairs,
+            clear_sticky: clear_sticky.clone(),
+        },
+        Some(PostConfirmAction::ReconcileStickyMarkers(clear_sticky)),
     ));
 }
 
@@ -549,13 +578,14 @@ fn assign_pid_clear(
 /// created ordinary Desktops on their display (§5.7).
 pub(super) fn join_pinned_windows_to_new_desktops(
     pinned_windows: Populated<(&Window, &PinnedDesktopWindow)>,
-    census: Res<DesktopCensus>,
+    mut census: ResMut<DesktopCensus>,
     bridge: Option<NonSendMut<DesktopBridge>>,
     mut pending: ResMut<PendingDesktopOps>,
 ) {
     let Some(mut bridge) = bridge else {
         return;
     };
+    let mut resync_census = false;
     for (window, pinned) in &pinned_windows {
         let PinnedDesktopWindow::AllDesktops { display_id } = *pinned else {
             continue;
@@ -567,27 +597,29 @@ pub(super) fn join_pinned_windows_to_new_desktops(
         let Ok(memberships) = bridge.spaces_for_window(wid) else {
             continue;
         };
-        let desktops: Vec<SpaceId> = disp
+        let missing: Vec<SpaceId> = disp
             .spaces
             .iter()
             .filter(|s| s.kind.is_desktop())
             .map(|s| s.id)
-            .collect();
-        let missing: Vec<SpaceId> = desktops
-            .iter()
-            .copied()
             .filter(|sid| !memberships.contains(sid))
             .collect();
         if missing.is_empty() {
             continue;
         }
+        let mut added = Vec::new();
         for &sid in &missing {
             if let Err(err) = bridge.add_windows_to_space(&[wid], sid, false) {
                 warn!("auto-join pinned window {wid} to new desktop {sid} failed: {err}");
+                resync_census |= err.request_may_have_applied;
                 break;
             }
+            added.push(sid);
         }
-        let expected: HashSet<SpaceId> = memberships.into_iter().chain(desktops).collect();
+        if added.is_empty() {
+            continue;
+        }
+        let expected: HashSet<SpaceId> = memberships.into_iter().chain(added).collect();
         pending.push(PendingDesktopOp::new(
             format!("auto-join pinned window {wid} to new desktops"),
             ConfirmCondition::WindowMemberships {
@@ -597,10 +629,17 @@ pub(super) fn join_pinned_windows_to_new_desktops(
             None,
         ));
     }
+    if resync_census {
+        refresh_census_from_bridge(&bridge, &mut census);
+    }
 }
 
-type AddedRuleWindows<'w, 's> =
-    Populated<'w, 's, (Entity, &'static Window, &'static ChildOf), Added<Window>>;
+type AddedRuleWindows<'w, 's> = Populated<
+    'w,
+    's,
+    (Entity, &'static Window, &'static ChildOf),
+    (Added<Window>, Without<StickyWindowMarker>),
+>;
 type RuleStrips<'w, 's> = Query<
     'w,
     's,
@@ -672,6 +711,18 @@ fn apply_single_window_desktop_rule(
     bridge: &mut DesktopBridge,
     world: &mut SpawnRuleWorld,
 ) {
+    if bridge.window_is_sticky(wid) == Some(true) {
+        debug!("skipping [windows] desktop rule for sticky (0x800) window {wid}");
+        return;
+    }
+    if world
+        .strips
+        .iter()
+        .any(|(_, strip, _, _)| strip.tabbed(entity))
+    {
+        debug!("skipping [windows] desktop rule for tabbed window {wid}");
+        return;
+    }
     let Ok(memberships) = bridge.spaces_for_window(wid) else {
         return;
     };
@@ -689,55 +740,101 @@ fn apply_single_window_desktop_rule(
 
     match rule_target {
         DesktopRuleTarget::All => {
-            let desktops: Vec<SpaceId> = disp
-                .spaces
-                .iter()
-                .filter(|s| s.kind.is_desktop())
-                .map(|s| s.id)
-                .collect();
-            for &sid in &desktops {
-                if !memberships.contains(&sid) {
-                    let _ = bridge.add_windows_to_space(&[wid], sid, false);
-                }
-            }
-            if let Ok(mut ec) = world.commands.get_entity(entity) {
-                ec.try_insert((
-                    StickyWindowMarker,
-                    Unmanaged::Floating,
-                    PinnedDesktopWindow::AllDesktops {
-                        display_id: disp_id,
-                    },
-                ));
-            }
-            let expected: HashSet<SpaceId> = memberships.into_iter().chain(desktops).collect();
-            world.pending.push(PendingDesktopOp::new(
-                format!("window rule desktop='all' for {wid}"),
-                ConfirmCondition::WindowMemberships {
-                    windows: vec![wid],
-                    expected,
-                },
-                None,
-            ));
+            apply_rule_all(entity, wid, disp_id, disp, memberships, bridge, world);
         }
         DesktopRuleTarget::Number(num) => {
-            let Some(dest) = disp.desktop_by_number(num.get()) else {
-                debug!("window rule desktop={num}: out of range on display {disp_id}");
-                return;
-            };
-            if memberships.as_slice() != [dest.id]
-                && let Err(err) = bridge.move_windows_to_space(&[wid], dest.id)
-            {
-                warn!("window rule desktop={num} move failed for {wid}: {err}");
-                return;
-            }
-            if dest.active {
-                return;
-            }
-            if let Ok(mut ec) = world.commands.get_entity(entity) {
-                ec.try_insert(SentToInactiveDesktop);
-            }
+            apply_rule_number(
+                entity,
+                wid,
+                num,
+                floating,
+                disp_id,
+                disp,
+                &memberships,
+                bridge,
+                world,
+            );
+        }
+    }
+}
+
+fn apply_rule_all(
+    entity: Entity,
+    wid: WinID,
+    disp_id: CGDirectDisplayID,
+    disp: &crate::manager::spaces::DisplaySpaces,
+    memberships: Vec<SpaceId>,
+    bridge: &mut DesktopBridge,
+    world: &mut SpawnRuleWorld,
+) {
+    let desktops: Vec<SpaceId> = disp
+        .spaces
+        .iter()
+        .filter(|s| s.kind.is_desktop())
+        .map(|s| s.id)
+        .collect();
+    let mut added = Vec::new();
+    let mut failed = false;
+    for &sid in &desktops {
+        if memberships.contains(&sid) {
+            continue;
+        }
+        if let Err(err) = bridge.add_windows_to_space(&[wid], sid, false) {
+            warn!("window rule desktop='all' failed adding {wid} to {sid}: {err}");
+            failed = true;
+            break;
+        }
+        added.push(sid);
+    }
+    if failed && added.is_empty() && memberships.len() <= 1 {
+        return;
+    }
+    let pin_marker = if failed {
+        PinnedDesktopWindow::SpecificDesktops
+    } else {
+        PinnedDesktopWindow::AllDesktops {
+            display_id: disp_id,
+        }
+    };
+    if let Ok(mut ec) = world.commands.get_entity(entity) {
+        ec.try_insert((StickyWindowMarker, Unmanaged::Floating, pin_marker));
+    }
+    let expected: HashSet<SpaceId> = memberships.into_iter().chain(added).collect();
+    world.pending.push(PendingDesktopOp::new(
+        format!("window rule desktop='all' for {wid}"),
+        ConfirmCondition::WindowMemberships {
+            windows: vec![wid],
+            expected,
+        },
+        None,
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn apply_rule_number(
+    entity: Entity,
+    wid: WinID,
+    num: std::num::NonZeroU32,
+    floating: bool,
+    disp_id: CGDirectDisplayID,
+    disp: &crate::manager::spaces::DisplaySpaces,
+    memberships: &[SpaceId],
+    bridge: &mut DesktopBridge,
+    world: &mut SpawnRuleWorld,
+) {
+    let Some(dest) = disp.desktop_by_number(num.get()) else {
+        debug!("window rule desktop={num}: out of range on display {disp_id}");
+        return;
+    };
+    let moved = memberships != [dest.id];
+    if moved && let Err(err) = bridge.move_windows_to_space(&[wid], dest.id) {
+        warn!("window rule desktop={num} move failed for {wid}: {err}");
+        return;
+    }
+    if dest.active {
+        if moved {
             if !floating {
-                place_spawned_window_on_inactive_strip(entity, dest.id, disp_id, world);
+                place_spawned_window_on_strip(entity, dest.id, disp_id, world);
             }
             world.pending.push(PendingDesktopOp::new(
                 format!("window rule desktop={num} for {wid}"),
@@ -748,10 +845,25 @@ fn apply_single_window_desktop_rule(
                 None,
             ));
         }
+        return;
     }
+    if let Ok(mut ec) = world.commands.get_entity(entity) {
+        ec.try_insert(SentToInactiveDesktop);
+    }
+    if !floating {
+        place_spawned_window_on_strip(entity, dest.id, disp_id, world);
+    }
+    world.pending.push(PendingDesktopOp::new(
+        format!("window rule desktop={num} for {wid}"),
+        ConfirmCondition::WindowMemberships {
+            windows: vec![wid],
+            expected: HashSet::from([dest.id]),
+        },
+        None,
+    ));
 }
 
-fn place_spawned_window_on_inactive_strip(
+fn place_spawned_window_on_strip(
     entity: Entity,
     dest_space: SpaceId,
     display_id: CGDirectDisplayID,

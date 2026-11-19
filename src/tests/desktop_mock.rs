@@ -296,7 +296,7 @@ impl DesktopBridgeApi for MockDesktopBridge {
                     win.workspace_id = win
                         .extra_workspaces
                         .iter()
-                        .next()
+                        .min()
                         .copied()
                         .unwrap_or(active_ws);
                     win.extra_workspaces.remove(&win.workspace_id);
@@ -364,25 +364,27 @@ impl DesktopBridgeApi for MockDesktopBridge {
         self.session_unlocked()?;
         self.0.run_or_defer_desktop(move |state| {
             let mut inner = state.inner.force_write();
-            let display_desktops: Vec<(u32, WorkspaceId, Vec<WorkspaceId>)> = inner
-                .displays
-                .values()
-                .map(|d| {
-                    let desktops = d
-                        .workspaces
-                        .iter()
-                        .copied()
-                        .filter(|ws| !inner.fullscreen_spaces.contains(ws))
-                        .collect();
-                    (d.id, d.current_workspace, desktops)
-                })
-                .collect();
+            let mut display_desktops: Vec<(u32, WorkspaceId, Vec<WorkspaceId>, Vec<WorkspaceId>)> =
+                inner
+                    .displays
+                    .values()
+                    .map(|d| {
+                        let desktops = d
+                            .workspaces
+                            .iter()
+                            .copied()
+                            .filter(|ws| !inner.fullscreen_spaces.contains(ws))
+                            .collect();
+                        (d.id, d.current_workspace, d.workspaces.clone(), desktops)
+                    })
+                    .collect();
+            display_desktops.sort_by_key(|(id, ..)| *id);
             for win in inner.windows.values_mut().filter(|w| w.pid == pid) {
                 let owner_disp = display_desktops
                     .iter()
-                    .find(|(_, _, list)| list.contains(&win.workspace_id))
+                    .find(|(_, _, all_ws, _)| all_ws.contains(&win.workspace_id))
                     .or_else(|| display_desktops.first());
-                let Some((_, current_ws, desktops)) = owner_disp else {
+                let Some((_, current_ws, _, desktops)) = owner_disp else {
                     continue;
                 };
                 match mode {

@@ -126,8 +126,13 @@ impl StateBroadcastIntent {
                     intent.virtual_workspace_changed = true;
                     intent.desktops_changed = true;
                 }
-                Event::SpaceCreated { .. } | Event::SpaceDestroyed { .. } => {
+                Event::SpaceCreated { .. } => {
                     intent.desktops_changed = true;
+                }
+                Event::SpaceDestroyed { .. } => {
+                    intent.desktops_changed = true;
+                    intent.virtual_workspace_changed = true;
+                    intent.windows_changed = true;
                 }
                 Event::SpaceMembershipChanged => {
                     intent.windows_changed = true;
@@ -144,9 +149,11 @@ impl StateBroadcastIntent {
                     command: Command::Desktop(op),
                 } => {
                     intent.desktops_changed = true;
+                    intent.virtual_workspace_changed = true;
                     if matches!(
                         op,
-                        DesktopOperation::MoveWindow { .. }
+                        DesktopOperation::Destroy { .. }
+                            | DesktopOperation::MoveWindow { .. }
                             | DesktopOperation::Pin(_)
                             | DesktopOperation::Unpin
                             | DesktopOperation::Assign { .. }
@@ -238,6 +245,7 @@ pub(super) fn register_query_commands(app: &mut App) {
         PostUpdate,
         state_event_broadcast_handler
             .in_set(crate::ecs::PostUpdateSet::Bookkeeping)
+            .after(crate::ecs::workspace::workspace_destroyed_handler)
             .run_if(active_subscribers),
     );
 }
@@ -428,9 +436,10 @@ fn state_event_broadcast_handler(
         return;
     }
 
+    let census_changed = state.desktop_census_changed();
     let signals = StateBroadcastSignals {
-        virtual_workspace_changed: !active_workspace_changes.is_empty(),
-        desktops_changed: state.desktop_census_changed(),
+        virtual_workspace_changed: !active_workspace_changes.is_empty() || census_changed,
+        desktops_changed: census_changed,
         windows_changed: events.iter().any(|event| {
             let Event::WindowMoved { window_id } = event else {
                 return false;

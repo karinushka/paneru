@@ -136,7 +136,7 @@ fn migrate_strips_to_survivor(
     let existing_dest = world
         .strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_dst)
+        .filter(|(_, s, _, _, _, _)| s.id() == raw_dst && !s.is_fullscreen())
         .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index))
         .map(|(entity, _, _, _, _, _)| entity);
     if let Some(dest_entity) = existing_dest {
@@ -208,7 +208,15 @@ pub(super) fn handle_destroy(
     };
 
     if dest.active {
-        destroy_active_desktop(dest, disp, &census, app_windows, bridge, world);
+        destroy_active_desktop(
+            dest,
+            disp,
+            active_disp_id,
+            &census,
+            app_windows,
+            bridge,
+            world,
+        );
     } else {
         destroy_inactive_desktop(dest, disp, &census, app_windows, bridge, world);
     }
@@ -217,6 +225,7 @@ pub(super) fn handle_destroy(
 fn destroy_active_desktop(
     dest: &SpaceRecord,
     disp: &DisplaySpaces,
+    active_disp_id: CGDirectDisplayID,
     census: &SpaceCensus,
     app_windows: Vec<WinID>,
     bridge: &mut DesktopBridge,
@@ -239,14 +248,15 @@ fn destroy_active_desktop(
     }
     let prior_neighbor_focus =
         preferred_focus_on_space(neighbor.id, &world.strips, world.focus_history.as_deref());
-    let migrated_first = migrate_strips_to_survivor(dest.id, neighbor.id, disp.display_id, world);
     world.pending.push(PendingDesktopOp::new(
         format!("vacate desktop {} -> {}", dest.id, neighbor.id),
         ConfirmCondition::SpaceActive(neighbor.id),
         Some(PostConfirmAction::DestroyVacatedSpace {
             space_id: dest.id,
             neighbor_id: neighbor.id,
-            preferred_window: prior_neighbor_focus.or(migrated_first),
+            display_id: disp.display_id,
+            activate_display: dest.display_id == active_disp_id,
+            preferred_window: prior_neighbor_focus,
             migrated: app_windows,
         }),
     ));
@@ -267,11 +277,13 @@ fn destroy_inactive_desktop(
         }
         return;
     }
-    if census
+    let survivor = census
         .find_space(disp.current_space)
-        .is_some_and(|s| s.kind.is_desktop())
-    {
-        migrate_strips_to_survivor(dest.id, disp.current_space, disp.display_id, world);
+        .filter(|s| s.kind.is_desktop())
+        .map(|s| s.id)
+        .or_else(|| adjacent_desktop(disp, dest.id).map(|s| s.id));
+    if let Some(survivor_id) = survivor {
+        migrate_strips_to_survivor(dest.id, survivor_id, disp.display_id, world);
     }
     world.pending.push(PendingDesktopOp::new(
         format!("destroy desktop {}", dest.id),

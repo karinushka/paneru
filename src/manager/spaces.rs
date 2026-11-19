@@ -147,14 +147,31 @@ pub struct SpaceCensus {
 }
 
 impl SpaceCensus {
-    /// Validates raw display entries (unique non-zero Space IDs, non-empty per
-    /// display, active `current_space` present on every display) and assigns
-    /// 0-based `space_index` and 1-based `desktop_number`.
+    /// Validates raw display entries (non-empty displays, unique non-zero
+    /// display IDs and Space IDs, non-empty spaces per display, active
+    /// `current_space` present on every display) and assigns 0-based
+    /// `space_index` and 1-based `desktop_number`.
     pub fn from_raw(raw_displays: Vec<RawDisplaySpaces>) -> Result<Self, SpaceError> {
+        if raw_displays.is_empty() {
+            return Err(SpaceError::new(
+                SpaceErrorKind::QueryFailed,
+                "SkyLight census returned zero displays",
+            ));
+        }
+        let mut seen_displays = HashSet::new();
         let mut seen_ids = HashSet::new();
         let displays = raw_displays
             .into_iter()
             .map(|raw| {
+                if raw.display_id == 0 || !seen_displays.insert(raw.display_id) {
+                    return Err(SpaceError::new(
+                        SpaceErrorKind::QueryFailed,
+                        format!(
+                            "invalid or duplicate display id {} in SkyLight census",
+                            raw.display_id
+                        ),
+                    ));
+                }
                 if raw.skylight_display.is_empty() || raw.spaces.is_empty() {
                     return Err(SpaceError::new(
                         SpaceErrorKind::QueryFailed,
@@ -260,7 +277,7 @@ pub fn resolve_skylight_display_id(
     {
         return Some(id);
     }
-    (identifier == "Main").then_some(main_display_id)
+    (identifier == "Main" && main_display_id != 0).then_some(main_display_id)
 }
 
 /// Process-wide Space assignment target (§5.9).
@@ -824,6 +841,46 @@ mod tests {
         assert_eq!(disp.spaces[2].desktop_number, Some(2));
         assert!(disp.spaces[2].active);
         assert_eq!(disp.desktop_by_number(2).unwrap().id, sid(20));
+    }
+
+    #[test]
+    fn census_rejects_empty_zero_and_duplicate_displays() {
+        assert_eq!(
+            SpaceCensus::from_raw(vec![]).unwrap_err().kind,
+            SpaceErrorKind::QueryFailed
+        );
+
+        let zero_disp = vec![RawDisplaySpaces {
+            display_id: 0,
+            skylight_display: "Main".into(),
+            current_space: sid(1),
+            spaces: vec![(sid(1), String::new(), SpaceKind::Desktop)],
+        }];
+        assert_eq!(
+            SpaceCensus::from_raw(zero_disp).unwrap_err().kind,
+            SpaceErrorKind::QueryFailed
+        );
+
+        let dup_disp = vec![
+            RawDisplaySpaces {
+                display_id: 1,
+                skylight_display: "Main".into(),
+                current_space: sid(1),
+                spaces: vec![(sid(1), String::new(), SpaceKind::Desktop)],
+            },
+            RawDisplaySpaces {
+                display_id: 1,
+                skylight_display: "UUID-1".into(),
+                current_space: sid(2),
+                spaces: vec![(sid(2), String::new(), SpaceKind::Desktop)],
+            },
+        ];
+        assert_eq!(
+            SpaceCensus::from_raw(dup_disp).unwrap_err().kind,
+            SpaceErrorKind::QueryFailed
+        );
+
+        assert_eq!(resolve_skylight_display_id("Main", 1, 0, &[]), None);
     }
 
     #[test]

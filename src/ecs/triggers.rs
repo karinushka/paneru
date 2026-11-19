@@ -1446,10 +1446,11 @@ pub(super) fn apply_window_positions(
             .iter()
             .find_map(|(_, strip, active, _)| strip.contains(entity).then_some(active));
         let allready_inserted = existing_strip_active.is_some();
-        let mut on_hidden_space =
-            existing_strip_active == Some(false) || sent_hidden.contains(entity);
+        let sent_to_inactive = sent_hidden.contains(entity);
+        let mut on_hidden_space = existing_strip_active == Some(false) || sent_to_inactive;
         if initializing.is_none()
             && !allready_inserted
+            && !sent_to_inactive
             && let Some((target, is_active)) = home_strip(
                 window.id(),
                 &workspaces.iter().collect::<Vec<_>>(),

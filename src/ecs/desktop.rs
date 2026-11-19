@@ -22,11 +22,14 @@ use tracing::{debug, warn};
 
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{
-    ActiveWorkspaceMarker, FocusedMarker, Initializing, PostUpdateSet, PreUpdateSet,
-    SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt as _, Unmanaged, UpdateSet,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, Initializing, PostUpdateSet,
+    PreUpdateSet, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt as _, Unmanaged,
+    UpdateSet,
 };
 use crate::events::Event;
-use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId};
+#[cfg(test)]
+use crate::manager::spaces::DisplaySpaces;
+use crate::manager::spaces::{DesktopBridge, SpaceCensus, SpaceId};
 use crate::manager::{Display, Window};
 use crate::platform::{WinID, WorkspaceId};
 
@@ -58,6 +61,7 @@ impl DesktopCensus {
             .map(|d| d.display_id)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn active_space(&self, display_id: CGDirectDisplayID) -> Option<WorkspaceId> {
         self.0.display(display_id).map(|d| d.current_space.get())
@@ -70,6 +74,7 @@ impl DesktopCensus {
             .and_then(|record| record.desktop_number)
     }
 
+    #[cfg(test)]
     #[must_use]
     pub fn desktop_count(&self, display_id: CGDirectDisplayID) -> usize {
         self.0
@@ -104,7 +109,10 @@ pub enum ConfirmCondition {
         windows: Vec<WinID>,
         expected: HashSet<SpaceId>,
     },
-    PerWindowMemberships(Vec<(WinID, HashSet<SpaceId>)>),
+    AssignClear {
+        memberships: Vec<(WinID, HashSet<SpaceId>)>,
+        clear_sticky: Vec<WinID>,
+    },
     AllSpacesSubset(Vec<(WinID, CGDirectDisplayID)>),
     DisplayOrder {
         display_id: CGDirectDisplayID,
@@ -123,10 +131,13 @@ pub enum PostConfirmAction {
     },
     /// Ensure a `LayoutStrip` exists for a newly created Desktop, and optionally switch to it.
     EnsureStripAndMaybeFocus { space_id: SpaceId, focus: bool },
-    /// Second leg of closing the currently active Desktop: focus neighbor and destroy vacated Space.
+    /// Second leg of closing an active Desktop: destroy vacated Space, migrate its strips
+    /// to `neighbor_id`, and activate/focus `neighbor_id` when on the active display.
     DestroyVacatedSpace {
         space_id: SpaceId,
         neighbor_id: SpaceId,
+        display_id: CGDirectDisplayID,
+        activate_display: bool,
         preferred_window: Option<Entity>,
         migrated: Vec<WinID>,
     },
@@ -184,6 +195,30 @@ impl PendingDesktopOps {
         self.queue.push_back(op);
     }
 
+    /// Pushes a Space-focus op, discarding any superseded `ActivateAndFocusSpace`
+    /// probes targeting another Space on `display_id` so rapid switches never
+    /// head-of-line block for the 2s timeout budget.
+    pub fn push_superseding_focus(
+        &mut self,
+        display_id: CGDirectDisplayID,
+        census: &SpaceCensus,
+        op: PendingDesktopOp,
+    ) {
+        self.queue.retain(|existing| {
+            let is_focus_on_same_display = matches!(
+                (&existing.condition, &existing.on_confirmed),
+                (
+                    ConfirmCondition::SpaceActive(sid),
+                    Some(PostConfirmAction::ActivateAndFocusSpace { .. }),
+                ) if census
+                    .find_space(*sid)
+                    .is_none_or(|rec| rec.display_id == display_id)
+            );
+            !is_focus_on_same_display
+        });
+        self.queue.push_back(op);
+    }
+
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
@@ -216,6 +251,7 @@ impl Plugin for DesktopEventsPlugin {
                     confirm_desktop_ops.run_if(has_pending_ops),
                     sync_sticky_windows,
                     pin::join_pinned_windows_to_new_desktops
+                        .after(confirm_desktop_ops)
                         .run_if(resource_changed::<DesktopCensus>),
                 )
                     .in_set(UpdateSet::Events)
@@ -226,6 +262,7 @@ impl Plugin for DesktopEventsPlugin {
                 pin::apply_window_desktop_rules
                     .in_set(UpdateSet::Spawn)
                     .after(super::triggers::apply_window_defaults)
+                    .after(super::systems::detect_tabbed_windows)
                     .before(super::triggers::apply_window_positions)
                     .run_if(not(resource_exists::<Initializing>)),
             )
@@ -274,6 +311,7 @@ fn sync_desktop_census(
     mut census: ResMut<DesktopCensus>,
 ) {
     let event_triggered = messages.read().any(is_census_event);
+    messages.clear();
     let initial_needed = !displays.is_empty() && census.0.displays.is_empty();
     if !event_triggered && added_displays.is_empty() && !initial_needed {
         return;
@@ -298,7 +336,7 @@ fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Option
                 && migrated.iter().all(|&wid| {
                     bridge
                         .spaces_for_window(wid)
-                        .is_ok_and(|m| !m.is_empty() && !m.contains(space_id))
+                        .is_ok_and(|m| !m.contains(space_id))
                 })
         }
         ConfirmCondition::WindowMemberships { windows, expected } => windows.iter().all(|&wid| {
@@ -307,12 +345,19 @@ fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Option
                 &actual == expected
             })
         }),
-        ConfirmCondition::PerWindowMemberships(pairs) => pairs.iter().all(|(wid, expected)| {
-            bridge.spaces_for_window(*wid).is_ok_and(|now| {
-                let actual: HashSet<SpaceId> = now.into_iter().collect();
-                &actual == expected
-            })
-        }),
+        ConfirmCondition::AssignClear {
+            memberships,
+            clear_sticky,
+        } => {
+            memberships.iter().all(|(wid, expected)| {
+                bridge.spaces_for_window(*wid).is_ok_and(|now| {
+                    let actual: HashSet<SpaceId> = now.into_iter().collect();
+                    &actual == expected
+                })
+            }) && clear_sticky
+                .iter()
+                .all(|&wid| bridge.window_is_sticky(wid) != Some(true))
+        }
         ConfirmCondition::AllSpacesSubset(items) => items.iter().all(|&(wid, disp_id)| {
             let Some(disp) = census.display(disp_id) else {
                 return false;
@@ -347,18 +392,27 @@ fn condition_met(bridge: &DesktopBridge, condition: &ConfirmCondition) -> Option
 
 #[derive(SystemParam)]
 struct ConfirmFocusTargets<'w, 's> {
-    displays: Query<'w, 's, (Entity, &'static Display)>,
+    displays: Query<'w, 's, (Entity, &'static Display, Has<ActiveDisplayMarker>)>,
     strips: Query<
         'w,
         's,
         (
             Entity,
-            &'static LayoutStrip,
+            &'static mut LayoutStrip,
             Has<ActiveWorkspaceMarker>,
             Has<SelectedVirtualMarker>,
         ),
     >,
-    windows: Query<'w, 's, (Entity, &'static Window, Has<FocusedMarker>)>,
+    windows: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Window,
+            Has<FocusedMarker>,
+            Has<StickyWindowMarker>,
+        ),
+    >,
 }
 
 type UnmarkedAddedWindows<'w, 's> = Populated<
@@ -368,6 +422,30 @@ type UnmarkedAddedWindows<'w, 's> = Populated<
     (Added<Window>, Without<StickyWindowMarker>),
 >;
 
+fn ensure_display_active(
+    space_id: SpaceId,
+    confirmed_census: &SpaceCensus,
+    targets: &ConfirmFocusTargets,
+    commands: &mut Commands,
+) {
+    let Some(target_disp_id) = confirmed_census
+        .find_space(space_id)
+        .map(|rec| rec.display_id)
+    else {
+        return;
+    };
+    let Some((disp_entity, _, already_active)) = targets
+        .displays
+        .iter()
+        .find(|(_, d, _)| d.id() == target_disp_id)
+    else {
+        return;
+    };
+    if !already_active && let Ok(mut ec) = commands.get_entity(disp_entity) {
+        ec.try_insert(ActiveDisplayMarker);
+    }
+}
+
 fn activate_space_in_ecs(
     space_id: SpaceId,
     preferred_window: Option<Entity>,
@@ -375,26 +453,28 @@ fn activate_space_in_ecs(
     targets: &ConfirmFocusTargets,
     commands: &mut Commands,
 ) {
+    ensure_display_active(space_id, confirmed_census, targets, commands);
+    let live_preferred = preferred_window.filter(|&e| targets.windows.contains(e));
     let raw_id = space_id.get();
     let target_strip = targets
         .strips
         .iter()
-        .filter(|(_, s, _, _)| s.id() == raw_id)
+        .filter(|(_, s, _, _)| s.id() == raw_id && !s.is_fullscreen())
         .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
         .map(|(entity, strip, active, _)| (entity, strip.first(), active));
     let focus_target = if let Some((strip_entity, first_win, already_active)) = target_strip {
         if !already_active && let Ok(mut entity_cmds) = commands.get_entity(strip_entity) {
             entity_cmds.try_insert(ActiveWorkspaceMarker);
         }
-        preferred_window.or(first_win)
-    } else if let Some((disp_entity, disp)) = confirmed_census
+        live_preferred.or(first_win)
+    } else if let Some((disp_entity, disp, _)) = confirmed_census
         .find_space(space_id)
         .filter(|rec| rec.kind.is_desktop())
         .and_then(|rec| {
             targets
                 .displays
                 .iter()
-                .find(|(_, d)| d.id() == rec.display_id)
+                .find(|(_, d, _)| d.id() == rec.display_id)
         })
     {
         commands.spawn_layout_strip(
@@ -403,15 +483,15 @@ fn activate_space_in_ecs(
             disp_entity,
             true,
         );
-        preferred_window
+        live_preferred
     } else {
         commands.trigger(SendMessageTrigger(Event::SpaceCurrentChanged {
             space_id: raw_id,
         }));
-        preferred_window
+        live_preferred
     };
     if let Some(win_entity) = focus_target {
-        if let Ok((_, _, true)) = targets.windows.get(win_entity)
+        if let Ok((_, _, true, _)) = targets.windows.get(win_entity)
             && let Ok(mut ec) = commands.get_entity(win_entity)
         {
             ec.try_remove::<FocusedMarker>();
@@ -420,31 +500,92 @@ fn activate_space_in_ecs(
     }
 }
 
+fn migrate_confirmed_strips_to_neighbor(
+    source_space: SpaceId,
+    neighbor_space: SpaceId,
+    display_id: CGDirectDisplayID,
+    targets: &mut ConfirmFocusTargets,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let raw_src = source_space.get();
+    let raw_dst = neighbor_space.get();
+    let mut source_entities: Vec<(u32, Entity)> = targets
+        .strips
+        .iter()
+        .filter(|(_, s, _, _)| s.id() == raw_src)
+        .map(|(entity, s, _, _)| (s.virtual_index, entity))
+        .collect();
+    source_entities.sort_by_key(|(v, _)| *v);
+    if source_entities.is_empty() {
+        return None;
+    }
+
+    let mut combined = LayoutStrip::new(raw_dst, 0);
+    for (_, src_entity) in source_entities {
+        if let Ok((_, mut src_strip, _, _)) = targets.strips.get_mut(src_entity) {
+            combined.append_strip(&mut src_strip);
+        }
+    }
+    let migrated_first = combined.first();
+    if combined.len() == 0 {
+        return None;
+    }
+
+    let existing_dest = targets
+        .strips
+        .iter()
+        .filter(|(_, s, _, _)| s.id() == raw_dst && !s.is_fullscreen())
+        .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
+        .map(|(entity, _, _, _)| entity);
+    if let Some(dest_entity) = existing_dest {
+        if let Ok((_, mut dest_strip, _, _)) = targets.strips.get_mut(dest_entity) {
+            dest_strip.append_strip(&mut combined);
+        }
+    } else if let Some((disp_entity, disp, _)) = targets
+        .displays
+        .iter()
+        .find(|(_, d, _)| d.id() == display_id)
+    {
+        commands.spawn_layout_strip(combined, disp.bounds().min, disp_entity, false);
+    }
+    migrated_first
+}
+
+fn ensure_strip_exists(
+    space_id: SpaceId,
+    display_id: CGDirectDisplayID,
+    targets: &ConfirmFocusTargets,
+    commands: &mut Commands,
+) {
+    let raw_id = space_id.get();
+    let exists = targets.strips.iter().any(|(_, s, _, _)| s.id() == raw_id);
+    if !exists
+        && let Some((disp_entity, disp, _)) = targets
+            .displays
+            .iter()
+            .find(|(_, d, _)| d.id() == display_id)
+    {
+        commands.spawn_layout_strip(
+            LayoutStrip::new(raw_id, 0),
+            disp.bounds().min,
+            disp_entity,
+            false,
+        );
+    }
+}
+
 fn ensure_strip_and_maybe_focus(
     space_id: SpaceId,
     focus: bool,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
+    census: &mut ResMut<DesktopCensus>,
     targets: &ConfirmFocusTargets,
     commands: &mut Commands,
 ) -> Option<PendingDesktopOp> {
     let rec = confirmed_census.find_space(space_id)?;
     if !focus {
-        let raw_id = space_id.get();
-        let exists = targets.strips.iter().any(|(_, s, _, _)| s.id() == raw_id);
-        if !exists
-            && let Some((disp_entity, disp)) = targets
-                .displays
-                .iter()
-                .find(|(_, d)| d.id() == rec.display_id)
-        {
-            commands.spawn_layout_strip(
-                LayoutStrip::new(raw_id, 0),
-                disp.bounds().min,
-                disp_entity,
-                false,
-            );
-        }
+        ensure_strip_exists(space_id, rec.display_id, targets, commands);
         return None;
     }
     let disp = confirmed_census.display(rec.display_id)?;
@@ -456,6 +597,10 @@ fn ensure_strip_and_maybe_focus(
         .collect();
     if let Err(err) = bridge.activate_space(&disp.skylight_display, space_id, &hide) {
         warn!("failed to focus newly created desktop {space_id}: {err}");
+        if err.request_may_have_applied {
+            refresh_census_from_bridge(bridge, census);
+        }
+        ensure_strip_exists(space_id, rec.display_id, targets, commands);
         return None;
     }
     Some(PendingDesktopOp::new(
@@ -468,11 +613,13 @@ fn ensure_strip_and_maybe_focus(
     ))
 }
 
+#[allow(clippy::too_many_lines)]
 fn run_post_confirm(
     action: PostConfirmAction,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
-    targets: &ConfirmFocusTargets,
+    census: &mut ResMut<DesktopCensus>,
+    targets: &mut ConfirmFocusTargets,
     commands: &mut Commands,
 ) -> Option<PendingDesktopOp> {
     match action {
@@ -495,6 +642,7 @@ fn run_post_confirm(
                 focus,
                 confirmed_census,
                 bridge,
+                census,
                 targets,
                 commands,
             )
@@ -502,19 +650,54 @@ fn run_post_confirm(
         PostConfirmAction::DestroyVacatedSpace {
             space_id,
             neighbor_id,
+            display_id,
+            activate_display,
             preferred_window,
             migrated,
         } => {
-            activate_space_in_ecs(
+            if let Err(err) = bridge.destroy_space(space_id) {
+                warn!("failed to destroy vacated space {space_id}: {err}");
+                if err.request_may_have_applied {
+                    refresh_census_from_bridge(bridge, census);
+                }
+                if activate_display {
+                    activate_space_in_ecs(
+                        neighbor_id,
+                        preferred_window,
+                        confirmed_census,
+                        targets,
+                        commands,
+                    );
+                }
+                return None;
+            }
+            let migrated_first = migrate_confirmed_strips_to_neighbor(
+                space_id,
                 neighbor_id,
-                preferred_window,
-                confirmed_census,
+                display_id,
                 targets,
                 commands,
             );
-            if let Err(err) = bridge.destroy_space(space_id) {
-                warn!("failed to destroy vacated space {space_id}: {err}");
-                return None;
+            if activate_display {
+                activate_space_in_ecs(
+                    neighbor_id,
+                    preferred_window.or(migrated_first),
+                    confirmed_census,
+                    targets,
+                    commands,
+                );
+            } else {
+                let raw_neighbor = neighbor_id.get();
+                if let Some(strip_entity) = targets
+                    .strips
+                    .iter()
+                    .filter(|(_, s, _, _)| s.id() == raw_neighbor && !s.is_fullscreen())
+                    .min_by_key(|(_, s, _, selected)| (!*selected, s.virtual_index))
+                    .map(|(entity, _, _, _)| entity)
+                    && let Ok(mut ec) = commands.get_entity(strip_entity)
+                {
+                    ec.try_insert(SelectedVirtualMarker);
+                }
             }
             Some(PendingDesktopOp::new(
                 format!("destroy vacated desktop {space_id}"),
@@ -532,8 +715,9 @@ fn run_post_confirm(
             None
         }
         PostConfirmAction::ReconcileStickyMarkers(wids) => {
-            for (entity, win, _) in &targets.windows {
-                if wids.contains(&win.id())
+            for (entity, win, _, is_sticky_marked) in &targets.windows {
+                if is_sticky_marked
+                    && wids.contains(&win.id())
                     && bridge.window_is_sticky(win.id()) == Some(false)
                     && let Ok(mut ec) = commands.get_entity(entity)
                 {
@@ -552,6 +736,9 @@ fn run_post_confirm(
         } => {
             if let Err(err) = bridge.move_space_to_index(space_id, &skylight_display, index) {
                 warn!("second step of desktop swap failed for {space_id}: {err}");
+                if err.request_may_have_applied {
+                    refresh_census_from_bridge(bridge, census);
+                }
                 return None;
             }
             Some(PendingDesktopOp::new(
@@ -573,7 +760,7 @@ fn confirm_desktop_ops(
     mut pending: ResMut<PendingDesktopOps>,
     mut census: ResMut<DesktopCensus>,
     bridge: Option<NonSendMut<DesktopBridge>>,
-    targets: ConfirmFocusTargets,
+    mut targets: ConfirmFocusTargets,
     mut commands: Commands,
 ) {
     let Some(mut bridge) = bridge else {
@@ -581,20 +768,30 @@ fn confirm_desktop_ops(
         return;
     };
     let woke_by_event = messages.read().any(is_confirmation_wake_event);
+    messages.clear();
     let delta = time.delta();
 
-    for step in 0..4 {
+    // Advance budgets for already-waiting items (never for brand-new `fresh`
+    // items, whose frame delta includes any pre-command idle sleep).
+    for op in &mut pending.queue {
+        if !op.fresh {
+            op.remaining.tick(delta);
+        }
+    }
+
+    for step in 0..8 {
         let Some(front) = pending.queue.front_mut() else {
             return;
         };
         let initial_probe = std::mem::replace(&mut front.fresh, false);
-        let step_delta = if step == 0 { delta } else { Duration::ZERO };
-        front.remaining.tick(step_delta);
-        let poll_due = step == 0 && front.poll.tick(step_delta).just_finished();
-        let should_probe = initial_probe
-            || poll_due
-            || front.remaining.is_finished()
-            || (step == 0 && woke_by_event);
+        let poll_delta = if initial_probe || step > 0 {
+            Duration::ZERO
+        } else {
+            delta
+        };
+        let poll_due = !initial_probe && step == 0 && front.poll.tick(poll_delta).just_finished();
+        let should_probe =
+            initial_probe || poll_due || front.remaining.is_finished() || woke_by_event || step > 0;
         if !should_probe {
             return;
         }
@@ -610,14 +807,14 @@ fn confirm_desktop_ops(
                     action,
                     &confirmed_census,
                     &mut bridge,
-                    &targets,
+                    &mut census,
+                    &mut targets,
                     &mut commands,
                 )
             {
                 pending.queue.push_front(follow_up);
-                continue;
             }
-            return;
+            continue;
         }
 
         if front.remaining.is_finished() {
@@ -627,6 +824,7 @@ fn confirm_desktop_ops(
                 expired.description, DESKTOP_CONFIRM_BUDGET
             );
             refresh_census_from_bridge(&bridge, &mut census);
+            continue;
         }
         return;
     }

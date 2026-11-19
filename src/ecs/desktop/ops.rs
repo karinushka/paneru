@@ -296,26 +296,21 @@ fn dispatch_focus_space(
         &world.windows,
         world.focus_history.as_deref_mut(),
     );
-    if target.display_id != active_disp_id
-        && let Some((disp_entity, _, _)) = world
-            .displays
-            .iter()
-            .find(|(_, d, _)| d.id() == target.display_id)
-        && let Ok(mut ec) = world.commands.get_entity(disp_entity)
-    {
-        ec.try_insert(ActiveDisplayMarker);
-    }
     let preferred = preferred_window.or_else(|| {
         preferred_focus_on_space(target.id, &world.strips, world.focus_history.as_deref())
     });
-    world.pending.push(PendingDesktopOp::new(
-        format!("activate space {}", target.id),
-        ConfirmCondition::SpaceActive(target.id),
-        Some(PostConfirmAction::ActivateAndFocusSpace {
-            space_id: target.id,
-            preferred_window: preferred,
-        }),
-    ));
+    world.pending.push_superseding_focus(
+        target.display_id,
+        census,
+        PendingDesktopOp::new(
+            format!("activate space {}", target.id),
+            ConfirmCondition::SpaceActive(target.id),
+            Some(PostConfirmAction::ActivateAndFocusSpace {
+                space_id: target.id,
+                preferred_window: preferred,
+            }),
+        ),
+    );
     true
 }
 
@@ -352,7 +347,7 @@ fn handle_focus(target: &DesktopTarget, bridge: &mut DesktopBridge, world: &mut 
     );
 }
 
-fn relocate_tiled_group_to_space(
+pub(super) fn relocate_tiled_group_to_space(
     focused_entity: Entity,
     dest_space: SpaceId,
     dest_display_id: CGDirectDisplayID,
@@ -387,7 +382,7 @@ fn relocate_tiled_group_to_space(
     let existing_dest = world
         .strips
         .iter()
-        .filter(|(_, s, _, _, _, _)| s.id() == raw_dest)
+        .filter(|(_, s, _, _, _, _)| s.id() == raw_dest && !s.is_fullscreen())
         .min_by_key(|(_, s, _, _, _, selected)| (!*selected, s.virtual_index))
         .map(|(entity, _, _, _, _, _)| entity);
 
@@ -514,7 +509,7 @@ fn handle_move_window(
     );
 }
 
-fn focus_heir_on_active_strip(
+pub(super) fn focus_heir_on_active_strip(
     focused_entity: Entity,
     heir: Option<Entity>,
     world: &mut DesktopOpWorld,
@@ -558,7 +553,8 @@ fn finish_move_window(
             focus_heir_on_active_strip(focused_entity, heir, world);
         }
         MoveFocus::Follow => {
-            if !dispatch_focus_space(
+            let already_active_dest = dest.active && dest.display_id == active_disp_id;
+            let switched = dispatch_focus_space(
                 dest,
                 census,
                 active_disp_id,
@@ -566,7 +562,8 @@ fn finish_move_window(
                 heir,
                 bridge,
                 world,
-            ) {
+            );
+            if !switched || already_active_dest {
                 world.pending.push(PendingDesktopOp::new(
                     format!("move windows {moving_wids:?} to {}", dest.id),
                     ConfirmCondition::WindowMemberships {
@@ -575,7 +572,9 @@ fn finish_move_window(
                     },
                     None,
                 ));
-                focus_heir_on_active_strip(focused_entity, heir, world);
+                if !switched {
+                    focus_heir_on_active_strip(focused_entity, heir, world);
+                }
             }
         }
     }

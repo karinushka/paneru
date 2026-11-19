@@ -266,13 +266,12 @@ const MENU_BAR_SPACING: CGFloat = 5.0;
 pub struct MenuDesktopSnapshot {
     pub desktop_count: u32,
     pub active_desktop: Option<u32>,
-    pub active_is_fullscreen: bool,
 }
 
 impl MenuDesktopSnapshot {
     #[must_use]
     pub fn can_close_active(&self) -> bool {
-        self.desktop_count >= 2 && !self.active_is_fullscreen
+        self.desktop_count >= 2 && self.active_desktop.is_some()
     }
 }
 
@@ -282,15 +281,19 @@ pub(crate) fn menu_desktop_snapshot(
     display_id: u32,
     active_space_id: u64,
 ) -> MenuDesktopSnapshot {
-    let Some(census) = census else {
+    let Some(disp) = census.and_then(|c| c.0.display(display_id)) else {
         return MenuDesktopSnapshot::default();
     };
-    let desktop_count = u32::try_from(census.desktop_count(display_id)).unwrap_or(u32::MAX);
-    let active_space = census.active_space(display_id).unwrap_or(active_space_id);
+    let desktop_count = u32::try_from(disp.desktop_count()).unwrap_or(u32::MAX);
+    let active_id = disp.current_space.get();
+    let active_desktop = disp
+        .spaces
+        .iter()
+        .find(|s| s.id.get() == active_id || s.id.get() == active_space_id)
+        .and_then(|s| s.desktop_number);
     MenuDesktopSnapshot {
         desktop_count,
-        active_desktop: census.desktop_number(active_space),
-        active_is_fullscreen: census.is_fullscreen(active_space),
+        active_desktop,
     }
 }
 
@@ -494,19 +497,21 @@ impl MenuBarManager {
         status.setEnabled(false);
         self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
 
-        let desktop_header = self.add_item("Desktops", None);
-        desktop_header.setEnabled(false);
-        for number in 1..=desktop_count {
-            let item = self.add_item(&format!("Desktop {number}"), Some(sel!(selectDesktop:)));
-            if let Ok(tag) = isize::try_from(number) {
-                item.setTag(tag);
+        if desktop_count > 0 {
+            let desktop_header = self.add_item("Desktops", None);
+            desktop_header.setEnabled(false);
+            for number in 1..=desktop_count {
+                let item = self.add_item(&format!("Desktop {number}"), Some(sel!(selectDesktop:)));
+                if let Ok(tag) = isize::try_from(number) {
+                    item.setTag(tag);
+                }
+                self.desktop_items.push((number, item));
             }
-            self.desktop_items.push((number, item));
+            self.add_item("New Desktop", Some(sel!(createDesktop:)));
+            self.destroy_desktop_item =
+                Some(self.add_item("Close Desktop", Some(sel!(destroyDesktop:))));
+            self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
         }
-        self.add_item("New Desktop", Some(sel!(createDesktop:)));
-        self.destroy_desktop_item =
-            Some(self.add_item("Close Desktop", Some(sel!(destroyDesktop:))));
-        self.menu.addItem(&NSMenuItem::separatorItem(self.mtm));
 
         let width_header = self.add_item("Window width", None);
         width_header.setEnabled(false);
@@ -1531,10 +1536,30 @@ mod tests {
         let snap_fs = menu_desktop_snapshot(Some(&census), 1, 20);
         assert_eq!(snap_fs.desktop_count, 2);
         assert_eq!(snap_fs.active_desktop, None);
-        assert!(snap_fs.active_is_fullscreen);
         assert!(
             !snap_fs.can_close_active(),
             "fullscreen space cannot be closed as a Desktop"
+        );
+
+        let census_other = DesktopCensus(
+            SpaceCensus::from_raw(vec![RawDisplaySpaces {
+                display_id: 1,
+                skylight_display: "Main".to_string(),
+                current_space: sid(25),
+                spaces: vec![
+                    (sid(10), "u10".to_string(), SpaceKind::Desktop),
+                    (sid(25), "u25".to_string(), SpaceKind::Other(2)),
+                    (sid(30), "u30".to_string(), SpaceKind::Desktop),
+                ],
+            }])
+            .unwrap(),
+        );
+        let snap_other = menu_desktop_snapshot(Some(&census_other), 1, 25);
+        assert_eq!(snap_other.desktop_count, 2);
+        assert_eq!(snap_other.active_desktop, None);
+        assert!(
+            !snap_other.can_close_active(),
+            "non-Desktop SpaceKind::Other cannot be closed as a Desktop"
         );
 
         let census_d2 = DesktopCensus(

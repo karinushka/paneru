@@ -329,16 +329,26 @@ fn reconcile_secondary_displays(
                 ec.try_insert(SelectedVirtualMarker);
             }
         } else if window_manager.is_fullscreen_space(display.id()) {
-            let prev_strip = workspaces
-                .iter()
-                .find(|(_, _, _, selected, child)| {
-                    *selected && child.is_some_and(|c| c.parent() == display_entity)
-                })
-                .map(|(_, entity, _, _, _)| entity);
-            if let Some(old_entity) = prev_strip
+            let candidate = window_manager
+                .windows_in_workspace(sec_space_id)
+                .ok()
+                .and_then(|space_wids| {
+                    workspaces
+                        .iter()
+                        .filter(|(strip, _, _, _, child)| {
+                            !strip.is_fullscreen()
+                                && child.is_some_and(|c| c.parent() == display_entity)
+                        })
+                        .find_map(|(strip, entity, _, _, _)| {
+                            let fs_win = space_wids.iter().find_map(|&wid| {
+                                let (_, win_entity) = windows.find_managed(wid)?;
+                                strip.contains(win_entity).then_some(win_entity)
+                            })?;
+                            Some((entity, fs_win))
+                        })
+                });
+            if let Some((old_entity, fs_win)) = candidate
                 && let Ok((mut old_strip, _, _, _, _)) = workspaces.get_mut(old_entity)
-                && let Some(fs_win) =
-                    fullscreen_window_in_strip(sec_space_id, &old_strip, windows, window_manager)
                 && let Ok(original_index) = old_strip.index_of(fs_win)
             {
                 let fs_marker = NativeFullscreenMarker {
@@ -671,7 +681,7 @@ fn is_batch_workspace_move(
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
-fn workspace_destroyed_handler(
+pub(crate) fn workspace_destroyed_handler(
     mut messages: MessageReader<Event>,
     mut workspaces: DestroyableStrips,
     displays: Query<&Display>,
@@ -773,12 +783,14 @@ fn workspace_created_handler(
     workspaces: Query<&LayoutStrip>,
     mut commands: Commands,
 ) {
+    let mut spawned = HashSet::new();
     for event in messages.read() {
         let Event::SpaceCreated { space_id } = &event else {
             continue;
         };
 
-        if workspaces.into_iter().any(|strip| strip.id() == *space_id) {
+        if !spawned.insert(*space_id) || workspaces.into_iter().any(|strip| strip.id() == *space_id)
+        {
             debug!("Workspace {space_id} already exists");
             continue;
         }
@@ -802,9 +814,7 @@ fn workspace_created_handler(
         debug!("Workspace create {space_id} on display {disp_id}");
         let strip = LayoutStrip::new(*space_id, 0);
         let origin = target_disp.bounds().min;
-        commands
-            .spawn_layout_strip(strip, origin, display_entity, false)
-            .insert(SelectedVirtualMarker);
+        commands.spawn_layout_strip(strip, origin, display_entity, false);
     }
 }
 

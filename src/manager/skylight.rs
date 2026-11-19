@@ -1,9 +1,7 @@
 use std::{ffi::c_void, os::raw::c_float, ptr::NonNull};
 
 use accessibility_sys::AXUIElementRef;
-use objc2_core_foundation::{
-    CFArray, CFDictionary, CFMutableData, CFNumber, CFString, CFType, CFUUID, CGPoint,
-};
+use objc2_core_foundation::{CFArray, CFMutableData, CFString, CFType, CFUUID, CGPoint};
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
 use crate::platform::{CFStringRef, ConnID, OSStatus, Pid, ProcessSerialNumber, WinID};
@@ -108,7 +106,7 @@ unsafe extern "C" {
         cid: ConnID,
         selector: i32,
         window_list: *const CFArray,
-    ) -> *mut CFArray<CFNumber>;
+    ) -> *mut CFArray<CFType>;
 
     /// Creates a `CFUUIDRef` from a `CGDirectDisplayID`.
     ///
@@ -245,9 +243,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyManagedDisplaySpaces(int cid);
-    pub fn SLSCopyManagedDisplaySpaces(
-        cid: ConnID,
-    ) -> *mut CFArray<CFDictionary<CFString, CFString>>;
+    pub fn SLSCopyManagedDisplaySpaces(cid: ConnID) -> *mut CFArray<CFType>;
 
     /// Copies a list of associated windows for a given window ID.
     /// This typically refers to child windows or windows grouped with the primary window.
@@ -259,11 +255,11 @@ unsafe extern "C" {
     ///
     /// # Returns
     ///
-    /// A `NonNull<CFArray>` containing associated windows, or `NULL` if not found or an error occurs.
+    /// A raw pointer to a `CFArray` containing associated windows, or `NULL` if not found or an error occurs.
     ///
     /// # Original signature
     /// extern `CFArrayRef` SLSCopyAssociatedWindows(int cid, `uint32_t` wid);
-    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> NonNull<CFArray<CFNumber>>;
+    pub fn SLSCopyAssociatedWindows(cid: ConnID, window_id: WinID) -> *mut CFArray<CFType>;
 
     /// Queries windows based on a provided `CFArray` of window IDs.
     ///
@@ -275,15 +271,12 @@ unsafe extern "C" {
     ///
     /// # Returns
     ///
-    /// A `NonNull<CFType>` representing the window query result.
+    /// A raw pointer to a `CFType` representing the window query result, or `NULL` on failure.
     ///
     /// # Original signature
     /// extern `CFTypeRef` SLSWindowQueryWindows(int cid, `CFArrayRef` windows, int count);
-    pub fn SLSWindowQueryWindows(
-        cid: ConnID,
-        windows: *const CFArray,
-        count: isize,
-    ) -> NonNull<CFType>;
+    pub fn SLSWindowQueryWindows(cid: ConnID, windows: *const CFArray, count: isize)
+    -> *mut CFType;
 
     /// Copies windows from a window query result.
     ///
@@ -293,11 +286,11 @@ unsafe extern "C" {
     ///
     /// # Returns
     ///
-    /// A `NonNull<CFType>` representing an iterator for the windows.
+    /// A raw pointer to a `CFType` representing an iterator for the windows, or `NULL` on failure.
     ///
     /// # Original signature
     /// extern `CFTypeRef` SLSWindowQueryResultCopyWindows(CFTypeRef `window_query`);
-    pub fn SLSWindowQueryResultCopyWindows(type_ref: NonNull<CFType>) -> NonNull<CFType>;
+    pub fn SLSWindowQueryResultCopyWindows(type_ref: NonNull<CFType>) -> *mut CFType;
 
     /// Advances the window iterator to the next window.
     ///

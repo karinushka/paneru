@@ -1047,3 +1047,113 @@ fn failed_and_roundtrip_desktop_ops_keep_focus_reshuffle_working() {
         })
         .run(commands);
 }
+
+#[test]
+fn fresh_pending_op_survives_large_idle_frame_delta() {
+    let harness = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+
+    let commands = vec![tick(), tick(), tick()];
+
+    harness
+        .on_iteration(0, |world, _| {
+            world
+                .resource_mut::<PendingDesktopOps>()
+                .push(PendingDesktopOp::new(
+                    "fresh op after idle sleep",
+                    ConfirmCondition::SpacePresent(SpaceId::new(999).unwrap()),
+                    None,
+                ));
+            // Simulate a 3-second idle sleep before the tick that probes the fresh op.
+            world
+                .resource_mut::<bevy::time::Time<bevy::time::Virtual>>()
+                .advance_by(DESKTOP_CONFIRM_BUDGET + Duration::from_secs(1));
+        })
+        .on_iteration(1, |world, _| {
+            assert!(
+                !world.resource::<PendingDesktopOps>().is_empty(),
+                "fresh op must not expire from pre-command idle sleep delta on its initial probe"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn rapid_desktop_focus_supersedes_prior_pending_focus_without_blocking() {
+    let desktop_2 = 6u64;
+    let desktop_3 = 7u64;
+    let harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {})
+        .with_workspace_window(30, desktop_3, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness.mock_state.add_space_on_display(1, desktop_3, false);
+    harness.mock_state.set_defer_desktop_ops(true);
+
+    let commands = vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 3,
+            display: None,
+        })),
+        tick(),
+    ];
+
+    harness
+        .on_iteration(2, |_, state| {
+            // Both ops flush in sequence so OS settles directly on desktop_3 (never stopping on desktop_2).
+            state.flush_deferred_desktop_ops();
+        })
+        .on_iteration(3, move |world, _| {
+            assert!(
+                world.resource::<PendingDesktopOps>().is_empty(),
+                "superseded focus to desktop 2 must not block confirmation of desktop 3"
+            );
+            let active_ws: Vec<u64> = world
+                .query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>()
+                .iter(world)
+                .filter_map(|(s, active)| active.then_some(s.id()))
+                .collect();
+            assert_eq!(active_ws, vec![desktop_3]);
+        })
+        .run(commands);
+}
+
+#[test]
+fn assign_clear_on_single_desktop_display_reconciles_sticky_marker() {
+    let harness = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+
+    let commands = vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Assign {
+            target: DesktopAssignTarget::All,
+            pid: None,
+        }),
+        tick(),
+        desktop_cmd(DesktopOperation::Assign {
+            target: DesktopAssignTarget::None,
+            pid: None,
+        }),
+        tick(),
+    ];
+
+    harness
+        .on_iteration(2, |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert!(
+                world.get::<StickyWindowMarker>(e10).is_some(),
+                "assign all must mark window sticky"
+            );
+        })
+        .on_iteration(4, |world, _| {
+            let e10 = find_window_entity(10, world);
+            assert!(
+                world.get::<StickyWindowMarker>(e10).is_none(),
+                "assign none on a 1-Desktop display must clear StickyWindowMarker"
+            );
+        })
+        .run(commands);
+}

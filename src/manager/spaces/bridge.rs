@@ -15,9 +15,9 @@ use objc2_core_foundation::{
     CFArray, CFBoolean, CFDictionary, CFNumber, CFNumberType, CFRetained, CFString, CFType,
 };
 use objc2_core_graphics::{
-    CGDirectDisplayID, CGGetActiveDisplayList, CGMainDisplayID, CGSessionCopyCurrentDictionary,
-    CGWindowListCopyWindowInfo, CGWindowListOption, kCGNullWindowID, kCGWindowLayer,
-    kCGWindowNumber, kCGWindowOwnerPID,
+    CGDirectDisplayID, CGError, CGGetActiveDisplayList, CGMainDisplayID,
+    CGSessionCopyCurrentDictionary, CGWindowListCopyWindowInfo, CGWindowListOption,
+    kCGNullWindowID, kCGWindowLayer, kCGWindowNumber, kCGWindowOwnerPID,
 };
 use objc2_foundation::{NSArray, NSDictionary, NSNumber, NSString};
 
@@ -187,19 +187,28 @@ fn as_ns_array(cf: &CFArray) -> &NSArray {
     unsafe { &*(&raw const *cf).cast::<NSArray>() }
 }
 
-fn active_display_table(cid: ConnID) -> Vec<(CGDirectDisplayID, String, WorkspaceId)> {
+/// Safely queries active CoreGraphics display IDs without exposing
+/// uninitialized memory if `CGGetActiveDisplayList` fails.
+pub(crate) fn active_display_ids() -> Vec<CGDirectDisplayID> {
     let mut count = 0u32;
-    unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &raw mut count) };
-    if count == 0 {
+    let err = unsafe { CGGetActiveDisplayList(0, std::ptr::null_mut(), &raw mut count) };
+    if err != CGError::Success || count == 0 {
         return Vec::new();
     }
     let len = usize::try_from(count).unwrap_or(0);
-    let mut ids = Vec::with_capacity(len);
-    unsafe {
-        CGGetActiveDisplayList(count, ids.as_mut_ptr(), &raw mut count);
-        ids.set_len(usize::try_from(count).unwrap_or(0));
+    let mut ids = vec![0u32; len];
+    let mut actual = 0u32;
+    let err = unsafe { CGGetActiveDisplayList(count, ids.as_mut_ptr(), &raw mut actual) };
+    if err != CGError::Success {
+        return Vec::new();
     }
-    ids.into_iter()
+    ids.truncate(usize::try_from(actual).unwrap_or(0).min(len));
+    ids
+}
+
+fn active_display_table(cid: ConnID) -> Vec<(CGDirectDisplayID, String, WorkspaceId)> {
+    active_display_ids()
+        .into_iter()
         .map(|id| {
             let (uuid_str, current_space) = match Display::uuid_from_id(id) {
                 Ok(uuid) => {
@@ -234,16 +243,21 @@ fn parse_fullscreen_kind(space: &CFDictionary<CFString, CFType>) -> SpaceKind {
         if tiles.count() != 1 {
             return false;
         }
-        let tiles = unsafe { tiles.cast_unchecked::<CFDictionary<CFString, CFType>>() };
-        tiles.iter().next().is_some_and(|tile| {
-            let fs = tile
-                .get(&CFString::from_static_str("fs_wid"))
-                .and_then(|v| cf_positive_win_id(&v));
-            let wid = tile
-                .get(&CFString::from_static_str("TileWindowID"))
-                .and_then(|v| cf_positive_win_id(&v));
-            fs == Some(owner) && wid == Some(owner)
-        })
+        let tiles = unsafe { tiles.cast_unchecked::<CFType>() };
+        tiles
+            .iter()
+            .next()
+            .and_then(|item| item.downcast::<CFDictionary>().ok())
+            .is_some_and(|tile| {
+                let tile = unsafe { tile.cast_unchecked::<CFString, CFType>() };
+                let fs = tile
+                    .get(&CFString::from_static_str("fs_wid"))
+                    .and_then(|v| cf_positive_win_id(&v));
+                let wid = tile
+                    .get(&CFString::from_static_str("TileWindowID"))
+                    .and_then(|v| cf_positive_win_id(&v));
+                fs == Some(owner) && wid == Some(owner)
+            })
     });
     SpaceKind::Fullscreen {
         owner_wid,
@@ -268,35 +282,59 @@ pub fn read_managed_display_spaces(cid: ConnID) -> Result<SpaceCensus, SpaceErro
         .collect();
     let main_display = CGMainDisplayID();
 
-    let displays_cf = unsafe { raw_list.cast_unchecked::<CFDictionary<CFString, CFType>>() };
-    let raw_displays = displays_cf
+    let raw_displays = raw_list
         .iter()
-        .filter_map(|display_dict| {
+        .map(|entry| {
+            let display_dict = entry.downcast::<CFDictionary>().map_err(|_| {
+                SpaceError::new(SpaceErrorKind::QueryFailed, "non-dict display entry")
+            })?;
+            let display_dict = unsafe { display_dict.cast_unchecked::<CFString, CFType>() };
             let identifier = display_dict
                 .get(&CFString::from_static_str("Display Identifier"))
-                .and_then(|v| v.downcast_ref::<CFString>().map(ToString::to_string))?;
+                .and_then(|v| v.downcast_ref::<CFString>().map(ToString::to_string))
+                .ok_or_else(|| {
+                    SpaceError::new(SpaceErrorKind::QueryFailed, "missing Display Identifier")
+                })?;
             let current_dict = display_dict
                 .get(&CFString::from_static_str("Current Space"))
-                .and_then(|v| v.downcast::<CFDictionary>().ok())?;
+                .and_then(|v| v.downcast::<CFDictionary>().ok())
+                .ok_or_else(|| {
+                    SpaceError::new(SpaceErrorKind::QueryFailed, "missing Current Space")
+                })?;
             let current_dict = unsafe { current_dict.cast_unchecked::<CFString, CFType>() };
             let current_space = current_dict
                 .get(&CFString::from_static_str("id64"))
-                .and_then(|v| cf_space_id(&v))?;
+                .and_then(|v| cf_space_id(&v))
+                .ok_or_else(|| {
+                    SpaceError::new(SpaceErrorKind::QueryFailed, "missing Current Space id64")
+                })?;
             let display_id = resolve_skylight_display_id(
                 &identifier,
                 current_space.get(),
                 main_display,
                 &active_refs,
-            )?;
+            )
+            .ok_or_else(|| {
+                SpaceError::new(
+                    SpaceErrorKind::QueryFailed,
+                    format!("unresolved display identifier '{identifier}'"),
+                )
+            })?;
 
             let spaces_arr = display_dict
                 .get(&CFString::from_static_str("Spaces"))
-                .and_then(|v| v.downcast::<CFArray>().ok())?;
-            let spaces_arr =
-                unsafe { spaces_arr.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+                .and_then(|v| v.downcast::<CFArray>().ok())
+                .ok_or_else(|| {
+                    SpaceError::new(SpaceErrorKind::QueryFailed, "missing Spaces array")
+                })?;
+            let spaces_arr = unsafe { spaces_arr.cast_unchecked::<CFType>() };
             let spaces = spaces_arr
                 .iter()
-                .map(|space| {
+                .map(|item| {
+                    let space = item.downcast::<CFDictionary>().map_err(|_| {
+                        SpaceError::new(SpaceErrorKind::QueryFailed, "non-dict space entry")
+                    })?;
+                    let space = unsafe { space.cast_unchecked::<CFString, CFType>() };
                     let id = space
                         .get(&CFString::from_static_str("id64"))
                         .and_then(|v| cf_space_id(&v))
@@ -316,18 +354,18 @@ pub fn read_managed_display_spaces(cid: ConnID) -> Result<SpaceCensus, SpaceErro
                         .unwrap_or_default();
                     let kind = match raw_type {
                         0 => SpaceKind::Desktop,
-                        4 => parse_fullscreen_kind(&space),
+                        4 => parse_fullscreen_kind(space),
                         other => SpaceKind::Other(other),
                     };
                     Ok((id, uuid, kind))
                 })
-                .collect::<Result<Vec<_>, SpaceError>>();
-            Some(spaces.map(|spaces| RawDisplaySpaces {
+                .collect::<Result<Vec<_>, SpaceError>>()?;
+            Ok(RawDisplaySpaces {
                 display_id,
                 skylight_display: identifier,
                 current_space,
                 spaces,
-            }))
+            })
         })
         .collect::<Result<Vec<_>, SpaceError>>()?;
 
@@ -336,10 +374,12 @@ pub fn read_managed_display_spaces(cid: ConnID) -> Result<SpaceCensus, SpaceErro
 
 fn all_window_meta() -> Option<HashMap<WinID, WindowServerMeta>> {
     let list = CGWindowListCopyWindowInfo(CGWindowListOption::OptionAll, kCGNullWindowID)?;
-    let array = unsafe { list.cast_unchecked::<CFDictionary<CFString, CFType>>() };
+    let array = unsafe { list.cast_unchecked::<CFType>() };
     let map = array
         .iter()
-        .filter_map(|dict| {
+        .filter_map(|item| {
+            let dict = item.downcast::<CFDictionary>().ok()?;
+            let dict = unsafe { dict.cast_unchecked::<CFString, CFType>() };
             let wid = dict
                 .get(unsafe { kCGWindowNumber })
                 .and_then(|v| cf_int_i64(&v))
@@ -435,16 +475,7 @@ impl DesktopBridgeApi for DesktopBridgeOS {
                 ));
             };
             let arr = unsafe { CFRetained::from_raw(ptr) };
-            Ok(arr
-                .iter()
-                .filter_map(|n| {
-                    (!n.is_float_type())
-                        .then(|| n.as_i64())
-                        .flatten()
-                        .and_then(|v| u64::try_from(v).ok())
-                        .and_then(SpaceId::new)
-                })
-                .collect())
+            Ok(arr.iter().filter_map(|v| cf_space_id(&v)).collect())
         })
     }
 
@@ -475,7 +506,7 @@ impl DesktopBridgeApi for DesktopBridgeOS {
                 ));
             };
             let raw_cf = unsafe { CFRetained::from_raw(ptr) };
-            let raw_ids = unsafe { raw_cf.cast_unchecked::<CFNumber>() };
+            let raw_ids = unsafe { raw_cf.cast_unchecked::<CFType>() };
             let meta_map = all_window_meta().ok_or_else(|| {
                 SpaceError::new(
                     SpaceErrorKind::QueryFailed,
@@ -484,15 +515,24 @@ impl DesktopBridgeApi for DesktopBridgeOS {
             })?;
             raw_ids
                 .iter()
-                .filter_map(|n| (!n.is_float_type()).then(|| n.as_i32()).flatten())
-                .filter_map(|wid| match meta_map.get(&wid) {
-                    Some(meta) if meta.is_app_window() => Some(Ok(wid)),
-                    // Fail closed if WindowServer reports a window with missing metadata.
-                    None if include_minimized => Some(Err(SpaceError::new(
-                        SpaceErrorKind::QueryFailed,
-                        format!("missing CGWindow metadata for window {wid}"),
-                    ))),
-                    Some(_) | None => None,
+                .filter_map(|item| {
+                    let Some(wid) = cf_positive_win_id(&item) else {
+                        return include_minimized.then(|| {
+                            Err(SpaceError::new(
+                                SpaceErrorKind::QueryFailed,
+                                "unparseable window id in SLSCopyWindowsWithOptionsAndTags",
+                            ))
+                        });
+                    };
+                    match meta_map.get(&wid) {
+                        Some(meta) if meta.is_app_window() => Some(Ok(wid)),
+                        // Fail closed if WindowServer reports a window with missing metadata.
+                        None if include_minimized => Some(Err(SpaceError::new(
+                            SpaceErrorKind::QueryFailed,
+                            format!("missing CGWindow metadata for window {wid}"),
+                        ))),
+                        Some(_) | None => None,
+                    }
                 })
                 .collect()
         })
@@ -500,11 +540,12 @@ impl DesktopBridgeApi for DesktopBridgeOS {
 
     fn window_is_sticky(&self, window_id: WinID) -> Option<bool> {
         let windows = create_array(&[window_id], CFNumberType::SInt32Type).ok()?;
-        let query = unsafe {
-            CFRetained::from_raw(SLSWindowQueryWindows(self.cid, &raw const *windows, 1))
-        };
-        let iter =
-            unsafe { CFRetained::from_raw(SLSWindowQueryResultCopyWindows(query.deref().into())) };
+        let query_ptr =
+            NonNull::new(unsafe { SLSWindowQueryWindows(self.cid, &raw const *windows, 1) })?;
+        let query = unsafe { CFRetained::from_raw(query_ptr) };
+        let iter_ptr =
+            NonNull::new(unsafe { SLSWindowQueryResultCopyWindows(query.deref().into()) })?;
+        let iter = unsafe { CFRetained::from_raw(iter_ptr) };
         while unsafe { SLSWindowIteratorAdvance(&raw const *iter) } {
             if unsafe { SLSWindowIteratorGetWindowID(&raw const *iter) } == window_id {
                 let tags = unsafe { SLSWindowIteratorGetTags(&raw const *iter) }.cast_unsigned();
@@ -515,11 +556,15 @@ impl DesktopBridgeApi for DesktopBridgeOS {
     }
 
     fn associated_windows(&self, window_id: WinID) -> Result<Vec<WinID>, SpaceError> {
-        let arr = unsafe { CFRetained::from_raw(SLSCopyAssociatedWindows(self.cid, window_id)) };
-        Ok(arr
-            .iter()
-            .filter_map(|n| (!n.is_float_type()).then(|| n.as_i32()).flatten())
-            .collect())
+        let Some(ptr) = NonNull::new(unsafe { SLSCopyAssociatedWindows(self.cid, window_id) })
+        else {
+            return Err(SpaceError::new(
+                SpaceErrorKind::QueryFailed,
+                format!("SLSCopyAssociatedWindows returned null for window {window_id}"),
+            ));
+        };
+        let arr = unsafe { CFRetained::from_raw(ptr) };
+        Ok(arr.iter().filter_map(|v| cf_positive_win_id(&v)).collect())
     }
 
     fn window_meta(&self, window_id: WinID) -> Option<WindowServerMeta> {

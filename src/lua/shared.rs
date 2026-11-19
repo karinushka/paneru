@@ -282,9 +282,23 @@ fn desktop_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
     let move_window = {
         let dispatch = Rc::clone(dispatch);
         lua.create_function(move |lua, opts: Value| {
-            let parsed = DesktopOpts::read(lua, &opts)?;
-            let move_focus = MoveFocus::follows(parsed.follow.unwrap_or(true));
-            let target = parsed.require_target("desktop.move_window")?;
+            let (target, move_focus) = match &opts {
+                Value::Table(_) => {
+                    let parsed: MoveWindowOpts = lua.from_value(opts)?;
+                    let target = require_desktop_target(
+                        "desktop.move_window",
+                        parsed.direction.as_deref(),
+                        parsed.number,
+                        parsed.space_id,
+                        parsed.display,
+                    )?;
+                    (target, MoveFocus::follows(parsed.follow.unwrap_or(true)))
+                }
+                _ => (
+                    parse_scalar_desktop_target(&opts, "desktop.move_window")?,
+                    MoveFocus::Follow,
+                ),
+            };
             dispatch(
                 lua,
                 Command::Desktop(DesktopOperation::MoveWindow { target, move_focus }),
@@ -293,20 +307,15 @@ fn desktop_table(lua: &Lua, dispatch: &Dispatch) -> Result<Table> {
     };
     desktop.set("move_window", move_window)?;
 
-    let send_window = {
-        let dispatch = Rc::clone(dispatch);
-        lua.create_function(move |lua, opts: Value| {
-            let target = DesktopOpts::read(lua, &opts)?.require_target("desktop.send_window")?;
-            dispatch(
-                lua,
-                Command::Desktop(DesktopOperation::MoveWindow {
-                    target,
-                    move_focus: MoveFocus::Stay,
-                }),
-            )
-        })?
-    };
-    desktop.set("send_window", send_window)?;
+    desktop.set(
+        "send_window",
+        desktop_target_verb(lua, dispatch, "desktop.send_window", |target| {
+            DesktopOperation::MoveWindow {
+                target,
+                move_focus: MoveFocus::Stay,
+            }
+        })?,
+    )?;
 
     desktop.set("create", desktop_create_verb(lua, dispatch)?)?;
     desktop.set("destroy", desktop_destroy_verb(lua, dispatch)?)?;
@@ -328,7 +337,19 @@ fn desktop_target_verb(
 ) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
-        let target = DesktopOpts::read(lua, &opts)?.require_target(what)?;
+        let target = match &opts {
+            Value::Table(_) => {
+                let parsed: DesktopTargetOpts = lua.from_value(opts)?;
+                require_desktop_target(
+                    what,
+                    parsed.direction.as_deref(),
+                    parsed.number,
+                    parsed.space_id,
+                    parsed.display,
+                )?
+            }
+            _ => parse_scalar_desktop_target(&opts, what)?,
+        };
         dispatch(lua, Command::Desktop(op(target)))
     })
 }
@@ -360,9 +381,23 @@ fn desktop_create_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
 fn desktop_destroy_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
-        let parsed = DesktopOpts::read(lua, &opts)?;
-        let empty_only = parsed.empty_only.unwrap_or(false);
-        let target = parsed.optional_target()?;
+        let (target, empty_only) = match &opts {
+            Value::Nil => (None, false),
+            Value::Table(_) => {
+                let parsed: DestroyOpts = lua.from_value(opts)?;
+                let target = optional_desktop_target(
+                    parsed.direction.as_deref(),
+                    parsed.number,
+                    parsed.space_id,
+                    parsed.display,
+                )?;
+                (target, parsed.empty_only.unwrap_or(false))
+            }
+            _ => (
+                Some(parse_scalar_desktop_target(&opts, "desktop.destroy")?),
+                false,
+            ),
+        };
         dispatch(
             lua,
             Command::Desktop(DesktopOperation::Destroy { target, empty_only }),
@@ -376,14 +411,35 @@ fn desktop_pin_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
         let pin = match &opts {
             Value::Nil => DesktopPinTarget::All,
             Value::String(s) if s.to_str()? == "all" => DesktopPinTarget::All,
-            _ => {
-                let parsed = DesktopOpts::read(lua, &opts)?;
-                if parsed.mode.as_deref() == Some("all") {
-                    DesktopPinTarget::All
-                } else {
-                    DesktopPinTarget::Desktop(parsed.require_target("desktop.pin")?)
+            Value::Table(_) => {
+                let parsed: PinOpts = lua.from_value(opts)?;
+                let target = optional_desktop_target(
+                    parsed.direction.as_deref(),
+                    parsed.number,
+                    parsed.space_id,
+                    parsed.display,
+                )?;
+                match parsed.mode.as_deref() {
+                    Some("all") if target.is_none() => DesktopPinTarget::All,
+                    Some("all") => {
+                        return Err(mlua::Error::RuntimeError(
+                            "desktop.pin: mode = 'all' cannot be combined with a target".into(),
+                        ));
+                    }
+                    Some(other) => {
+                        return Err(mlua::Error::RuntimeError(format!(
+                            "desktop.pin: unknown mode '{other}'"
+                        )));
+                    }
+                    None => DesktopPinTarget::Desktop(target.ok_or_else(|| {
+                        mlua::Error::RuntimeError(
+                            "desktop.pin expects 'all', a desktop number, direction, or options table"
+                                .into(),
+                        )
+                    })?),
                 }
             }
+            _ => DesktopPinTarget::Desktop(parse_scalar_desktop_target(&opts, "desktop.pin")?),
         };
         dispatch(lua, Command::Desktop(DesktopOperation::Pin(pin)))
     })
@@ -392,40 +448,66 @@ fn desktop_pin_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
 fn desktop_assign_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
     let dispatch = Rc::clone(dispatch);
     lua.create_function(move |lua, opts: Value| {
-        if let Value::String(s) = &opts {
-            let s = s.to_str()?;
-            let target = match &*s {
-                "all" => Some(DesktopAssignTarget::All),
-                "this" => Some(DesktopAssignTarget::This),
-                "none" => Some(DesktopAssignTarget::None),
-                _ => None,
-            };
-            if let Some(target) = target {
-                return dispatch(
-                    lua,
-                    Command::Desktop(DesktopOperation::Assign { target, pid: None }),
-                );
+        let (target, pid) = match &opts {
+            Value::String(s) => {
+                let s = s.to_str()?;
+                let target = match &*s {
+                    "all" => DesktopAssignTarget::All,
+                    "this" => DesktopAssignTarget::This,
+                    "none" => DesktopAssignTarget::None,
+                    _ => DesktopAssignTarget::Desktop(DesktopTarget::Direction {
+                        direction: Direction::parse(&s)
+                            .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?,
+                        display: None,
+                    }),
+                };
+                (target, None)
             }
-        }
-        let parsed = DesktopOpts::read(lua, &opts)?;
-        let pid = parsed.pid;
-        if let Some(p) = pid
-            && p <= 0
-        {
-            return Err(mlua::Error::RuntimeError(
-                "desktop.assign: pid must be positive".into(),
-            ));
-        }
-        let target = match parsed.mode.as_deref() {
-            Some("all") => DesktopAssignTarget::All,
-            Some("this") => DesktopAssignTarget::This,
-            Some("none") => DesktopAssignTarget::None,
-            Some(other) => {
-                return Err(mlua::Error::RuntimeError(format!(
-                    "desktop.assign: unknown mode '{other}'"
-                )));
+            Value::Table(_) => {
+                let parsed: AssignOpts = lua.from_value(opts)?;
+                if let Some(p) = parsed.pid
+                    && p <= 0
+                {
+                    return Err(mlua::Error::RuntimeError(
+                        "desktop.assign: pid must be positive".into(),
+                    ));
+                }
+                let desktop_target = optional_desktop_target(
+                    parsed.direction.as_deref(),
+                    parsed.number,
+                    parsed.space_id,
+                    parsed.display,
+                )?;
+                let target = match parsed.mode.as_deref() {
+                    Some(mode) => {
+                        if desktop_target.is_some() {
+                            return Err(mlua::Error::RuntimeError(
+                                "desktop.assign: mode cannot be combined with a target".into(),
+                            ));
+                        }
+                        match mode {
+                            "all" => DesktopAssignTarget::All,
+                            "this" => DesktopAssignTarget::This,
+                            "none" => DesktopAssignTarget::None,
+                            other => {
+                                return Err(mlua::Error::RuntimeError(format!(
+                                    "desktop.assign: unknown mode '{other}'"
+                                )));
+                            }
+                        }
+                    }
+                    None => DesktopAssignTarget::Desktop(desktop_target.ok_or_else(|| {
+                        mlua::Error::RuntimeError(
+                            "desktop.assign expects mode or a desktop target".into(),
+                        )
+                    })?),
+                };
+                (target, parsed.pid)
             }
-            None => DesktopAssignTarget::Desktop(parsed.require_target("desktop.assign")?),
+            _ => (
+                DesktopAssignTarget::Desktop(parse_scalar_desktop_target(&opts, "desktop.assign")?),
+                None,
+            ),
         };
         dispatch(
             lua,
@@ -436,90 +518,157 @@ fn desktop_assign_verb(lua: &Lua, dispatch: &Dispatch) -> Result<Function> {
 
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-struct DesktopOpts {
+struct DesktopTargetOpts {
+    direction: Option<String>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct MoveWindowOpts {
     direction: Option<String>,
     number: Option<u32>,
     space_id: Option<u64>,
     display: Option<u32>,
     follow: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct DestroyOpts {
+    direction: Option<String>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
     empty_only: Option<bool>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct PinOpts {
+    direction: Option<String>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
+    mode: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct AssignOpts {
+    direction: Option<String>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
     mode: Option<String>,
     pid: Option<i32>,
 }
 
-impl DesktopOpts {
-    fn read(lua: &Lua, value: &Value) -> Result<Self> {
-        match value {
-            Value::Nil => Ok(Self::default()),
-            Value::Table(_) => lua.from_value(value.clone()),
-            Value::Integer(n) => {
-                let num = u32::try_from(*n).ok().filter(|&v| v >= 1).ok_or_else(|| {
-                    mlua::Error::RuntimeError("desktop numbers start at 1".into())
-                })?;
-                Ok(Self {
-                    number: Some(num),
-                    ..Self::default()
-                })
-            }
-            Value::Number(f) => {
-                if !f.is_finite() || *f < 1.0 || f.fract() != 0.0 || *f > f64::from(u32::MAX) {
-                    return Err(mlua::Error::RuntimeError(
-                        "desktop numbers must be positive integers".into(),
-                    ));
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                Ok(Self {
-                    number: Some(*f as u32),
-                    ..Self::default()
-                })
-            }
-            Value::String(s) => Ok(Self {
-                direction: Some(s.to_str()?.to_string()),
-                ..Self::default()
-            }),
-            other => Err(mlua::Error::RuntimeError(format!(
-                "expected desktop number, direction string, or options table, got {}",
-                other.type_name()
-            ))),
+fn parse_scalar_desktop_target(value: &Value, what: &str) -> Result<DesktopTarget> {
+    match value {
+        Value::Integer(n) => {
+            let number = u32::try_from(*n)
+                .ok()
+                .filter(|&v| v >= 1)
+                .ok_or_else(|| mlua::Error::RuntimeError("desktop numbers start at 1".into()))?;
+            Ok(DesktopTarget::Number {
+                number,
+                display: None,
+            })
         }
-    }
-
-    fn optional_target(&self) -> Result<Option<DesktopTarget>> {
-        if let Some(sid) = self.space_id {
-            if sid == 0 {
-                return Err(mlua::Error::RuntimeError("space_id must be >= 1".into()));
-            }
-            return Ok(Some(DesktopTarget::SpaceId(sid)));
-        }
-        if let Some(num) = self.number {
-            if num == 0 {
+        Value::Number(f) => {
+            if !f.is_finite() || *f < 1.0 || f.fract() != 0.0 || *f > f64::from(u32::MAX) {
                 return Err(mlua::Error::RuntimeError(
-                    "desktop numbers start at 1".into(),
+                    "desktop numbers must be positive integers".into(),
                 ));
             }
-            return Ok(Some(DesktopTarget::Number {
-                number: num,
-                display: self.display,
-            }));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            Ok(DesktopTarget::Number {
+                number: *f as u32,
+                display: None,
+            })
         }
-        if let Some(dir_str) = &self.direction {
-            let direction = Direction::parse(dir_str)
+        Value::String(s) => {
+            let direction = Direction::parse(&s.to_str()?)
                 .map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
-            return Ok(Some(DesktopTarget::Direction {
+            Ok(DesktopTarget::Direction {
                 direction,
-                display: self.display,
-            }));
+                display: None,
+            })
         }
-        Ok(None)
+        Value::Nil => Err(mlua::Error::RuntimeError(format!(
+            "{what} expects a desktop number, direction, or {{ number/direction/space_id = ... }}"
+        ))),
+        other => Err(mlua::Error::RuntimeError(format!(
+            "{what}: expected desktop number, direction string, or options table, got {}",
+            other.type_name()
+        ))),
     }
+}
 
-    fn require_target(&self, what: &str) -> Result<DesktopTarget> {
-        self.optional_target()?.ok_or_else(|| {
-            mlua::Error::RuntimeError(format!(
-                "{what} expects a desktop number, direction, or {{ number/direction/space_id = ... }}"
-            ))
-        })
+fn optional_desktop_target(
+    direction: Option<&str>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
+) -> Result<Option<DesktopTarget>> {
+    let count = usize::from(space_id.is_some())
+        + usize::from(number.is_some())
+        + usize::from(direction.is_some());
+    if count > 1 {
+        return Err(mlua::Error::RuntimeError(
+            "specify at most one of number, direction, or space_id".into(),
+        ));
     }
+    if let Some(sid) = space_id {
+        if sid == 0 {
+            return Err(mlua::Error::RuntimeError("space_id must be >= 1".into()));
+        }
+        if display.is_some() {
+            return Err(mlua::Error::RuntimeError(
+                "space_id cannot be combined with display".into(),
+            ));
+        }
+        return Ok(Some(DesktopTarget::SpaceId(sid)));
+    }
+    if let Some(num) = number {
+        if num == 0 {
+            return Err(mlua::Error::RuntimeError(
+                "desktop numbers start at 1".into(),
+            ));
+        }
+        return Ok(Some(DesktopTarget::Number {
+            number: num,
+            display,
+        }));
+    }
+    if let Some(dir_str) = direction {
+        let direction =
+            Direction::parse(dir_str).map_err(|err| mlua::Error::RuntimeError(err.to_string()))?;
+        return Ok(Some(DesktopTarget::Direction { direction, display }));
+    }
+    if display.is_some() {
+        return Err(mlua::Error::RuntimeError(
+            "display requires number or direction".into(),
+        ));
+    }
+    Ok(None)
+}
+
+fn require_desktop_target(
+    what: &str,
+    direction: Option<&str>,
+    number: Option<u32>,
+    space_id: Option<u64>,
+    display: Option<u32>,
+) -> Result<DesktopTarget> {
+    optional_desktop_target(direction, number, space_id, display)?.ok_or_else(|| {
+        mlua::Error::RuntimeError(format!(
+            "{what} expects a desktop number, direction, or {{ number/direction/space_id = ... }}"
+        ))
+    })
 }
 
 /// Virtual-workspace verbs come in two shapes: a position selects a numbered
@@ -931,7 +1080,15 @@ mod tests {
         assert!(run("paneru.desktop.focus(0)").is_err());
         assert!(run("paneru.desktop.focus({})").is_err());
         assert!(run(r#"paneru.desktop.focus("sideways")"#).is_err());
+        assert!(run("paneru.desktop.focus({ number = 2, follow = false })").is_err());
+        assert!(run("paneru.desktop.focus({ space_id = 42, display = 2 })").is_err());
+        assert!(run("paneru.desktop.focus({ number = 2, direction = 'east' })").is_err());
+        assert!(run("paneru.desktop.send_window({ number = 2, follow = true })").is_err());
+        assert!(run("paneru.desktop.destroy({ display = 2 })").is_err());
+        assert!(run("paneru.desktop.pin({ mode = 'bogus', number = 2 })").is_err());
+        assert!(run("paneru.desktop.pin({ mode = 'all', number = 2 })").is_err());
         assert!(run("paneru.desktop.assign({ mode = 'bogus' })").is_err());
+        assert!(run("paneru.desktop.assign({ mode = 'all', number = 2 })").is_err());
         assert!(run("paneru.desktop.assign({ mode = 'all', pid = 0 })").is_err());
     }
 }

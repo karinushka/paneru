@@ -955,7 +955,9 @@ pub(super) fn window_managed_trigger(
     }
 
     if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
-        entity_commands.try_remove::<PreviousManagedStrip>();
+        entity_commands
+            .try_remove::<PreviousManagedStrip>()
+            .try_remove::<FloatsWhenRestored>();
     }
 
     if let Some((strip_entity, false)) = landed_in {

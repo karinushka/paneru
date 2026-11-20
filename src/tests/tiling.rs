@@ -1104,6 +1104,50 @@ fn test_tiled_window_is_tiled_again_after_minimize_and_restore() {
         ]);
 }
 
+/// A minimized floating window that another path, such as Lua or session
+/// restore, tiles must not keep the marker that floats it on restore.
+#[test]
+fn test_tiling_a_minimized_floating_window_clears_floats_when_restored() {
+    let print_state = || Event::Command {
+        command: Command::PrintState,
+    };
+    let float = Event::Command {
+        command: Command::Window(Operation::Manage),
+    };
+
+    TestHarness::new()
+        .with_windows(2)
+        .on_iteration(2, |_world, state| {
+            state.os_minimize_window(0, true);
+        })
+        .on_iteration(3, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .contains::<crate::ecs::FloatsWhenRestored>(),
+                "minimizing a floating window marks it to float on restore"
+            );
+            world.entity_mut(entity).remove::<crate::ecs::Unmanaged>();
+        })
+        .on_iteration(4, |world, _state| {
+            let entity = find_window_entity(0, world);
+            assert!(
+                !world
+                    .entity(entity)
+                    .contains::<crate::ecs::FloatsWhenRestored>(),
+                "a tiled window must not keep FloatsWhenRestored"
+            );
+        })
+        .run(vec![
+            print_state(),
+            float,
+            print_state(),
+            print_state(),
+            print_state(),
+        ]);
+}
+
 // 2026-10-26: A captured Emacs popup disappeared just before focus jumped to
 // the other half-screen tile. Closing an unfocused popup must preserve focus.
 #[test]

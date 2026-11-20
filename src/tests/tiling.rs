@@ -1697,6 +1697,171 @@ fn test_window_tiled_from_floating_gets_its_padding() {
         .run(commands);
 }
 
+fn geometry_changed_since(
+    harness: &mut TestHarness,
+    id: i32,
+    before: bevy::ecs::change_detection::Tick,
+    after: bevy::ecs::change_detection::Tick,
+) -> (bool, bool) {
+    use crate::ecs::{Bounds, Position};
+    use bevy::ecs::change_detection::DetectChanges as _;
+
+    let entity = find_window_entity(id, harness.world());
+    let entity_ref = harness.app.world().entity(entity);
+    let pos = entity_ref
+        .get_ref::<Position>()
+        .unwrap()
+        .last_changed()
+        .is_newer_than(before, after);
+    let bounds = entity_ref
+        .get_ref::<Bounds>()
+        .unwrap()
+        .last_changed()
+        .is_newer_than(before, after);
+    (pos, bounds)
+}
+
+/// Reloading config with new per-window `horizontal_padding` / `vertical_padding`
+/// updates already-open tiled windows and marks their geometry dirty so the new
+/// AX inset is committed immediately, while leaving floating and minimized
+/// windows untouched.
+#[test]
+fn test_config_reload_updates_padding_on_open_tiled_windows() {
+    fn config_with_padding(h: i32, v: i32) -> Config {
+        let mut floating = WindowParams::new("^Window 2$", Some("test".to_string()));
+        floating.floating = Some(true);
+        let mut padded = WindowParams::new(".*", None);
+        padded.horizontal_padding = Some(h);
+        padded.vertical_padding = Some(v);
+        (MainOptions::default(), vec![floating, padded]).into()
+    }
+
+    let mut harness = TestHarness::new()
+        .with_config(config_with_padding(4, 4))
+        .with_windows(4);
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+
+    // Minimize window 3 so we cover tiled (0, 1), floating (2), and minimized (3).
+    harness.mock_state.os_minimize_window(3, true);
+    harness.advance(std::time::Duration::from_millis(100));
+
+    // Sync mock readback fields to the initial padding so change detection reflects reality.
+    for id in [0, 1] {
+        harness.mock_state.update_window(id, |w| {
+            w.horizontal_padding = 4;
+            w.vertical_padding = 4;
+        });
+    }
+    assert_eq!(padding_set(&harness.mock_state, 0), (Some(4), Some(4)));
+    assert_eq!(padding_set(&harness.mock_state, 1), (Some(4), Some(4)));
+    assert_eq!(padding_set(&harness.mock_state, 2), (None, None));
+    assert_eq!(padding_set(&harness.mock_state, 3), (Some(4), Some(4)));
+
+    // 1. Reload with larger padding (4 -> 12): tiled windows update and mark Position/Bounds changed.
+    harness
+        .app
+        .world_mut()
+        .insert_resource(config_with_padding(12, 12));
+    let before_tick = harness.app.world().read_change_tick();
+    harness.app.update();
+    let after_tick = harness.app.world().read_change_tick();
+
+    assert_eq!(padding_set(&harness.mock_state, 0), (Some(12), Some(12)));
+    assert_eq!(padding_set(&harness.mock_state, 1), (Some(12), Some(12)));
+    assert_eq!(
+        padding_set(&harness.mock_state, 2),
+        (None, None),
+        "floating window must stay unpadded on config reload"
+    );
+    assert_eq!(
+        padding_set(&harness.mock_state, 3),
+        (Some(4), Some(4)),
+        "minimized window must not be touched while minimized"
+    );
+    for id in [0, 1] {
+        assert_eq!(
+            geometry_changed_since(&mut harness, id, before_tick, after_tick),
+            (true, true),
+            "window {id} must mark Position and Bounds changed so AX commits the new inset"
+        );
+    }
+
+    // 2. Reload with unchanged padding: Position/Bounds must not be spuriously marked changed.
+    for id in [0, 1] {
+        harness.mock_state.update_window(id, |w| {
+            w.horizontal_padding = 12;
+            w.vertical_padding = 12;
+        });
+    }
+    harness.app.update();
+    harness
+        .app
+        .world_mut()
+        .insert_resource(config_with_padding(12, 12));
+    let before_noop = harness.app.world().read_change_tick();
+    harness.app.update();
+    let after_noop = harness.app.world().read_change_tick();
+    for id in [0, 1] {
+        assert_eq!(
+            geometry_changed_since(&mut harness, id, before_noop, after_noop),
+            (false, false),
+            "unchanged padding must not mark Position/Bounds changed on window {id}"
+        );
+    }
+
+    // 3. Removing the padding rule resets existing tiled windows back to 0.
+    let no_padding: Config = (MainOptions::default(), vec![]).into();
+    harness.app.world_mut().insert_resource(no_padding);
+    harness.app.update();
+    assert_eq!(padding_set(&harness.mock_state, 0), (Some(0), Some(0)));
+    assert_eq!(padding_set(&harness.mock_state, 1), (Some(0), Some(0)));
+}
+
+/// A native fullscreen window updates its stored padding on config reload so it
+/// has the right inset if it leaves fullscreen later, without marking `Position`
+/// or `Bounds` changed while fullscreen.
+#[test]
+fn test_config_reload_updates_fullscreen_padding_without_moving_it() {
+    let mut initial = WindowParams::new(".*", None);
+    initial.horizontal_padding = Some(4);
+    initial.vertical_padding = Some(4);
+    let mut updated = WindowParams::new(".*", None);
+    updated.horizontal_padding = Some(12);
+    updated.vertical_padding = Some(12);
+
+    let mut harness = TestHarness::new()
+        .with_config((MainOptions::default(), vec![initial]).into())
+        .with_window(0, |w| {
+            w.is_full_screen = true;
+            w.horizontal_padding = 4;
+            w.vertical_padding = 4;
+        });
+    harness.run(vec![Event::Command {
+        command: Command::PrintState,
+    }]);
+
+    harness
+        .app
+        .world_mut()
+        .insert_resource::<Config>((MainOptions::default(), vec![updated]).into());
+    let before_tick = harness.app.world().read_change_tick();
+    harness.app.update();
+    let after_tick = harness.app.world().read_change_tick();
+
+    assert_eq!(
+        padding_set(&harness.mock_state, 0),
+        (Some(12), Some(12)),
+        "stored padding must still update for fullscreen windows"
+    );
+    assert_eq!(
+        geometry_changed_since(&mut harness, 0, before_tick, after_tick),
+        (false, false),
+        "fullscreen window must not mark Position/Bounds changed on padding reload"
+    );
+}
+
 fn window_exists(world: &mut World, id: i32) -> bool {
     let mut query = world.query::<&crate::manager::Window>();
     query.iter(world).any(|window| window.id() == id)

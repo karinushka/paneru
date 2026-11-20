@@ -399,6 +399,10 @@ pub fn register_triggers(app: &mut bevy::app::App) {
             triggers::window_destroyed_trigger,
             triggers::invalidate_window_title,
             triggers::refresh_configuration_trigger,
+            triggers::refresh_window_padding
+                .after(triggers::refresh_configuration_trigger)
+                .run_if(resource_changed::<Config>)
+                .run_if(not(resource_exists::<Initializing>)),
             triggers::theme_change_trigger,
             triggers::window_resize_verifier,
             triggers::settle_refused_resize.after(triggers::window_resize_verifier),

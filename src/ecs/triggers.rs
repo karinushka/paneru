@@ -66,6 +66,59 @@ type WindowDefaultsQueries<'w, 's> = ParamSet<
     ),
 >;
 
+const MAX_WINDOW_PADDING: i32 = 50;
+
+fn clamped_window_padding(properties: &WindowProperties) -> (i32, i32) {
+    (
+        properties.horizontal_padding().clamp(0, MAX_WINDOW_PADDING),
+        properties.vertical_padding().clamp(0, MAX_WINDOW_PADDING),
+    )
+}
+
+type ManagedWindowPadding<'w, 's> = Populated<
+    'w,
+    's,
+    (
+        &'static mut Window,
+        &'static ChildOf,
+        &'static mut Position,
+        &'static mut Bounds,
+        &'static mut LayoutPosition,
+    ),
+    Without<Unmanaged>,
+>;
+
+/// Re-applies per-window `horizontal_padding` and `vertical_padding` rules to
+/// already-open managed windows whenever [`Config`] changes (TOML or Lua reload).
+///
+/// Only windows whose clamped padding actually changed are mutated or marked
+/// dirty; floating, minimized, and hidden windows are excluded (becoming tiled
+/// again re-applies padding in [`window_managed_trigger`]).
+#[instrument(level = Level::DEBUG, skip_all)]
+pub(super) fn refresh_window_padding(
+    mut windows: ManagedWindowPadding,
+    apps: Query<&Application>,
+    config: Res<Config>,
+) {
+    for (mut window, child_of, mut position, mut bounds, mut layout_position) in &mut windows {
+        let Ok(app) = apps.get(child_of.parent()) else {
+            continue;
+        };
+        let properties = WindowProperties::new(app, &window, &config);
+        let (horizontal, vertical) = clamped_window_padding(&properties);
+        if horizontal == window.horizontal_padding() && vertical == window.vertical_padding() {
+            continue;
+        }
+        window.set_padding(WindowPadding::Horizontal(horizontal));
+        window.set_padding(WindowPadding::Vertical(vertical));
+        if !window.is_full_screen() {
+            layout_position.set_changed();
+            position.set_changed();
+            bounds.set_changed();
+        }
+    }
+}
+
 /// Computes the passthrough keybinding set for the given window/app and
 /// publishes it to the input thread. Called on focus change and config reload.
 fn update_passthrough(window: &Window, app: &Application, config: &Config) {
@@ -898,8 +951,7 @@ pub(super) fn window_managed_trigger(
 
         // A window that opened floating never got the padding that
         // `apply_window_defaults` gives a tiled one.
-        let vertical = properties.vertical_padding().clamp(0, 50);
-        let horizontal = properties.horizontal_padding().clamp(0, 50);
+        let (horizontal, vertical) = clamped_window_padding(&properties);
         if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
             entity_commands.queue_silenced(move |mut entity: EntityWorldMut| {
                 if let Some(mut window) = entity.get_mut::<Window>() {
@@ -1306,10 +1358,9 @@ pub(super) fn apply_window_defaults(
             }
             continue;
         }
-        let vpadding = properties.vertical_padding();
-        let hpadding = properties.horizontal_padding();
-        window.set_padding(WindowPadding::Vertical(vpadding.clamp(0, 50)));
-        window.set_padding(WindowPadding::Horizontal(hpadding.clamp(0, 50)));
+        let (hpadding, vpadding) = clamped_window_padding(&properties);
+        window.set_padding(WindowPadding::Vertical(vpadding));
+        window.set_padding(WindowPadding::Horizontal(hpadding));
         let display_width = f64::from(active_display.bounds().width());
         if let Ok(frame) = window.update_frame() {
             position.0 = frame.min;

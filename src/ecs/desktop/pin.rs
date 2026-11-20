@@ -35,11 +35,7 @@ pub(super) fn detach_and_float_window(
     pinned: Option<PinnedDesktopWindow>,
     world: &mut DesktopOpWorld,
 ) {
-    for (_, mut strip, _, _, _) in &mut world.strips {
-        if strip.contains(entity) {
-            strip.remove(entity);
-        }
-    }
+    world.remove_from_strips_preserving_focus(&[entity], None);
     if let Ok(mut ec) = world.commands.get_entity(entity) {
         ec.try_insert((StickyWindowMarker, Unmanaged::Floating));
         if let Some(marker) = pinned {

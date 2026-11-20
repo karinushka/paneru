@@ -22,7 +22,7 @@ use super::{
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{DisplayViewports, LayoutStrip, RemovableStrips};
 use crate::ecs::params::{ActiveDisplay, GlobalState, WindowCtx, Windows};
 use crate::ecs::state::PaneruState;
 use crate::ecs::workspace::RestoreFocusMarker;
@@ -417,16 +417,11 @@ pub(super) fn window_focused_trigger(
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn mission_control_trigger(
     mut messages: MessageReader<Event>,
-    windows: Windows,
-    mut workspaces: Query<(
-        Entity,
-        &mut LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Option<&Scrolling>,
-    )>,
+    mut workspaces: RemovableStrips,
+    displays: DisplayViewports,
     mut mission_control_active: ResMut<MissionControlActive>,
     window_manager: Res<WindowManager>,
-    mut commands: Commands,
+    mut ctx: WindowCtx,
 ) {
     for event in messages.read() {
         match event {
@@ -434,9 +429,9 @@ pub(super) fn mission_control_trigger(
             | Event::MissionControlShowFrontWindows
             | Event::MissionControlShowDesktop => {
                 mission_control_active.as_mut().0 = true;
-                for (entity, _, _, scroll) in &workspaces {
-                    if scroll.is_some()
-                        && let Ok(mut entity_commands) = commands.get_entity(entity)
+                for item in &workspaces {
+                    if item.scrolling.is_some()
+                        && let Ok(mut entity_commands) = ctx.commands.get_entity(item.entity)
                     {
                         entity_commands.try_remove::<Scrolling>();
                     }
@@ -447,31 +442,38 @@ pub(super) fn mission_control_trigger(
 
                 // Check if some windows disappeared from the current workspace
                 // - e.g. they were moved away during mission control.
-                if let Some(mut active_strip) = workspaces
-                    .iter_mut()
-                    .find_map(|(_, strip, active, _)| active.then_some(strip))
+                if let Some(mut active_strip) = workspaces.iter_mut().find(|item| item.active)
                     && let Ok(present_windows) =
-                        window_manager.windows_in_workspace(active_strip.id())
+                        window_manager.windows_in_workspace(active_strip.strip.id())
                 {
+                    let focused = ctx.windows.focused().map(|(_, focused)| focused);
                     let moved_windows = active_strip
+                        .strip
                         .all_windows()
                         .into_iter()
-                        .filter_map(|entity| windows.get(entity).zip(Some(entity)))
-                        .filter(|(window, _)| !present_windows.contains(&window.id()));
+                        .filter_map(|entity| ctx.windows.get(entity).zip(Some(entity)))
+                        .filter(|(window, _)| !present_windows.contains(&window.id()))
+                        .collect::<Vec<_>>();
                     for (window, entity) in moved_windows {
                         // A parked tab's off-screen position can look like
                         // a move to another display; ignore it.
-                        if active_strip.is_parked_tab(entity) {
+                        if active_strip.strip.is_parked_tab(entity) {
                             continue;
                         }
                         debug!(
                             "window {} {entity} moved, removing from workspace {}",
                             window.id(),
-                            active_strip.id(),
+                            active_strip.strip.id(),
                         );
                         // Simply removing them from the current strip is enough,
                         // they will be re-detected during the workspace change.
-                        active_strip.remove(entity);
+                        active_strip.remove_preserving_focus(
+                            entity,
+                            focused,
+                            &ctx.windows,
+                            &displays,
+                            &ctx.config,
+                        );
                     }
                 }
             }
@@ -643,7 +645,8 @@ pub(super) fn dispatch_application_messages(
 pub(super) fn window_unmanaged_trigger(
     trigger: On<Add<Unmanaged>>,
     apps: Query<(Entity, &Application)>,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: RemovableStrips,
+    displays: DisplayViewports,
     // `Option<Single>` rather than `Single`: an unresolvable display would skip the
     // whole observer, but the strip removal below must still run without one.
     active_display: Option<ActiveDisplayViewport>,
@@ -701,14 +704,18 @@ pub(super) fn window_unmanaged_trigger(
     // is actually looking at.
     let parked_out_of_view = workspaces
         .iter()
-        .any(|(strip, active)| !active && strip.contains(entity));
+        .any(|item| !item.active && item.strip.contains(entity));
 
     // Drop the strip membership first, before anything below can bail early —
     // a floating window still reserves column space in the strip otherwise,
     // leaving a gap that never closes on its own.
-    for (mut strip, _) in &mut workspaces {
-        if strip.contains(entity) {
-            strip.remove(entity);
+    let focused = initializing
+        .is_none()
+        .then(|| ctx.windows.focused().map(|(_, focused)| focused))
+        .flatten();
+    for mut item in &mut workspaces {
+        if item.strip.contains(entity) {
+            item.remove_preserving_focus(entity, focused, &ctx.windows, &displays, &ctx.config);
         }
     }
 
@@ -780,39 +787,42 @@ fn remember_managed_strip(entity: Entity, strip: &LayoutStrip, commands: &mut Co
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
 pub(super) fn window_minimized_trigger(
     trigger: On<Add<Unmanaged>>,
-    windows: Windows,
-    workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: RemovableStrips,
+    displays: DisplayViewports,
     active_display: Single<&Display, With<ActiveDisplayMarker>>,
     openers: Query<&OpenedFrom>,
-    mut config: GlobalState,
-    mut commands: Commands,
+    mut global_state: GlobalState,
+    mut ctx: WindowCtx,
 ) {
     let entity = trigger.event().entity;
     if let Some((_, _, Some(Unmanaged::Minimized | Unmanaged::Hidden))) =
-        windows.get_managed(entity)
+        ctx.windows.get_managed(entity)
     {
         debug!("Entity {entity} is minimized or hidden.");
         let display_bounds = active_display.bounds();
         let opener = openers.get(entity).ok().map(|opened| opened.0);
-        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+        if let Ok(mut entity_commands) = ctx.commands.get_entity(entity) {
             entity_commands.try_remove::<OpenedFrom>();
         }
 
-        for (mut strip, active) in workspaces {
-            if active {
+        let focused = (!global_state.initializing())
+            .then(|| ctx.windows.focused().map(|(_, focused)| focused))
+            .flatten();
+        for mut item in &mut workspaces {
+            if item.active {
                 give_away_focus(
                     entity,
                     opener,
-                    &windows,
-                    &strip,
+                    &ctx.windows,
+                    &item.strip,
                     &display_bounds,
-                    &mut config,
-                    &mut commands,
+                    &mut global_state,
+                    &mut ctx.commands,
                 );
             }
-            if strip.contains(entity) {
-                remember_managed_strip(entity, &strip, &mut commands);
-                strip.remove(entity);
+            if item.strip.contains(entity) {
+                remember_managed_strip(entity, &item.strip, &mut ctx.commands);
+                item.remove_preserving_focus(entity, focused, &ctx.windows, &displays, &ctx.config);
             }
         }
     }
@@ -1612,33 +1622,27 @@ pub(super) fn refresh_configuration_trigger(
 
 pub(super) fn window_removal_trigger(
     trigger: On<Remove<Window>>,
-    mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    mut workspaces: RemovableStrips,
+    displays: DisplayViewports,
     windows: Windows,
-    global_state: GlobalState,
-    mut commands: Commands,
+    initializing: Option<Res<Initializing>>,
+    config: Res<Config>,
 ) {
     let entity = trigger.event().entity;
+    let focused = initializing
+        .is_none()
+        .then(|| windows.focused().map(|(_, focused)| focused))
+        .flatten();
 
-    if let Some((mut strip, active)) = workspaces
+    if let Some(mut item) = workspaces
         .iter_mut()
-        .find(|(strip, _)| strip.contains(entity))
+        .find(|item| item.strip.contains(entity))
     {
         debug!(
             "Removing despawned entity {entity} from strip {}",
-            strip.id()
+            item.strip.id()
         );
-        strip.remove(entity);
-
-        // The strip's origin stays put, so closing a column left of the
-        // focused window pulls it left and can push it off screen.
-        if active
-            && !global_state.skip_reshuffle()
-            && !global_state.initializing()
-            && let Some((_, focused)) = windows.focused()
-            && strip.contains(focused)
-        {
-            commands.ensure_visible(focused);
-        }
+        item.remove_preserving_focus(entity, focused, &windows, &displays, &config);
     }
 }
 

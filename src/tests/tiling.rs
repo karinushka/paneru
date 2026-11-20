@@ -1086,6 +1086,386 @@ fn test_focused_survivor_stays_shown_when_windows_left_of_it_close() {
         .run(commands);
 }
 
+/// Closing a column left of focus shifts the strip origin right so the focused
+/// window stays at the same screen x while off-screen left columns slide in;
+/// once nothing remains left to fill the gap in standard edge-invariant mode,
+/// the origin clamps at the left edge so no blank gap opens.
+#[test]
+fn test_closing_window_left_of_focus_keeps_focused_window_stationary() {
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Nth(2))),
+        }, // 1: focus window 2 (1 at 0..512, 2 at 512..1024, 0 off-screen left)
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2: after closing window 1
+        Event::Command {
+            command: Command::PrintState,
+        }, // 3: after closing leftmost window 0
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 2);
+            assert_eq!(window_x(world, 1), 0);
+            assert_eq!(window_x(world, 2), TEST_DISPLAY_WIDTH / 2);
+            state.os_close_window(1);
+        })
+        .on_iteration(2, |world, state| {
+            assert!(!window_exists(world, 1));
+            assert_focused!(world, 2);
+            assert_eq!(
+                window_x(world, 2),
+                TEST_DISPLAY_WIDTH / 2,
+                "focused window must stay stationary while off-screen left column fills the gap"
+            );
+            assert_eq!(
+                window_x(world, 0),
+                0,
+                "off-screen column left of the closed window must slide in to fill the gap"
+            );
+            state.os_close_window(0);
+        })
+        .on_iteration(3, |world, _state| {
+            assert!(!window_exists(world, 0));
+            assert_focused!(world, 2);
+            assert_eq!(
+                window_x(world, 2),
+                0,
+                "closing the leftmost column in edge-invariant mode must clamp at the left edge"
+            );
+        })
+        .run(commands);
+}
+
+/// With `auto_center = true`, closing the column to the left of a centered
+/// focused window must not clamp the strip origin to `viewport.min.x` and pull
+/// the focused window off-center.
+#[test]
+fn test_closing_window_left_of_focus_preserves_auto_center() {
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let options = MainOptions {
+        auto_center: Some(true),
+        ..MainOptions::default()
+    };
+    let config: Config = (options, vec![half]).into();
+    let centered_x = (TEST_DISPLAY_WIDTH - TEST_DISPLAY_WIDTH / 2) / 2;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        }, // 1: focus window 1 (centered)
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2: after closing window 0
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(1, move |world, state| {
+            assert_focused!(world, 1);
+            assert_eq!(window_x(world, 1), centered_x);
+            state.os_close_window(0);
+        })
+        .on_iteration(2, move |world, _state| {
+            assert!(!window_exists(world, 0));
+            assert_focused!(world, 1);
+            assert_eq!(
+                window_x(world, 1),
+                centered_x,
+                "auto_center focused window must remain centered when its left neighbour closes"
+            );
+        })
+        .run(commands);
+}
+
+/// When the user explicitly centered the focused window (`ManualStripOffset`),
+/// closing the column to its left must leave it centered instead of clamping to
+/// the left viewport edge.
+#[test]
+fn test_closing_window_left_of_focus_preserves_manual_center() {
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+    let centered_x = (TEST_DISPLAY_WIDTH - TEST_DISPLAY_WIDTH / 2) / 2;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        }, // 1: focus window 1
+        Event::Command {
+            command: Command::Window(Operation::Center),
+        }, // 2: manually center window 1
+        Event::Command {
+            command: Command::PrintState,
+        }, // 3: after closing window 0
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(2)
+        .on_iteration(2, move |world, state| {
+            assert_focused!(world, 1);
+            assert_eq!(window_x(world, 1), centered_x);
+            state.os_close_window(0);
+        })
+        .on_iteration(3, move |world, _state| {
+            assert!(!window_exists(world, 0));
+            assert_focused!(world, 1);
+            assert_eq!(
+                window_x(world, 1),
+                centered_x,
+                "manually centered window must stay centered when its left neighbour closes"
+            );
+        })
+        .run(commands);
+}
+
+/// Closing one member of a multi-window stack left of focus leaves the column
+/// intact, so the strip origin must not shift rightward.
+#[test]
+fn test_closing_stack_member_left_of_focus_does_not_shift_strip() {
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Nth(2))),
+        }, // 1: focus window 2
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        }, // 2: stack window 2 onto window 1 -> [0, Stack(1, 2), 3]
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        }, // 3: focus window 3 -> Stack(1, 2) at 0..512, 3 at 512..1024, 0 off-screen left
+        Event::Command {
+            command: Command::PrintState,
+        }, // 4: after closing window 2 (stack still survives with window 1)
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .on_iteration(3, |world, state| {
+            assert_focused!(world, 3);
+            assert_eq!(window_x(world, 1), 0);
+            assert_eq!(window_x(world, 3), TEST_DISPLAY_WIDTH / 2);
+            state.os_close_window(2);
+        })
+        .on_iteration(4, |world, _state| {
+            assert!(!window_exists(world, 2));
+            assert_focused!(world, 3);
+            assert_eq!(
+                window_x(world, 1),
+                0,
+                "surviving stack member must stay in place when its sibling closes"
+            );
+            assert_eq!(
+                window_x(world, 3),
+                TEST_DISPLAY_WIDTH / 2,
+                "focused window must not shift when a stack left of it survives"
+            );
+        })
+        .run(commands);
+}
+
+/// Floating, minimizing, or moving an unfocused column left of focus to another
+/// virtual workspace must all keep the focused window at the same screen x.
+#[test]
+fn test_float_minimize_and_virtual_move_left_of_focus_keep_focused_stationary() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        }, // 1: focus window 4 (3 at 0..512, 4 at 512..1024, 0..=2 off-screen left)
+        Event::Command {
+            command: Command::Layout(vec![LayoutOp::SetFloating {
+                window: 3,
+                floating: true,
+            }]),
+        }, // 2: float unfocused window 3
+        Event::Command {
+            command: Command::PrintState,
+        }, // 3: after minimizing unfocused window 2
+        Event::Command {
+            command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+                window: 1,
+                workspace: 2,
+                follow: false,
+            }]),
+        }, // 4: shift unfocused window 1 to virtual workspace 2 without following
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(5)
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 4);
+            assert_eq!(window_x(world, 3), 0);
+            assert_eq!(window_x(world, 4), TEST_DISPLAY_WIDTH / 2);
+        })
+        .on_iteration(2, |world, state| {
+            assert_focused!(world, 4);
+            assert_eq!(
+                window_x(world, 4),
+                TEST_DISPLAY_WIDTH / 2,
+                "floating a column left of focus must keep focused window stationary"
+            );
+            assert_eq!(window_x(world, 2), 0);
+            state.os_minimize_window(2, true);
+        })
+        .on_iteration(3, |world, _state| {
+            assert_focused!(world, 4);
+            assert_eq!(
+                window_x(world, 4),
+                TEST_DISPLAY_WIDTH / 2,
+                "minimizing a column left of focus must keep focused window stationary"
+            );
+            assert_eq!(window_x(world, 1), 0);
+        })
+        .on_iteration(4, |world, _state| {
+            assert_focused!(world, 4);
+            assert_eq!(
+                window_x(world, 4),
+                TEST_DISPLAY_WIDTH / 2,
+                "shifting an unfocused column left of focus to another workspace must keep focused window stationary"
+            );
+            assert_eq!(window_x(world, 0), 0);
+        })
+        .run(commands);
+}
+
+/// If the user scrolled away from the focused window so it is currently off-screen,
+/// closing another window must not yank the viewport back to the focused window.
+#[test]
+fn test_closing_window_while_scrolled_away_does_not_yank_viewport_to_focused() {
+    use crate::ecs::Position;
+
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        }, // 1: focus window 3
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2: settle after scrolling strip back to x=0
+        Event::Command {
+            command: Command::PrintState,
+        }, // 3: after closing window 1 while scrolled at x=0
+    ];
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .on_iteration(1, |world, _state| {
+            assert_focused!(world, 3);
+            let mut query = world
+                .query_filtered::<&mut Position, (With<LayoutStrip>, With<ActiveWorkspaceMarker>)>(
+                );
+            let mut strip_pos = query.single_mut(world).expect("active strip position");
+            strip_pos.0.x = 0;
+        })
+        .on_iteration(2, |world, state| {
+            assert_focused!(world, 3);
+            assert_eq!(window_x(world, 0), 0);
+            assert_eq!(window_x(world, 1), TEST_DISPLAY_WIDTH / 2);
+            state.os_close_window(1);
+        })
+        .on_iteration(3, |world, _state| {
+            assert!(!window_exists(world, 1));
+            assert_focused!(world, 3);
+            assert_eq!(
+                window_x(world, 0),
+                0,
+                "closing a window while scrolled away must not yank the viewport back to focused"
+            );
+        })
+        .run(commands);
+}
+
+/// On a secondary display whose viewport origin is non-zero, clamping after
+/// closing the leftmost column must clamp to that display's `min.x`, not `0`.
+#[test]
+fn test_closing_window_left_of_focus_clamps_to_secondary_display_origin() {
+    const EXT_DISPLAY_ID: u32 = 2;
+    const EXT_WORKSPACE_ID: u64 = 200;
+    const EXT_MIN_X: i32 = 1024;
+    const EXT_WIDTH: i32 = 1024;
+
+    let mut half = WindowParams::new(".*", None);
+    half.width = Some(InitialWindowWidth::Ratio(0.5));
+    let config: Config = (MainOptions::default(), vec![half]).into();
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::PrintState,
+        }, // 1: after focusing window 201 on secondary display
+        Event::Command {
+            command: Command::PrintState,
+        }, // 2: after closing window 200 on secondary display
+    ];
+
+    let ext_bounds = IRect::new(EXT_MIN_X, 0, EXT_MIN_X + EXT_WIDTH, TEST_DISPLAY_HEIGHT);
+    TestHarness::new()
+        .with_config(config)
+        .with_display(EXT_DISPLAY_ID, ext_bounds, vec![EXT_WORKSPACE_ID])
+        .with_windows(1)
+        .with_workspace_window(200, EXT_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(EXT_MIN_X, 0, EXT_MIN_X + EXT_WIDTH / 2, TEST_DISPLAY_HEIGHT);
+        })
+        .with_workspace_window(201, EXT_WORKSPACE_ID, |w| {
+            w.frame = IRect::new(
+                EXT_MIN_X + EXT_WIDTH / 2,
+                0,
+                EXT_MIN_X + EXT_WIDTH,
+                TEST_DISPLAY_HEIGHT,
+            );
+        })
+        .on_iteration(0, |_world, state| {
+            state.focus_window(201);
+        })
+        .on_iteration(1, |world, state| {
+            assert_focused!(world, 201);
+            assert_eq!(window_x(world, 200), EXT_MIN_X);
+            assert_eq!(window_x(world, 201), EXT_MIN_X + EXT_WIDTH / 2);
+            state.os_close_window(200);
+        })
+        .on_iteration(2, |world, _state| {
+            assert!(!window_exists(world, 200));
+            assert_focused!(world, 201);
+            assert_eq!(
+                window_x(world, 201),
+                EXT_MIN_X,
+                "closing leftmost column on secondary display must clamp to its viewport min.x"
+            );
+        })
+        .run(commands);
+}
+
 fn window_x(world: &mut World, id: i32) -> i32 {
     let mut query = world.query::<&crate::manager::Window>();
     query

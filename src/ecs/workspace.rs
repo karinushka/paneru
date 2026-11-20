@@ -24,7 +24,10 @@ use crate::commands::{
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER, origin_exposing};
+use crate::ecs::layout::{
+    LayoutStrip, PARKED_STRIP_SLIVER, compensate_left_removal, origin_exposing,
+    remove_left_column_width,
+};
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
@@ -53,8 +56,10 @@ type MovableStrips<'w, 's> = Query<
         Entity,
         &'static mut LayoutStrip,
         &'static mut Position,
+        Option<&'static mut RepositionMarker>,
         Has<ActiveWorkspaceMarker>,
         Option<&'static mut PreviousStripPosition>,
+        Has<ManualStripOffset>,
     ),
     Without<Window>,
 >;
@@ -1183,7 +1188,7 @@ fn handle_virtual_window_moves(
 ) {
     let Some((workspace_id, source_entity)) = workspaces
         .iter()
-        .find_map(|(entity, strip, _, active, _)| active.then_some((strip.id(), entity)))
+        .find_map(|(entity, strip, _, _, active, _, _)| active.then_some((strip.id(), entity)))
     else {
         return;
     };
@@ -1194,7 +1199,7 @@ fn handle_virtual_window_moves(
         let group = workspaces
             .get(source_entity)
             .ok()
-            .and_then(|(_, strip, _, _, _)| strip.relocation_group(window_entity));
+            .and_then(|(_, strip, ..)| strip.relocation_group(window_entity));
         let moving_entities = group
             .as_ref()
             .map_or_else(|| vec![window_entity], |group| group.members().to_vec());
@@ -1207,20 +1212,19 @@ fn handle_virtual_window_moves(
         let follow = matches!(move_marker.move_focus, MoveFocus::Follow);
 
         let target_idx = move_marker.target_virtual_index;
-        let target = workspaces.iter().find_map(|(entity, strip, _, _, _)| {
+        let target = workspaces.iter().find_map(|(entity, strip, ..)| {
             (strip.id() == workspace_id && strip.virtual_index == target_idx).then_some(entity)
         });
 
         // Must be captured before strip.remove below.
-        let source_neighbour =
-            workspaces
-                .get(source_entity)
-                .ok()
-                .and_then(|(_, strip, _, _, _)| {
-                    strip
-                        .left_neighbour(window_entity)
-                        .or_else(|| strip.right_neighbour(window_entity))
-                });
+        let source_neighbour = workspaces
+            .get(source_entity)
+            .ok()
+            .and_then(|(_, strip, ..)| {
+                strip
+                    .left_neighbour(window_entity)
+                    .or_else(|| strip.right_neighbour(window_entity))
+            });
         // If source will be empty after the move, Stay becomes Follow
         // since there's nothing left to look at.
         let stay = !follow && source_neighbour.is_some();
@@ -1234,7 +1238,7 @@ fn handle_virtual_window_moves(
             .then(|| windows.moving_frame(window_entity).map(|frame| frame.min.x))
             .flatten();
         let mid_placement = moved_left.and_then(|moved_left| {
-            let (_, strip, position, _, previous) = workspaces.get(target?).ok()?;
+            let (_, strip, position, _, _, previous, _) = workspaces.get(target?).ok()?;
             let scroll_x = previous.map_or(position.0.x, |previous| previous.origin.x);
             Some(mid_strip_slot(strip, scroll_x, moved_left, &windows))
         });
@@ -1271,7 +1275,7 @@ fn handle_virtual_window_moves(
         // Preserve the source strip's scroll position for when the user returns.
         if !stay
             && let Ok(mut entity_commands) = commands.get_entity(source_entity)
-            && let Ok((_, _, position, _, _)) = workspaces.get(source_entity)
+            && let Ok((_, _, position, ..)) = workspaces.get(source_entity)
         {
             entity_commands.try_insert(PreviousStripPosition {
                 origin: position.0,
@@ -1280,7 +1284,17 @@ fn handle_virtual_window_moves(
         }
 
         // Move the window before moving markers to avoid being detected as a moved window.
-        for (entity, mut strip, _, _, _) in &mut workspaces {
+        let focused = windows.focused().map(|(_, focused)| focused);
+        for (
+            entity,
+            mut strip,
+            mut position,
+            mut reposition,
+            active,
+            previous,
+            has_manual_offset,
+        ) in &mut workspaces
+        {
             if entity == target_entity {
                 match mid_placement {
                     Some((slot, _)) => {
@@ -1289,8 +1303,30 @@ fn handle_virtual_window_moves(
                     None => strip.append_relocation_group(window_entity, group.as_ref()),
                 }
             } else {
-                for moving_entity in &moving_entities {
-                    strip.remove(*moving_entity);
+                let compensate_focus = (stay && active && previous.is_none())
+                    .then_some(focused)
+                    .flatten();
+                for &moving_entity in &moving_entities {
+                    if !strip.contains(moving_entity) {
+                        continue;
+                    }
+                    if let Some(removed_width) = remove_left_column_width(
+                        &mut strip,
+                        moving_entity,
+                        compensate_focus,
+                        &windows,
+                    ) {
+                        let mut scrolling = scrollings.get_mut(entity).ok();
+                        compensate_left_removal(
+                            removed_width,
+                            &mut position,
+                            reposition.as_deref_mut(),
+                            scrolling.as_deref_mut(),
+                            has_manual_offset,
+                            viewport.min.x,
+                            &config,
+                        );
+                    }
                 }
             }
         }
@@ -1300,7 +1336,7 @@ fn handle_virtual_window_moves(
         // to its final spot in one go (no horizontal slide). Resetting Scrolling
         // stops stale momentum from overriding the offset on reactivation.
         if let Some((_, desired_scroll)) = mid_placement {
-            if let Ok((_, _, _, _, Some(mut previous))) = workspaces.get_mut(target_entity) {
+            if let Ok((_, _, _, _, _, Some(mut previous), _)) = workspaces.get_mut(target_entity) {
                 previous.origin.x = desired_scroll;
             }
             if let Ok(mut scroll) = scrollings.get_mut(target_entity) {
@@ -1317,21 +1353,21 @@ fn handle_virtual_window_moves(
         }
 
         if stay && let Some(neighbour) = source_neighbour {
-            // Layout chain repositions the window offscreen with its hidden strip.
-            commands.focus_entity(neighbour, false);
+            // Only hand off focus if the moved window/group actually held it;
+            // shifting an unfocused column away must leave the focused window alone.
+            if focused.is_none_or(|focused| moving_entities.contains(&focused)) {
+                commands.focus_entity(neighbour, false);
+            }
 
             // Force position change on the hidden strip, so it hides the moved window.
-            if let Ok(mut position) = workspaces
-                .get_mut(target_entity)
-                .map(|(_, _, pos, _, _)| pos)
-            {
+            if let Ok(mut position) = workspaces.get_mut(target_entity).map(|(_, _, pos, ..)| pos) {
                 position.set_changed();
             }
         } else {
             let previous_position = workspaces
                 .get_mut(target_entity)
                 .ok()
-                .and_then(|(_, _, _, _, previos_pos)| previos_pos);
+                .and_then(|(_, _, _, _, _, previous_pos, _)| previous_pos);
             if let Some(mut previous) = previous_position {
                 previous.focus = Some(window_entity);
             }

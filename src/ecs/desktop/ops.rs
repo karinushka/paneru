@@ -3,9 +3,10 @@
 use std::collections::HashSet;
 
 use bevy::ecs::entity::Entity;
+use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, Without};
-use bevy::ecs::system::{Commands, NonSendMut, Query, ResMut, SystemParam};
+use bevy::ecs::query::{Has, With, Without};
+use bevy::ecs::system::{Commands, NonSendMut, Query, Res, ResMut, SystemParam};
 use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
@@ -14,13 +15,17 @@ use super::{
     exec_bridge_op, select_desktop_strip, spawn_desktop_strip,
 };
 use crate::commands::{Command, DesktopOperation, DesktopTarget, Direction, MoveFocus};
+use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{
+    DisplayViewports, LayoutStrip, compensate_left_removal, remove_left_column_width,
+};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, OpenedFrom, SelectedVirtualMarker,
-    SpawnCommandsExt as _, Unmanaged, Window,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, FocusedMarker, ManualStripOffset, OpenedFrom,
+    Position, RepositionMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt as _, Unmanaged,
+    Window,
 };
 use crate::events::Event;
 use crate::manager::Display;
@@ -42,16 +47,81 @@ pub(super) type DesktopStrips<'w, 's> = Query<
     Without<Window>,
 >;
 
+type DesktopStripOffsets<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Position,
+        Option<&'static mut RepositionMarker>,
+        Option<&'static mut Scrolling>,
+        Option<&'static ChildOf>,
+        Has<ManualStripOffset>,
+    ),
+    (With<LayoutStrip>, Without<Window>),
+>;
+
 #[derive(SystemParam)]
 pub(super) struct DesktopOpWorld<'w, 's> {
     pub(super) displays: Query<'w, 's, (Entity, &'static Display, Has<ActiveDisplayMarker>)>,
+    pub(super) display_viewports: DisplayViewports<'w, 's>,
     pub(super) strips: DesktopStrips<'w, 's>,
+    pub(super) strip_offsets: DesktopStripOffsets<'w, 's>,
     pub(super) windows: Windows<'w, 's>,
     pub(super) opened_from: Query<'w, 's, &'static OpenedFrom>,
     pub(super) focus_history: Option<ResMut<'w, FocusHistory>>,
     pub(super) pending: ResMut<'w, PendingDesktopOps>,
     pub(super) census: ResMut<'w, DesktopCensus>,
+    pub(super) config: Res<'w, Config>,
     pub(super) commands: Commands<'w, 's>,
+}
+
+impl DesktopOpWorld<'_, '_> {
+    /// Removes `entities` from every strip other than `skip_strip`, shifting an
+    /// active strip's origin rightward when a column strictly left of focus
+    /// leaves it so the focused window stays at the same screen `x`.
+    pub(super) fn remove_from_strips_preserving_focus(
+        &mut self,
+        entities: &[Entity],
+        skip_strip: Option<Entity>,
+    ) {
+        let focused = self.windows.focused().map(|(_, focused)| focused);
+        for (strip_entity, mut strip, previous, active, _) in &mut self.strips {
+            if Some(strip_entity) == skip_strip {
+                continue;
+            }
+            let effective_focused = (active && previous.is_none()).then_some(focused).flatten();
+            for &entity in entities {
+                if !strip.contains(entity) {
+                    continue;
+                }
+                if let Some(removed_width) =
+                    remove_left_column_width(&mut strip, entity, effective_focused, &self.windows)
+                    && let Ok((
+                        mut position,
+                        mut reposition,
+                        mut scrolling,
+                        child_of,
+                        has_manual_offset,
+                    )) = self.strip_offsets.get_mut(strip_entity)
+                    && let Some(viewport_min_x) = child_of
+                        .and_then(|parent| self.display_viewports.get(parent.parent()).ok())
+                        .map(|(display, dock)| {
+                            display.actual_display_bounds(dock, &self.config).min.x
+                        })
+                {
+                    compensate_left_removal(
+                        removed_width,
+                        &mut position,
+                        reposition.as_deref_mut(),
+                        scrolling.as_deref_mut(),
+                        has_manual_offset,
+                        viewport_min_x,
+                        &self.config,
+                    );
+                }
+            }
+        }
+    }
 }
 
 /// Resolves a [`DesktopTarget`] against `census`.
@@ -398,14 +468,11 @@ fn apply_relocation_plan(
         raw_dest,
     );
 
-    for (entity, mut strip, _, _, _) in &mut world.strips {
-        if Some(entity) == existing_dest {
-            strip.append_relocation_group(focused_entity, plan.group.as_ref());
-        } else if plan.moving_entities.iter().any(|&m| strip.contains(m)) {
-            for &moving in &plan.moving_entities {
-                strip.remove(moving);
-            }
-        }
+    world.remove_from_strips_preserving_focus(&plan.moving_entities, existing_dest);
+    if let Some(dest_entity) = existing_dest
+        && let Ok((_, mut strip, ..)) = world.strips.get_mut(dest_entity)
+    {
+        strip.append_relocation_group(focused_entity, plan.group.as_ref());
     }
 
     if existing_dest.is_none() {

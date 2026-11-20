@@ -1254,20 +1254,15 @@ impl OneOrMore {
         }
     }
 
-    fn all_mut(&mut self) -> Vec<&mut Keybinding> {
+    fn retain(&mut self, mut keep: impl FnMut(&mut Keybinding) -> bool) {
         match self {
-            OneOrMore::Single(one) => vec![one],
-            OneOrMore::Multiple(many) => many.iter_mut().collect::<Vec<_>>(),
+            OneOrMore::Single(one) => {
+                if !keep(one) {
+                    *self = OneOrMore::Multiple(Vec::new());
+                }
+            }
+            OneOrMore::Multiple(many) => many.retain_mut(keep),
         }
-    }
-
-    fn retain(&mut self, keep: impl FnMut(&mut Keybinding) -> bool) {
-        let mut many = match std::mem::replace(self, OneOrMore::Multiple(Vec::new())) {
-            OneOrMore::Single(one) => vec![one],
-            OneOrMore::Multiple(many) => many,
-        };
-        many.retain_mut(keep);
-        *self = OneOrMore::Multiple(many);
     }
 }
 
@@ -1344,18 +1339,18 @@ impl InnerConfig {
 
         for (command, bindings) in &mut config.bindings {
             let argv = command.split('_').collect::<Vec<_>>();
-            for binding in bindings.all_mut() {
-                binding.command = parse_command(&argv)?;
-            }
+            let parsed = parse_command(&argv)?;
+            let fn_name = function_name!();
             // An unresolved binding keeps the deserialized code 0, which is
             // the A key, so it must go.
             bindings.retain(|binding| {
                 if let Some(code) = keycode_for_key_name(&binding.key, virtual_keys) {
                     binding.code = code;
+                    binding.command = parsed.clone();
                     info!("bind: {binding:?}");
                     true
                 } else {
-                    error!("{}: invalid key '{}'", function_name!(), &binding.key);
+                    error!("{fn_name}: invalid key '{}'", &binding.key);
                     false
                 }
             });
@@ -3118,6 +3113,16 @@ window_focus_east = "ctrl+alt-rigtharrow"
             crate::commands::Direction::West
         ))),
         "the valid chords of the same command must still bind"
+    );
+}
+
+#[test]
+fn test_unknown_command_with_no_keys_is_rejected() {
+    let virtual_keys = test_virtual_keymap();
+    assert!(
+        InnerConfig::parse_config_with_virtual_keys("[bindings]\nbogus_cmd = []\n", &virtual_keys)
+            .is_err(),
+        "an unknown command name must be rejected even with no keys"
     );
 }
 

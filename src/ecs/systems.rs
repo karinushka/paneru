@@ -1439,14 +1439,17 @@ pub(super) fn update_tab_indicators(
 
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_position(
-    mut moved_windows: Populated<(&mut Window, &Position), Changed<Position>>,
+    drag: Res<crate::ecs::drag::WindowDrag>,
+    mut moved_windows: Populated<(Entity, &mut Window, &Position), Changed<Position>>,
 ) {
     // `par_iter_mut` runs on `ComputeTaskPool` worker threads, which have no
     // `CFRunLoop` of their own to drain thread-local autorelease pools.
     moved_windows
         .par_iter_mut()
-        .for_each(|(mut window, position)| {
-            objc2::rc::autoreleasepool(|_| window.reposition(position.0));
+        .for_each(|(entity, mut window, position)| {
+            if !drag.holds(entity) {
+                objc2::rc::autoreleasepool(|_| window.reposition(position.0));
+            }
         });
 }
 
@@ -1482,6 +1485,7 @@ pub(super) fn verify_window_position(
 /// display.
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn commit_window_size(
+    drag: Res<crate::ecs::drag::WindowDrag>,
     active_display: ActiveDisplay,
     strips: Query<(&LayoutStrip, &ChildOf)>,
     displays: Query<&Display>,
@@ -1505,6 +1509,9 @@ pub(super) fn commit_window_size(
     resized_windows
         .par_iter_mut()
         .for_each(|(entity, mut window, size, mut width_ratio)| {
+            if drag.holds(entity) {
+                return;
+            }
             let width = widths.get(&entity).copied().unwrap_or(fallback);
             width_ratio.0 = f64::from(size.0.x) / f64::from(width);
             objc2::rc::autoreleasepool(|_| window.resize(size.0));

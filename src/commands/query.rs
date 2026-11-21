@@ -784,6 +784,7 @@ mod tests {
                 PaneruEvent::ThemeChanged,
                 PaneruEvent::MouseUp {
                     point: objc2_core_foundation::CGPoint::default(),
+                    button: crate::events::MouseButton::Left,
                     modifiers: crate::platform::Modifiers::empty(),
                 },
             ]

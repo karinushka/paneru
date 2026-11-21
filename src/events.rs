@@ -44,6 +44,12 @@ pub type Reply = async_channel::Sender<Response>;
 #[derive(Clone, Debug, Message)]
 pub struct InputEvent(pub Event);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MouseButton {
+    Left,
+    Right,
+}
+
 /// Overview commands, gestures, capture completions, and environment changes
 /// that invalidate an open overview, republished on their own stream by
 /// [`demux_input_events`](crate::ecs::systems::demux_input_events) so
@@ -128,17 +134,22 @@ pub enum Event {
     MouseDown {
         point: CGPoint,
         modifiers: Modifiers,
+        button: MouseButton,
     },
     /// A mouse up event has occurred.
     MouseUp {
         point: CGPoint,
         modifiers: Modifiers,
+        button: MouseButton,
     },
     /// A mouse drag event has occurred.
     MouseDragged {
         point: CGPoint,
         modifiers: Modifiers,
+        button: MouseButton,
     },
+    /// Escape was pressed during a tiled title-bar drag.
+    CancelDrag,
     /// A mouse move event has occurred.
     MouseMoved {
         point: CGPoint,
@@ -295,6 +306,7 @@ impl Event {
                 | Event::MouseUp { .. }
                 | Event::MouseDragged { .. }
                 | Event::MouseMoved { .. }
+                | Event::CancelDrag
                 | Event::Swipe { .. }
                 | Event::VerticalSwipe { .. }
                 | Event::VerticalScrollTick { .. }

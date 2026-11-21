@@ -482,17 +482,30 @@ fn migrate_moved_windows_to_space(
         return;
     }
 
-    let mut source_groups: Vec<(Entity, WorkspaceId, u32, EntityHashSet)> = world
-        .query::<(Entity, &LayoutStrip, Has<NativeFullscreenMarker>)>()
+    let mut source_strips = world.query::<(
+        Entity,
+        &LayoutStrip,
+        Has<NativeFullscreenMarker>,
+        Has<ChildOf>,
+    )>();
+    let mut transit = world.query::<&super::drag::ColumnInTransit>();
+    let in_transit: Vec<_> = transit.iter(world).collect();
+    let drag = world.get_resource::<super::drag::WindowDrag>();
+    let mut source_groups: Vec<(Entity, WorkspaceId, u32, EntityHashSet)> = source_strips
         .iter(world)
-        .filter_map(|(src_entity, src_strip, fullscreen)| {
+        .filter_map(|(src_entity, src_strip, fullscreen, attached)| {
             if fullscreen || src_strip.id() == target_space_id {
                 return None;
             }
             let matching: EntityHashSet = src_strip
                 .all_windows()
                 .into_iter()
-                .filter(|entity| moved_entities.contains(entity))
+                .filter(|&entity| {
+                    moved_entities.contains(&entity)
+                        && (!attached
+                            || !(drag.is_some_and(|drag| drag.carries(entity))
+                                || in_transit.iter().any(|column| column.contains(entity))))
+                })
                 .flat_map(|entity| src_strip.tab_group(entity).unwrap_or_else(|| vec![entity]))
                 .collect();
             (!matching.is_empty()).then_some((

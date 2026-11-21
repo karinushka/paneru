@@ -551,6 +551,40 @@ pub struct LayoutStrip {
 }
 
 impl LayoutStrip {
+    /// Move a column within this strip, preserving its stack and active tab.
+    pub(crate) fn move_column(&mut self, from: usize, to: usize) {
+        if from != to
+            && to < self.columns.len()
+            && let Some(column) = self.columns.remove(from)
+        {
+            self.columns.insert(to, column);
+        }
+    }
+
+    /// Move a whole column and its active-tab mapping between strips.
+    pub(crate) fn transfer_column(&mut self, to: &mut Self, from: usize, slot: usize) -> bool {
+        let Some(column) = self.columns.get(from) else {
+            return false;
+        };
+        if self.is_fullscreen()
+            || to.is_fullscreen()
+            || slot > to.len()
+            || column.window_iter().any(|entity| to.contains(entity))
+        {
+            return false;
+        }
+        let Some(column) = self.columns.remove(from) else {
+            return false;
+        };
+        for entity in column.window_iter() {
+            if let Some(active) = self.tabbed_stacks.remove(&entity) {
+                to.tabbed_stacks.insert(entity, active);
+            }
+        }
+        to.columns.insert(slot, column);
+        true
+    }
+
     pub fn new(id: WorkspaceId, virtual_index: u32) -> Self {
         Self {
             id,
@@ -2025,6 +2059,7 @@ fn insert_strip_window_contexts(
 /// the layout strip against the current display viewport.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
+    drag: Res<crate::ecs::drag::WindowDrag>,
     positioned_windows: RepositionedWindows,
     workspaces: StripsForWindowPositioning,
     snap_guards: Query<&SnapStripMarker>,
@@ -2053,6 +2088,9 @@ fn position_layout_windows(
     for (entity, window, layout_position, mut position, mut bounds, resize, was_parked_tab) in
         positioned_windows
     {
+        if drag.holds(entity) {
+            continue;
+        }
         let Some(context) = strip_contexts.get(&entity) else {
             continue;
         };

@@ -5397,8 +5397,403 @@ fn swipe_ignores_stale_entity_at_strip_end() {
         .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
         .single(world)
         .expect("active strip");
-    assert_ne!(
-        position.0.x, initial_x,
-        "a stale entity at the strip end must not block horizontal scrolling"
+    assert!(
+        position.0.x < initial_x,
+        "a stale entity at the strip end must not block horizontal scrolling (initial={initial_x}, got={})",
+        position.0.x
+    );
+}
+
+#[test]
+fn swipe_clamps_to_second_live_column_with_stale_leading_or_second_entry() {
+    use crate::ecs::LayoutPosition;
+
+    for insert_index in [0usize, 1] {
+        let config: Config = (
+            MainOptions {
+                swipe_gesture_fingers: Some(3),
+                continuous_swipe: Some(true),
+                auto_center: Some(false),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        harness.advance(Duration::from_millis(40));
+
+        let second_live = find_window_entity(1, harness.world());
+        let second_live_x = harness
+            .world()
+            .get::<LayoutPosition>(second_live)
+            .expect("second live window layout position")
+            .0
+            .x;
+
+        let stale = harness.world().spawn_empty().id();
+        harness.world().entity_mut(stale).despawn();
+        {
+            let world = harness.world();
+            let mut strip = world
+                .query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>()
+                .single_mut(world)
+                .expect("active strip");
+            strip.insert_at(insert_index, stale);
+        }
+
+        // Negative delta under default Natural direction swipes the strip far
+        // rightward, hitting the continuous_swipe right-snap clamp bound.
+        let world = harness.world();
+        world.write_message::<Event>(Event::TouchpadDown);
+        world.write_message::<Event>(Event::Swipe {
+            delta: -2.0,
+            fingers: 3,
+            distance_cm: 0.0,
+            elapsed_secs: Some(0.016),
+        });
+        harness.advance(Duration::from_millis(20));
+
+        let world = harness.world();
+        let strip_x = world
+            .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+            .single(world)
+            .expect("active strip")
+            .0
+            .x;
+        let expected = TEST_DISPLAY_WIDTH - second_live_x;
+        assert_eq!(
+            strip_x, expected,
+            "stale entity at index {insert_index} must clamp continuous swipe to the second live column"
+        );
+    }
+}
+
+#[test]
+fn swipe_non_continuous_ignores_stale_entity_at_strip_end() {
+    use crate::ecs::{Bounds, LayoutPosition};
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(false),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.advance(Duration::from_millis(40));
+
+    let last_live = find_window_entity(2, harness.world());
+    let total_live_width = {
+        let world = harness.world();
+        let x = world
+            .get::<LayoutPosition>(last_live)
+            .expect("last live layout position")
+            .0
+            .x;
+        let width = world
+            .get::<Bounds>(last_live)
+            .expect("last live bounds")
+            .0
+            .x;
+        x + width
+    };
+
+    let stale = harness.world().spawn_empty().id();
+    harness.world().entity_mut(stale).despawn();
+    {
+        let world = harness.world();
+        let mut strip = world
+            .query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single_mut(world)
+            .expect("active strip");
+        strip.append(stale);
+    }
+
+    let world = harness.world();
+    world.write_message::<Event>(Event::TouchpadDown);
+    world.write_message::<Event>(Event::Swipe {
+        delta: 2.0,
+        fingers: 3,
+        distance_cm: 0.0,
+        elapsed_secs: Some(0.016),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    let world = harness.world();
+    let strip_x = world
+        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip")
+        .0
+        .x;
+    assert_eq!(
+        strip_x,
+        TEST_DISPLAY_WIDTH - total_live_width,
+        "non-continuous swipe must clamp to the last live column width past a trailing stale entry"
+    );
+}
+
+#[test]
+fn swipe_prefers_active_tab_over_narrower_parked_tab() {
+    use crate::ecs::{Bounds, LayoutPosition};
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(false),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(4);
+    harness.advance(Duration::from_millis(40));
+
+    let parked_top = find_window_entity(2, harness.world());
+    let active_tab = find_window_entity(3, harness.world());
+    {
+        let world = harness.world();
+        let mut strip = world
+            .query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single_mut(world)
+            .expect("active strip");
+        strip.stack(active_tab).expect("stack onto column 2");
+        strip.toggle_tabbed_display(active_tab);
+    }
+    harness.advance(Duration::from_millis(40));
+
+    let expected_total_width = {
+        let world = harness.world();
+        let x = world
+            .get::<LayoutPosition>(active_tab)
+            .expect("active tab layout position")
+            .0
+            .x;
+        let width = world
+            .get::<Bounds>(active_tab)
+            .expect("active tab bounds")
+            .0
+            .x;
+        x + width
+    };
+    assert!(
+        expected_total_width > TEST_DISPLAY_WIDTH,
+        "setup requires a scrollable strip"
+    );
+
+    // Start scrolling so `Scrolling` is present on the strip before the
+    // parked-tab undershoot check runs in the next single frame.
+    {
+        let world = harness.world();
+        world.write_message::<Event>(Event::TouchpadDown);
+        world.write_message::<Event>(Event::Swipe {
+            delta: 0.01,
+            fingers: 3,
+            distance_cm: 0.0,
+            elapsed_secs: Some(0.016),
+        });
+    }
+    harness.advance(Duration::from_millis(20));
+
+    // Simulate macOS undershooting a parked off-screen tab's width.
+    // `UpdateSet::Input` clamps using `clamp_viewport_offset` before
+    // `UpdateSet::Layout` reconciles sizes in this frame.
+    {
+        let world = harness.world();
+        world
+            .get_mut::<Bounds>(parked_top)
+            .expect("parked tab bounds")
+            .0
+            .x = 100;
+        world.write_message::<Event>(Event::Swipe {
+            delta: 2.0,
+            fingers: 3,
+            distance_cm: 0.0,
+            elapsed_secs: Some(0.016),
+        });
+    }
+    harness.app.update();
+
+    let world = harness.world();
+    let strip_x = world
+        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip")
+        .0
+        .x;
+    assert_eq!(
+        strip_x,
+        TEST_DISPLAY_WIDTH - expected_total_width,
+        "tabbed column scroll bounds must prefer the active tab over a narrower parked tab"
+    );
+}
+
+#[test]
+fn swipe_falls_back_past_stale_stack_top() {
+    use crate::ecs::layout::{Column, StackItem};
+    use crate::ecs::{Bounds, LayoutPosition};
+
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(false),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.advance(Duration::from_millis(40));
+
+    let last_live = find_window_entity(2, harness.world());
+    let expected_total_width = {
+        let world = harness.world();
+        let x = world
+            .get::<LayoutPosition>(last_live)
+            .expect("last live layout position")
+            .0
+            .x;
+        let width = world
+            .get::<Bounds>(last_live)
+            .expect("last live bounds")
+            .0
+            .x;
+        x + width
+    };
+
+    let stale = harness.world().spawn_empty().id();
+    harness.world().entity_mut(stale).despawn();
+    {
+        let world = harness.world();
+        let mut strip = world
+            .query_filtered::<&mut LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single_mut(world)
+            .expect("active strip");
+        let last_col = strip.get_column_mut(2).expect("third column");
+        *last_col = Column::Stack(vec![StackItem::Single(stale), StackItem::Single(last_live)]);
+    }
+
+    let world = harness.world();
+    world.write_message::<Event>(Event::TouchpadDown);
+    world.write_message::<Event>(Event::Swipe {
+        delta: 2.0,
+        fingers: 3,
+        distance_cm: 0.0,
+        elapsed_secs: Some(0.016),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    let world = harness.world();
+    let strip_x = world
+        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip")
+        .0
+        .x;
+    assert_eq!(
+        strip_x,
+        TEST_DISPLAY_WIDTH - expected_total_width,
+        "stack with a stale top entry must fall back to its surviving member for scroll bounds"
+    );
+}
+
+#[test]
+fn reshuffle_enforces_edge_invariant_with_stale_entity_at_strip_end() {
+    use crate::ecs::{Bounds, LayoutPosition, ReshuffleAroundMarker};
+
+    let config: Config = (
+        MainOptions {
+            auto_center: Some(false),
+            animation_speed: Some(30.0),
+            continuous_swipe: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.advance(Duration::from_millis(40));
+
+    let middle = find_window_entity(1, harness.world());
+    let last_live = find_window_entity(2, harness.world());
+    let total_live_width = {
+        let world = harness.world();
+        let x = world
+            .get::<LayoutPosition>(last_live)
+            .expect("last live layout position")
+            .0
+            .x;
+        let width = world
+            .get::<Bounds>(last_live)
+            .expect("last live bounds")
+            .0
+            .x;
+        x + width
+    };
+    let expected_min_x = TEST_DISPLAY_WIDTH - total_live_width;
+
+    // Append a stale trailing entity and pull the strip further left than the
+    // right-edge invariant allows, leaving an empty gap on the right.
+    let stale = harness.world().spawn_empty().id();
+    harness.world().entity_mut(stale).despawn();
+    {
+        let world = harness.world();
+        let (strip_entity, mut strip, mut position) = world
+            .query_filtered::<(Entity, &mut LayoutStrip, &mut Position), With<ActiveWorkspaceMarker>>()
+            .single_mut(world)
+            .expect("active strip");
+        strip.append(stale);
+        position.0.x = expected_min_x - 120;
+        world.entity_mut(strip_entity).remove::<RepositionMarker>();
+        // Middle window is already fully on screen at this offset, so only the
+        // right-edge invariant pulls the strip back to `expected_min_x`.
+        world.entity_mut(middle).insert(ReshuffleAroundMarker);
+    }
+
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    let strip_x = world
+        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip")
+        .0
+        .x;
+    assert_eq!(
+        strip_x, expected_min_x,
+        "reshuffle must enforce the right-edge invariant past a trailing stale entry"
+    );
+}
+
+#[test]
+fn window_removal_clears_despawned_entity_from_all_strips() {
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.advance(Duration::from_millis(40));
+
+    let target = find_window_entity(1, harness.world());
+    let duplicate_strip = {
+        let world = harness.world();
+        let mut extra = LayoutStrip::new(99, 1);
+        extra.append(target);
+        world.spawn((extra, Position(Origin::ZERO))).id()
+    };
+
+    harness.world().entity_mut(target).despawn();
+
+    let world = harness.world();
+    let remaining: Vec<_> = world
+        .query::<(Entity, &LayoutStrip)>()
+        .iter(world)
+        .filter(|(_, strip)| strip.contains(target))
+        .map(|(entity, _)| entity)
+        .collect();
+    assert!(
+        remaining.is_empty(),
+        "despawning a window must remove it from every strip (duplicate_strip={duplicate_strip:?}, still present in {remaining:?})"
     );
 }

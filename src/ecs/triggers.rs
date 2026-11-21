@@ -1706,15 +1706,14 @@ pub(super) fn window_removal_trigger(
         .then(|| windows.focused().map(|(_, focused)| focused))
         .flatten();
 
-    if let Some(mut item) = workspaces
-        .iter_mut()
-        .find(|item| item.strip.contains(entity))
-    {
-        debug!(
-            "Removing despawned entity {entity} from strip {}",
-            item.strip.id()
-        );
-        item.remove_preserving_focus(entity, focused, &windows, &displays, &config);
+    for mut item in &mut workspaces {
+        if item.strip.contains(entity) {
+            debug!(
+                "Removing despawned entity {entity} from strip {}",
+                item.strip.id()
+            );
+            item.remove_preserving_focus(entity, focused, &windows, &displays, &config);
+        }
     }
 }
 

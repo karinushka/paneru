@@ -1156,6 +1156,21 @@ impl LayoutStrip {
         self.columns.iter()
     }
 
+    /// Resolves a value for `column` by preferring its landing entity (the
+    /// active tab for a tabbed-display stack, otherwise `top()`), falling back
+    /// to the first member in `column` for which `resolve` returns `Some`.
+    pub fn resolve_column<T>(
+        &self,
+        column: &Column,
+        mut resolve: impl FnMut(Entity) -> Option<T>,
+    ) -> Option<T> {
+        column
+            .top()
+            .map(|entity| self.landing_entity(entity))
+            .and_then(&mut resolve)
+            .or_else(|| column.window_iter().find_map(resolve))
+    }
+
     #[instrument(level = Level::TRACE, skip_all, fields(layout_strip_height))]
     pub fn relative_positions<W>(
         &self,
@@ -1826,18 +1841,19 @@ pub(super) fn reshuffle_layout_strip(
         // Enforce the edge invariant when auto-center is off: the leftmost
         // window must touch the left edge and the rightmost the right edge
         // if more than 1 windows in workspace.
+        let column_right_edge = |entity| {
+            windows
+                .layout_position(entity)
+                .zip(windows.moving_frame(entity))
+                .map(|(position, frame)| position.0.x + frame.width())
+        };
         if !config.auto_center()
             && !config.continuous_swipe()
             && let Some(total_strip_width) = ctx
                 .strip
-                .last()
-                .and_then(|last| {
-                    windows
-                        .layout_position(last)
-                        .map(|position| position.0.x)
-                        .zip(windows.moving_frame(last).map(|frame| frame.width()))
-                })
-                .map(|(last_x, last_width)| last_x + last_width)
+                .columns()
+                .rev()
+                .find_map(|column| ctx.strip.resolve_column(column, column_right_edge))
         {
             strip_position.x = if display_bounds.width() < total_strip_width {
                 strip_position.x.clamp(
@@ -3603,6 +3619,57 @@ mod tests {
         assert_eq!(
             shift_origin_after_left_removal(-2420, 500, -1920, true),
             -1920
+        );
+    }
+
+    #[test]
+    fn test_resolve_column_prefers_active_tab_and_skips_stale_members() {
+        let mut world = World::new();
+        let tab_top = world.spawn_empty().id();
+        let tab_active = world.spawn_empty().id();
+        let stack_stale = world.spawn_empty().id();
+        let stack_live = world.spawn_empty().id();
+        let native_stale = world.spawn_empty().id();
+        let native_live = world.spawn_empty().id();
+        let single_stale = world.spawn_empty().id();
+
+        let mut strip = LayoutStrip::default();
+        strip.append_tabbed_stack(&[tab_top, tab_active], tab_active);
+        strip.append(stack_stale);
+        strip.append(stack_live);
+        strip.stack(stack_live).unwrap();
+        strip.append_tab_group(&[native_stale, native_live]);
+        strip.append(single_stale);
+
+        let columns: Vec<_> = strip.columns().collect();
+
+        // Tabbed-display stack: prefers the active tab even when `top()` also resolves.
+        let resolved = strip.resolve_column(columns[0], |entity| match entity {
+            e if e == tab_top => Some(100),
+            e if e == tab_active => Some(400),
+            _ => None,
+        });
+        assert_eq!(resolved, Some(400));
+
+        // Tabbed-display stack: falls back to a surviving member when the active tab is stale.
+        let resolved =
+            strip.resolve_column(columns[0], |entity| (entity == tab_top).then_some(100));
+        assert_eq!(resolved, Some(100));
+
+        // Plain stack: falls back to a lower member when `top()` is stale.
+        let resolved =
+            strip.resolve_column(columns[1], |entity| (entity == stack_live).then_some(250));
+        assert_eq!(resolved, Some(250));
+
+        // Native tab group: falls back to a surviving tab when `top()` is stale.
+        let resolved =
+            strip.resolve_column(columns[2], |entity| (entity == native_live).then_some(300));
+        assert_eq!(resolved, Some(300));
+
+        // Single stale column: resolves to None so callers skip it.
+        assert_eq!(
+            strip.resolve_column(columns[3], |_| Option::<i32>::None),
+            None
         );
     }
 }

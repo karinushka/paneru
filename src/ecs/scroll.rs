@@ -15,7 +15,7 @@ use tracing::{Level, instrument};
 use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::{SwipeGestureDirection, focus_direction};
-use crate::ecs::layout::{Column, LayoutStrip};
+use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, PreUpdateSet,
@@ -668,13 +668,7 @@ where
             .zip(get_window_frame(entity))
             .map(|(position, frame)| (position.x, position.x + frame.width()))
     };
-    let live_column = |column: &Column| {
-        column
-            .top()
-            .map(|entity| layout_strip.active_tab(entity).unwrap_or(entity))
-            .and_then(geometry)
-            .or_else(|| column.window_iter().find_map(geometry))
-    };
+    let live_column = |column| layout_strip.resolve_column(column, geometry);
     let (left_snap, total_strip_width) = layout_strip.columns().rev().find_map(live_column)?;
 
     Some(

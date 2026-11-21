@@ -1,8 +1,9 @@
 use accessibility_sys::{
     AXUIElementCreateApplication, AXUIElementRef, AXValueCreate, AXValueGetValue,
-    kAXErrorAttributeUnsupported, kAXErrorNoValue, kAXErrorSuccess, kAXFloatingWindowSubrole,
-    kAXPositionAttribute, kAXRaiseAction, kAXSizeAttribute, kAXStandardWindowSubrole,
-    kAXUnknownRole, kAXUnknownSubrole, kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
+    kAXErrorAttributeUnsupported, kAXErrorInvalidUIElement, kAXErrorNoValue, kAXErrorSuccess,
+    kAXFloatingWindowSubrole, kAXPositionAttribute, kAXRaiseAction, kAXRoleAttribute,
+    kAXSizeAttribute, kAXStandardWindowSubrole, kAXUnknownRole, kAXUnknownSubrole,
+    kAXValueTypeCGPoint, kAXValueTypeCGSize, kAXWindowRole,
 };
 use bevy::ecs::component::Component;
 use bevy::math::IRect;
@@ -347,6 +348,11 @@ fn decode_enhanced_ui_read(ax_error: OSStatus, value: Option<bool>) -> Result<En
             .to_result("read AXEnhancedUserInterface")
             .map(|()| EnhancedUiFlag::Disabled)
     }
+}
+
+/// Only an invalid AX element proves a window is gone; a busy app does not.
+fn alive_after_role_read(ax_error: OSStatus) -> bool {
+    ax_error != kAXErrorInvalidUIElement
 }
 
 fn read_enhanced_ui(app_element: &CFRetained<AXUIWrapper>) -> Result<EnhancedUiFlag> {
@@ -941,10 +947,18 @@ impl WindowApi for WindowOS {
     /// cache. `Self::role` keeps returning its stored value after the window
     /// is gone, so it always looks alive; only a fresh read fails once the
     /// AX element is torn down. Don't "simplify" this to `self.role().is_ok()`.
-    /// Every window has a role, so a failed read means the element is gone
-    /// rather than that an attribute is missing.
+    /// Every window has a role, so a read AX answers with an invalid element
+    /// means the element is gone; any other failure is AX not answering.
     fn is_alive(&self) -> bool {
-        self.ax_element.role().is_ok()
+        let name = CFString::from_static_str(kAXRoleAttribute);
+        let mut attribute: *mut CFType = null_mut();
+        let ax_error = unsafe {
+            AXUIElementCopyAttributeValue(self.ax_element.as_ptr(), &name, &mut attribute)
+        };
+        if let Some(ptr) = NonNull::new(attribute) {
+            drop(unsafe { CFRetained::<CFType>::from_raw(ptr) });
+        }
+        alive_after_role_read(ax_error)
     }
 
     #[instrument(level = Level::DEBUG, ret)]
@@ -1670,6 +1684,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(acquired, EnhancedUiAcquired::Unsupported);
+    }
+
+    #[test]
+    fn only_an_invalid_element_is_a_closed_window() {
+        assert!(!alive_after_role_read(kAXErrorInvalidUIElement));
+        assert!(alive_after_role_read(kAXErrorSuccess));
+        assert!(alive_after_role_read(
+            accessibility_sys::kAXErrorCannotComplete
+        ));
+        assert!(alive_after_role_read(
+            accessibility_sys::kAXErrorAPIDisabled
+        ));
     }
 
     #[test]

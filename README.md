@@ -2,12 +2,11 @@
   <img src="./images/paneru.png" alt="Paneru" width="600"/>
 </div>
 
-##
-A sliding, tiling window manager for MacOS.
+A sliding, tiling window manager for macOS.
 
 ## About
 
-Paneru is a MacOS window manager that arranges windows on an infinite strip,
+Paneru is a macOS window manager that arranges windows on an infinite strip,
 extending to the right. A core principle is that opening a new window will
 **never** cause existing windows to resize, maintaining your layout stability.
 
@@ -24,32 +23,46 @@ https://github.com/user-attachments/assets/793e7eaa-7909-4086-8380-1fb7861f8780
 
 ## Why Paneru?
 
-- **Niri-like Behavior on MacOS:** Inspired by the user experience of [Niri],
-  Paneru aims to bring a similar scrollable tiling workflow to MacOS.
-- **Works with MacOS workspaces:** You can use existing workspaces and switch
-  between them with keyboard or touchpad gestures - with a separate window strip
-  on each. Drag and dropping windows between them works as well.
-- **Virtual Workspaces (Experimental):** Group your windows into tasks by
-  stacking multiple horizontal strips (rows) within a single space. Use native
-  macOS workspaces for broad segregation (e.g., 'Work', 'Personal') and virtual
-  workspaces to stay organized within each context.
+- **Niri-like Behavior on macOS:** Inspired by the user experience of [Niri],
+  Paneru aims to bring a similar scrollable tiling workflow to macOS.
+- **Native macOS Spaces control:** Use existing macOS Spaces with an independent
+  window strip on each — switch instantly without slide animations, create,
+  destroy, reorder, or swap Spaces, move or pin windows across them, and
+  drag-and-drop windows between them.
+- **Virtual Workspaces:** Group your windows into tasks by stacking multiple
+  horizontal strips (rows) within a single space. Use native macOS workspaces
+  for broad segregation (e.g., 'Work', 'Personal') and virtual workspaces to
+  stay organized within each context.
+- **Workspace Overview:** Zoom out to a live-preview grid of all windows and
+  virtual workspaces via a four-finger touchpad swipe or the `overview` command,
+  with keyboard navigation and a dedicated shelf for floating windows.
 - **Menu bar workspace indicator:** Shows the currently active virtual
   workspace in the macOS menu bar.
-- **Copy Window Rule:** A menu bar entry that puts a ready-to-paste
-  `[windows]` configuration rule for the focused window on the clipboard, so
-  you never have to guess an app's bundle id.
 - **Startup session restore:** Restores managed window layouts, virtual
   workspaces, and display assignments from the last saved state when Paneru
   starts.
-- **Focus follows mouse on MacOS:** Very useful for people who would like to
+- **Focus follows mouse on macOS:** Very useful for people who would like to
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for
   navigation of the window pane.
-- **Title-bar reordering:** Drag a tiled window by its title bar to move its column within the strip or to another display.
-  The display under the pointer opens a slot in its visible strip.
-  Escape returns the column to its original slot.
+- **Title-bar reordering:** Drag a tiled window by its title bar to move its
+  column within the strip or to another display. The display under the pointer
+  opens a slot in its visible strip. Pressing Escape returns the column to its
+  original slot.
+- **Stacked & tabbed columns:** Stack windows vertically inside a column, or
+  switch any stack to tabbed display with visual tab indicators.
 - **Native macOS tabs support:** Applications like Ghostty use these, so
   Paneru manages them on the layout strip like other windows.
+- **Full Lua scripting:** Configure and automate window management using the
+  embedded Lua runtime (`init.lua`) or the loadable `paneru.so` module from
+  external scripts — see the **[Lua Scripting Guide](./SCRIPTING.md)**.
+- **JSON queries & event stream:** Query live state or stream status events as
+  JSON (`paneru query` / `paneru subscribe`) for menu bars and other macOS
+  tools — see the
+  **[Query & Subscribe Format](./QUERY_AND_SUBSCRIBE_FORMAT.md)**.
+- **Copy Window Rule:** A menu bar entry (and `window copyrule` command) that
+  puts a ready-to-paste window rule (TOML or Lua) for the focused window on the
+  clipboard, so you never have to guess an app's bundle id.
 - **Optimal for Large Displays:** Standard tiling window managers can be
   suboptimal for large displays, often resulting in either huge maximized
   windows or numerous tiny, unusable windows. Paneru addresses this by
@@ -62,8 +75,8 @@ https://github.com/user-attachments/assets/793e7eaa-7909-4086-8380-1fb7861f8780
 ## Inspiration
 
 The fundamental architecture and window management techniques are heavily
-inspired by [Yabai], another excellent MacOS window manager. Studying its
-source code has provided invaluable insights into managing windows on MacOS,
+inspired by [Yabai], another excellent macOS window manager. Studying its
+source code has provided invaluable insights into managing windows on macOS,
 particularly regarding undocumented functions.
 
 The innovative concept of managing windows on a sliding strip is directly
@@ -73,7 +86,7 @@ inspired by [Niri] and [PaperWM.spoon].
 
 ### Recommended System Options
 
-- Like all non-native window managers for MacOS, Paneru requires accessibility
+- Like all non-native window managers for macOS, Paneru requires accessibility
   access to move windows. Once it runs you may get a dialog window asking for
   permissions. Otherwise check the setting in System Settings under "Privacy &
   Security -> Accessibility" (or "Privacy & Security -> Device Control and Data
@@ -85,7 +98,7 @@ inspired by [Niri] and [PaperWM.spoon].
 - **Multiple displays**. Paneru is moving the windows off-screen, hiding them
   to the left or right. If you have multiple displays, for example your laptop
   open when docked to an external monitor you may experience weird behavior.
-  The issue is that when MacOS notices a window being moved too far off-screen
+  The issue is that when macOS notices a window being moved too far off-screen
   it will relocate it to a different display - which confuses Paneru! The
   solution is to change the spatial arrangement of your additional display -
   instead of having it to the left or right, move it above or below your main
@@ -104,13 +117,13 @@ inspired by [Niri] and [PaperWM.spoon].
 ### Installing from Crates.io
 
 Paneru is built using Rust's `cargo`. It can be installed directly from
-`crates.io` or if you need the latest version, by fetching the source from Github.
+`crates.io` or if you need the latest version, by fetching the source from GitHub.
 
 ```shell
 $ cargo install paneru
 ```
 
-### Installing from Github
+### Installing from GitHub
 
 ```shell
 $ git clone https://github.com/karinushka/paneru.git
@@ -151,23 +164,24 @@ $ brew install paneru
 
 ### Installing with Nix
 
-See [`nix/README.md`](/nix/README.md).
+See [`nix/README.md`](./nix/README.md).
 
 ### Configuration
 
-Paneru checks for configuration in following locations:
+Paneru checks for configuration in the following locations:
 
 - `$HOME/.paneru`
 - `$HOME/.paneru.toml`
 - `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
-Additionally it allows overriding the location with `$PANERU_CONFIG` environment variable.
+Additionally it allows overriding the location with the `$PANERU_CONFIG` environment variable.
 If none of these files exists, Paneru creates
 `$XDG_CONFIG_HOME/paneru/paneru.toml` with the built-in defaults on first launch.
 
-A Lua script (`$XDG_CONFIG_HOME/paneru/init.lua`, `$HOME/.paneru.lua`, or
-`$PANERU_LUA`) replaces the TOML rather than layering on top of it: when one
-exists, no `paneru.toml` is read, created, or watched.
+A Lua script (`$PANERU_LUA`, `$HOME/.paneru.lua`, or
+`$XDG_CONFIG_HOME/paneru/init.lua`, checked in that order) replaces the TOML
+rather than layering on top of it: when one exists, no `paneru.toml` is read,
+created, or watched.
 
 You can use the following basic configuration as a starting point. For a
 complete guide to all available options, keybindings, and window rules, see the
@@ -276,6 +290,7 @@ $ paneru send-cmd <command> [args...]
 | `window focus <direction\|number\|managed\|unmanaged>` | Move focus by direction, column number, managed or unmanaged |
 | `window swap <direction>`  | Swap the focused window with a neighbour         |
 | `window center`            | Center the focused window on screen              |
+| `window snap`              | Snap the focused window into the visible viewport |
 | `window resize`            | Cycle through `preset_column_widths`             |
 | `window grow`              | Grow to the next preset width                    |
 | `window shrink`            | Shrink to the previous preset width              |
@@ -284,19 +299,27 @@ $ paneru send-cmd <command> [args...]
 | `window vertical shrink`   | Shrink a stacked window to the previous preset height |
 | `window fullwidth`         | Toggle full-width mode for the focused window    |
 | `window manage`            | Toggle managed/floating state                    |
+| `window raise floating`    | Raise floating windows above tiled windows       |
+| `window togglefloatlayer`  | Toggle the floating layer above or below tiled windows |
 | `window equalize`          | Distribute equal heights in the focused stack    |
 | `window balance`           | Make all columns match the focused window width  |
 | `window stack`             | Stack the focused window onto its left neighbour |
 | `window unstack`           | Unstack the focused window into its own column   |
+| `window consume`           | Absorb the column to the right into the focused stack |
+| `window expel`             | Move the focused window out of its stack into a column to the right |
+| `window tabbeddisplay`     | Toggle tabbed display mode for the focused stack |
+| `window copyrule`          | Copy a window rule snippet for the focused window to the clipboard |
 | `window nextdisplay`       | Move the focused window to the next display      |
 | `window nextdisplaysend`   | Move the window to the next display but stay here |
 | `window displaymove <id>`  | Move the focused window to display `<id>`        |
 | `window displaysend <id>`  | Move the window to display `<id>` but stay here  |
-| `window virtual <dir>`     | Switch to the previous/next virtual workspace     |
+| `window virtual <dir\|n>`  | Switch to the previous/next or numbered virtual workspace |
+| `window virtualfocus <dir>` | Focus an adjacent stacked window, or switch virtual workspace at the stack edge |
 | `window virtualnum <n>`    | Switch directly to numbered virtual workspace    |
-| `window virtualmove <dir>` | Move the window to a different virtual workspace  |
+| `window virtualadd`        | Create and switch to a new virtual workspace     |
+| `window virtualmove <dir\|n>` | Move the window to a virtual workspace and follow it |
 | `window virtualmovenum <n>` | Move the window to numbered virtual workspace and follow it |
-| `window virtualsend <dir>` | Send the window to a virtual workspace but stay  |
+| `window virtualsend <dir\|n>` | Send the window to a virtual workspace but stay |
 | `window virtualsendnum <n>` | Send the window to numbered virtual workspace but stay |
 | `desktop focus <dir\|n>`   | Instantly switch native macOS Desktop/Space without slide animations |
 | `desktop move <dir\|n>`    | Move focused window (or tab group) to target Desktop and follow it |
@@ -308,12 +331,13 @@ $ paneru send-cmd <command> [args...]
 | `desktop pin <all\|dir\|n>` | Pin focused window across all or another Desktop (auto-floats) |
 | `desktop unpin`            | Collapse a pinned window back onto the active Desktop |
 | `desktop assign <all\|this\|none\|n>` | Ephemeral Dock-equivalent app Space assignment for focused app |
-| `window snap`              | Snap the focused window into the visible viewport |
 | `mouse nextdisplay`        | Warp the mouse pointer to the next display       |
 | `mouse display <id>`       | Warp the mouse pointer to display `<id>`         |
+| `overview`                 | Toggle the workspace overview                    |
+| `showmenu` / `hidemenu`    | Show or hide the Paneru menu bar icon            |
 | `printstate`               | Print the internal ECS state to the debug log    |
 | `quit`                     | Quit Paneru                                      |
-| `restart`                  | Restart the Paneru service                         |
+| `restart`                  | Restart the Paneru service                       |
 
 Where `<direction>` is one of: `west`, `east`, `north`, `south`, `first`, `last`.
 Window numbers are 1-based and count columns from left to right.
@@ -397,14 +421,6 @@ scripts, `cron` jobs, or other automation tools:
 - **Status bar integration.** Use `paneru query state --json` to render the
   initial workspace labels, then keep them current with `paneru subscribe --json`.
 
-
-## Future Enhancements
-
-- More commands for manipulating windows: finegrained size adjustments, touchpad resizing, etc.
-- Deeper scriptability building on the embedded Lua runtime, which already
-  supports full configuration (`paneru.setup`), event hooks (`paneru.on`),
-  keybindings (`paneru.bind`), and state queries — see the **[Lua Scripting Guide](./SCRIPTING.md)**.
-
 ## Communication
 
 There is a public Matrix room
@@ -440,8 +456,8 @@ Here are some other projects which implement a similar workflow:
 - [karousel]: scrollable tiling on top of KDE.
 - [papersway]: scrollable tiling on top of sway/i3.
 - [hyprscroller] and [hyprslidr]: scrollable tiling on top of Hyprland.
-- [PaperWM.spoon]: scrollable tiling for MacOS on top of HammerSpoon.
-- [Nehir]: scrollable tiling for MacOS
+- [PaperWM.spoon]: scrollable tiling for macOS on top of Hammerspoon.
+- [Nehir]: scrollable tiling for macOS.
 
 [Yabai]: https://github.com/koekeishiya/yabai
 [Niri]: https://github.com/YaLTeR/niri

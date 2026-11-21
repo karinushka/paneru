@@ -1152,7 +1152,7 @@ impl LayoutStrip {
         self.id
     }
 
-    pub fn columns(&self) -> impl Iterator<Item = &Column> {
+    pub fn columns(&self) -> impl DoubleEndedIterator<Item = &Column> {
         self.columns.iter()
     }
 

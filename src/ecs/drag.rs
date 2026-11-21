@@ -8,7 +8,7 @@ use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::query::{Has, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
-use bevy::ecs::system::{Commands, ParamSet, Query, Res, ResMut};
+use bevy::ecs::system::{Commands, ParamSet, Query, Res, ResMut, SystemParam};
 use bevy::math::IRect;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -222,139 +222,252 @@ type LandingGeometry<'w, 's> = (
     Query<'w, 's, &'static mut Bounds>,
 );
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+#[derive(SystemParam)]
+struct DragEnv<'w, 's> {
+    displays: Displays<'w, 's>,
+    desktops: Option<Res<'w, DesktopCensus>>,
+    manager: Res<'w, WindowManager>,
+    mission_control: Res<'w, MissionControlActive>,
+    overview: Option<Res<'w, crate::ecs::overview::OverviewPhase>>,
+    config: Res<'w, Config>,
+    mouse_held: Query<'w, 's, (Entity, &'static MouseHeldMarker)>,
+}
+
+impl DragEnv<'_, '_> {
+    fn drag_available(&self) -> bool {
+        !self.mission_control.0
+            && self
+                .overview
+                .as_deref()
+                .is_none_or(|phase| !phase.is_active())
+    }
+}
+
+enum StartResult {
+    Started,
+    Pending,
+    Abort,
+}
+
+struct DragSnapshot {
+    index: usize,
+    window_id: crate::platform::WinID,
+    frame: IRect,
+    parent_display: Entity,
+    parked: bool,
+    layout_moving: bool,
+    focused: bool,
+}
+
 fn reorder_column(
     mut state: ResMut<WindowDrag>,
     mut strips: DragStrips,
     windows: DragWindows,
     mut geometry: ParamSet<(Windows, LandingGeometry)>,
-    displays: Displays,
-    desktops: Option<Res<DesktopCensus>>,
-    manager: Res<WindowManager>,
-    mission_control: Res<MissionControlActive>,
-    overview: Option<Res<crate::ecs::overview::OverviewPhase>>,
-    config: Res<Config>,
-    mouse_held: Query<(Entity, &MouseHeldMarker)>,
+    env: DragEnv,
     mut commands: Commands,
 ) {
     let tap_flag = Arc::clone(&state.tap_flag);
     let Some(press) = state.press.as_mut() else {
         return;
     };
-    let Ok((strip, parent, _, moving, scrolling, parked, _, _)) = strips.get(press.strip) else {
+    let Some(snapshot) = read_drag_snapshot(press, &strips, &windows) else {
         finish(
             &mut state,
             &mut strips,
             &mut geometry.p1(),
             &windows,
-            &mouse_held,
-            &mut commands,
-        );
-        return;
-    };
-    let (Ok(index), Ok((window, repositioning, resizing, focused))) =
-        (strip.index_of(press.window), windows.get(press.window))
-    else {
-        finish(
-            &mut state,
-            &mut strips,
-            &mut geometry.p1(),
-            &windows,
-            &mouse_held,
+            &env.mouse_held,
             &mut commands,
         );
         return;
     };
 
-    let frame = window.frame();
-    let available = !mission_control.0 && crate::ecs::overview::overview_inactive(overview);
+    let available = env.drag_available();
     if press.drag.is_none() {
-        let display = displays.get(parent.parent()).ok();
-        let shown = display.is_some_and(|(_, display, _)| {
-            desktops
-                .as_ref()
-                .and_then(|census| census.active_space(display.id()))
-                .is_none_or(|active| active == strip.id())
-        });
-        if !available
-            || !shown
-            || parked
-            || strip.is_fullscreen()
-            || matches!(press.end, Some(End::Cancel))
-        {
-            state.press = None;
+        let Ok((strip, ..)) = strips.get(press.strip) else {
             return;
-        }
-        let layout_moving = moving || scrolling || repositioning || resizing;
-        if layout_moving || press.pointer.is_none() || frame.min == press.frame.min {
-            if press.end.is_some() {
+        };
+        match try_start_drag(
+            press,
+            strip,
+            &snapshot,
+            &tap_flag,
+            &geometry.p0(),
+            &env,
+            &mut commands,
+        ) {
+            StartResult::Started => {}
+            StartResult::Pending => return,
+            StartResult::Abort => {
                 state.press = None;
-            } else if layout_moving || press.pointer.is_none() {
-                press.frame = frame;
+                return;
             }
-            return;
         }
-        if frame.size() != press.frame.size() {
-            state.press = None;
-            return;
-        }
-        let held = strip
-            .tab_group(press.window)
-            .unwrap_or_else(|| vec![press.window]);
-        let members = strip
-            .get(index)
-            .map(|column| {
-                let windows = geometry.p0();
-                column
-                    .window_iter()
-                    .map(|entity| {
-                        (
-                            entity,
-                            windows.moving_frame(entity).map(|rect| rect.width()),
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let home_width = display.map_or(0, |(_, display, dock)| {
-            display.actual_display_bounds(dock, &config).width()
-        });
-        for &entity in &held {
-            if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                entity_commands.try_remove::<(RepositionMarker, VerifyWindowPosition)>();
+    }
+
+    let end = press.end.or((!available).then_some(End::Cancel));
+    let target = apply_drag_move(
+        press,
+        &snapshot,
+        end,
+        &mut strips,
+        &mut geometry,
+        &env,
+        &mut commands,
+    );
+
+    if let Some(end) = end {
+        let home = press.drag.as_ref().map(|drag| drag.home);
+        if matches!(end, End::Drop) && target == Some(press.strip) {
+            if snapshot.focused && Some(press.strip) != home {
+                if let Ok(mut strip) = commands.get_entity(press.strip) {
+                    strip.try_insert(ActiveWorkspaceMarker);
+                }
+                if let Ok((_, parent, ..)) = strips.get(press.strip)
+                    && let Ok(mut display) = commands.get_entity(parent.parent())
+                {
+                    display.try_insert(ActiveDisplayMarker);
+                }
+            }
+            if env.config.window_hidden_ratio() < 1.0 {
+                commands.reshuffle_around(press.window);
             }
         }
         debug!(
-            window_id = window.id(),
-            column = index,
-            "Started tiled title-bar drag"
+            window_id = snapshot.window_id,
+            "Finished tiled title-bar drag"
         );
-        press.drag = Some(Drag {
-            home: press.strip,
-            home_width,
-            members,
-            entered: None,
-            crossed: false,
-            origin: index,
-            held,
-            _tap_guard: DragFlagGuard::new(&tap_flag),
-        });
+        finish(
+            &mut state,
+            &mut strips,
+            &mut geometry.p1(),
+            &windows,
+            &env.mouse_held,
+            &mut commands,
+        );
+    }
+}
+
+fn read_drag_snapshot(
+    press: &Press,
+    strips: &DragStrips,
+    windows: &DragWindows,
+) -> Option<DragSnapshot> {
+    let (strip, parent, _, moving, scrolling, parked, _, _) = strips.get(press.strip).ok()?;
+    let index = strip.index_of(press.window).ok()?;
+    let (window, repositioning, resizing, focused) = windows.get(press.window).ok()?;
+    Some(DragSnapshot {
+        index,
+        window_id: window.id(),
+        frame: window.frame(),
+        parent_display: parent.parent(),
+        parked,
+        layout_moving: moving || scrolling || repositioning || resizing,
+        focused,
+    })
+}
+
+fn try_start_drag(
+    press: &mut Press,
+    strip: &LayoutStrip,
+    snapshot: &DragSnapshot,
+    tap_flag: &Arc<AtomicBool>,
+    windows: &Windows,
+    env: &DragEnv,
+    commands: &mut Commands,
+) -> StartResult {
+    let display = env.displays.get(snapshot.parent_display).ok();
+    let shown = display.is_some_and(|(_, display, _)| {
+        env.desktops
+            .as_ref()
+            .and_then(|census| census.active_space(display.id()))
+            .is_none_or(|active| active == strip.id())
+    });
+    if !env.drag_available()
+        || !shown
+        || snapshot.parked
+        || strip.is_fullscreen()
+        || matches!(press.end, Some(End::Cancel))
+    {
+        return StartResult::Abort;
+    }
+    if snapshot.layout_moving || press.pointer.is_none() || snapshot.frame.min == press.frame.min {
+        if press.end.is_some() {
+            return StartResult::Abort;
+        }
+        if snapshot.layout_moving || press.pointer.is_none() {
+            press.frame = snapshot.frame;
+        }
+        return StartResult::Pending;
+    }
+    if snapshot.frame.size() != press.frame.size() {
+        return StartResult::Abort;
     }
 
-    let Some(drag) = &mut press.drag else {
-        return;
-    };
-    let end = press.end.or((!available).then_some(End::Cancel));
+    let held = strip
+        .tab_group(press.window)
+        .unwrap_or_else(|| vec![press.window]);
+    let members = strip
+        .get(snapshot.index)
+        .map(|column| {
+            column
+                .window_iter()
+                .map(|entity| {
+                    (
+                        entity,
+                        windows.moving_frame(entity).map(|rect| rect.width()),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let home_width = display.map_or(0, |(_, display, dock)| {
+        display.actual_display_bounds(dock, &env.config).width()
+    });
+    for &entity in &held {
+        if let Ok(mut entity_commands) = commands.get_entity(entity) {
+            entity_commands.try_remove::<(RepositionMarker, VerifyWindowPosition)>();
+        }
+    }
+    debug!(
+        window_id = snapshot.window_id,
+        column = snapshot.index,
+        "Started tiled title-bar drag"
+    );
+    press.drag = Some(Drag {
+        home: press.strip,
+        home_width,
+        members,
+        entered: None,
+        crossed: false,
+        origin: snapshot.index,
+        held,
+        _tap_guard: DragFlagGuard::new(tap_flag),
+    });
+    StartResult::Started
+}
+
+fn apply_drag_move(
+    press: &mut Press,
+    snapshot: &DragSnapshot,
+    end: Option<End>,
+    strips: &mut DragStrips,
+    geometry: &mut ParamSet<(Windows, LandingGeometry)>,
+    env: &DragEnv,
+    commands: &mut Commands,
+) -> Option<Entity> {
+    let drag = press.drag.as_mut()?;
     let target = if matches!(end, Some(End::Cancel)) {
         None
     } else {
         destination(
             press.pointer,
             drag,
-            &displays,
-            &strips,
-            desktops.as_deref(),
-            &manager,
+            &env.displays,
+            strips,
+            env.desktops.as_deref(),
+            &env.manager,
         )
     };
     let dest = target.unwrap_or(drag.home);
@@ -363,9 +476,9 @@ fn reorder_column(
         if target.is_some() {
             slot(
                 strip,
-                (dest == current).then_some(index),
+                (dest == current).then_some(snapshot.index),
                 offset.0.x,
-                frame.min.x,
+                snapshot.frame.min.x,
                 &geometry.p0(),
             )
         } else {
@@ -376,54 +489,31 @@ fn reorder_column(
 
     if let Some(drop_slot) = drop_slot {
         if dest == current {
-            if index != drop_slot
+            if snapshot.index != drop_slot
                 && let Ok((mut strip, ..)) = strips.get_mut(current)
             {
-                strip.move_column(index, drop_slot);
+                strip.move_column(snapshot.index, drop_slot);
             }
         } else if let Ok([mut from, mut to]) = strips.get_many_mut([current, dest])
-            && let Ok((_, target_display, dock)) = displays.get(to.1.parent())
-            && from.0.transfer_column(&mut to.0, index, drop_slot)
+            && let Ok((_, target_display, dock)) = env.displays.get(to.1.parent())
+            && from.0.transfer_column(&mut to.0, snapshot.index, drop_slot)
         {
-            let width = target_display.actual_display_bounds(dock, &config).width();
+            let width = target_display
+                .actual_display_bounds(dock, &env.config)
+                .width();
             let (_, mut bounds) = geometry.p1();
-            size_column(drag, width, &mut bounds, &mut commands);
+            size_column(drag, width, &mut bounds, commands);
             press.strip = dest;
             drag.crossed = true;
             debug!(
-                window_id = window.id(),
+                window_id = snapshot.window_id,
                 display_id = target_display.id(),
                 column = drop_slot,
                 "Carried tiled column to display"
             );
         }
     }
-    if let Some(end) = end {
-        if matches!(end, End::Drop) && target == Some(press.strip) {
-            if focused && press.strip != drag.home {
-                if let Ok(mut strip) = commands.get_entity(press.strip) {
-                    strip.try_insert(ActiveWorkspaceMarker);
-                }
-                if let Ok((_, parent, ..)) = strips.get(press.strip)
-                    && let Ok(mut display) = commands.get_entity(parent.parent())
-                {
-                    display.try_insert(ActiveDisplayMarker);
-                }
-            }
-            if config.window_hidden_ratio() < 1.0 {
-                commands.reshuffle_around(press.window);
-            }
-        }
-        debug!(window_id = window.id(), "Finished tiled title-bar drag");
-        finish(
-            &mut state,
-            &mut strips,
-            &mut geometry.p1(),
-            &windows,
-            &mouse_held,
-            &mut commands,
-        );
-    }
+    target
 }
 
 fn destination(

@@ -1004,6 +1004,7 @@ pub(crate) fn pump_events(
 #[instrument(level = Level::TRACE, skip_all)]
 pub(super) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
+    drag: Res<crate::ecs::drag::WindowDrag>,
     mut windows: ResizableWindows,
     mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
@@ -1025,7 +1026,7 @@ pub(super) fn window_resized_update_frame(
         // and `animate_resize_entities` is still stepping toward it, so reading
         // the echo in here would fight the animation producing that difference.
         // Only a resize we did not initiate is new information.
-        if resizing {
+        if resizing || drag.holds(entity) {
             continue;
         }
         let active_strip = workspaces
@@ -1228,6 +1229,7 @@ pub(super) fn update_overlays(
     windows: Windows,
     applications: Query<&Application>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
+    drag: Option<Res<crate::ecs::drag::WindowDrag>>,
     mission_control_active: Res<MissionControlActive>,
     config: Res<Config>,
     theme: Option<Res<SystemTheme>>,
@@ -1244,13 +1246,17 @@ pub(super) fn update_overlays(
     let dim_opacity = config.dim_inactive_opacity();
     let border_enabled = config.border_active_window();
 
-    // Hide overlays during swipe, mission control, native fullscreen spaces,
-    // or briefly after a space change (macOS space-switch animation).
+    // Hide overlays during swipe, title-bar drag, mission control, native
+    // fullscreen spaces, or briefly after a space change (macOS space-switch animation).
     let Some((swiping, active_strip)) = active_workspace.iter().next() else {
         return;
     };
 
-    if swiping || mission_control_active.0 || active_strip.is_fullscreen() {
+    if swiping
+        || drag.is_some_and(|drag| drag.dragging())
+        || mission_control_active.0
+        || active_strip.is_fullscreen()
+    {
         overlay_mgr.hide_all();
         return;
     }

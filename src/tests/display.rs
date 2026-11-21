@@ -1746,13 +1746,11 @@ fn test_horizontal_mouse_warp_also_warps_a_drag() {
         (
             Event::MouseDragged {
                 button: crate::events::MouseButton::Left,
-
                 point: approach,
                 modifiers,
             },
             Event::MouseDragged {
                 button: crate::events::MouseButton::Left,
-
                 point: edge,
                 modifiers,
             },

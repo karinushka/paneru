@@ -19,9 +19,10 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
-    ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker, LayoutPosition,
-    MissionControlActive, MouseHeldMarker, Position, RepositionMarker, ResizeMarker, Scrolling,
-    SelectedVirtualMarker, SpawnCommandsExt as _, Timeout, UpdateSet, VerifyWindowPosition,
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Bounds, DockPosition, FocusedMarker,
+    LayoutPosition, MissionControlActive, MouseHeldMarker, Position, RepositionMarker,
+    ResizeMarker, Scrolling, SelectedVirtualMarker, SpawnCommandsExt as _, Timeout, UpdateSet,
+    VerifyWindowPosition,
 };
 use crate::events::{Event, MouseButton};
 use crate::manager::{Display, Origin, Window, WindowManager, origin_from};
@@ -356,11 +357,15 @@ fn reorder_column(
     }
     if let Some(end) = end {
         if matches!(end, End::Drop) && target == Some(press.strip) {
-            if focused
-                && press.strip != drag.home
-                && let Ok(mut strip) = commands.get_entity(press.strip)
-            {
-                strip.try_insert(ActiveWorkspaceMarker);
+            if focused && press.strip != drag.home {
+                if let Ok(mut strip) = commands.get_entity(press.strip) {
+                    strip.try_insert(ActiveWorkspaceMarker);
+                }
+                if let Ok((_, parent, ..)) = strips.get(press.strip)
+                    && let Ok(mut display) = commands.get_entity(parent.parent())
+                {
+                    display.try_insert(ActiveDisplayMarker);
+                }
             }
             if config.window_hidden_ratio() < 1.0 {
                 commands.reshuffle_around(press.window);
@@ -451,7 +456,10 @@ fn finish(
         return;
     };
     set_dragging(false);
-    if let Ok((mut home, ..)) = strips.get_mut(drag.home) {
+    if drag.crossed
+        && let Ok((mut home, ..)) = strips.get_mut(drag.home)
+        && home.len() == 0
+    {
         // Let normal empty-workspace reaping see the source after the drag.
         home.set_changed();
     }

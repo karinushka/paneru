@@ -12,7 +12,7 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
 use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
 use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor, SystemSet};
-use bevy::ecs::system::{Commands, EntityCommands, Query, Res, SystemId};
+use bevy::ecs::system::{Commands, EntityCommands, Local, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
 use bevy::tasks::Task;
 use bevy::time::Timer;
@@ -174,28 +174,36 @@ pub fn register_systems(app: &mut bevy::app::App) {
             .next()
             .is_none_or(|marker| !marker.is_user_swiping)
     };
+    #[allow(clippy::too_many_arguments)]
     let overlays_dirty = |config: Option<Res<Config>>,
                           theme: Option<Res<SystemTheme>>,
                           mission_control: Option<Res<MissionControlActive>>,
+                          drag: Option<Res<drag::WindowDrag>>,
+                          mut was_dragging: Local<bool>,
                           strip_changed: OverlayStripChanged,
                           mut scrolling_removed: RemovedComponents<Scrolling>,
                           focus_gained: Query<(), Added<FocusedMarker>>,
                           workspace_changed: Query<(), Added<ActiveWorkspaceMarker>>,
                           focused_moved: OverlayFocusedMoved| {
         let scrolling_ended = scrolling_removed.read().count() > 0;
+        let dragging = drag.is_some_and(|drag| drag.dragging());
+        let drag_toggled = dragging != *was_dragging;
+        *was_dragging = dragging;
         let Some(config) = config else {
             return false;
         };
         let enabled = config.has_dim_inactive_color() || config.border_active_window();
         config.is_changed()
             || (enabled
-                && (theme.is_some_and(|theme| theme.is_changed())
-                    || mission_control.is_some_and(|mc| mc.is_changed())
-                    || scrolling_ended
-                    || !strip_changed.is_empty()
-                    || !focus_gained.is_empty()
-                    || !workspace_changed.is_empty()
-                    || !focused_moved.is_empty()))
+                && (drag_toggled
+                    || (!dragging
+                        && (theme.is_some_and(|theme| theme.is_changed())
+                            || mission_control.is_some_and(|mc| mc.is_changed())
+                            || scrolling_ended
+                            || !strip_changed.is_empty()
+                            || !focus_gained.is_empty()
+                            || !workspace_changed.is_empty()
+                            || !focused_moved.is_empty()))))
     };
     // Not gated on dimming/borders being enabled, unlike the dim overlay.
     let tab_indicators_dirty =
@@ -1315,6 +1323,82 @@ mod tests {
         assert!(
             !overlay_runs_after(&mut harness, &|_| {}),
             "idle frame after Scrolling ends"
+        );
+    }
+
+    #[test]
+    fn overlays_pause_during_title_bar_drag() {
+        use crate::events::{Event, MouseButton};
+        use crate::platform::Modifiers;
+        use objc2_core_foundation::CGPoint;
+
+        let mut harness = TestHarness::new()
+            .with_config(border_config(true))
+            .with_windows(2);
+        harness.advance(Duration::from_secs(1));
+
+        let start = CGPoint::new(200.0, 30.0);
+        harness.world().write_message(Event::MouseDown {
+            point: start,
+            modifiers: Modifiers::empty(),
+            button: MouseButton::Left,
+        });
+        harness.app.update();
+
+        // Starting the drag must run `update_overlays` once so it hides overlays.
+        let before_start = overlays_last_run(&harness);
+        harness.world().write_message(Event::MouseDragged {
+            point: CGPoint::new(250.0, 30.0),
+            modifiers: Modifiers::empty(),
+            button: MouseButton::Left,
+        });
+        harness.mock_state.os_move_window(0, IVec2::new(50, 20));
+        harness.advance(Duration::from_millis(20));
+        assert!(
+            harness
+                .world()
+                .resource::<super::drag::WindowDrag>()
+                .dragging()
+        );
+        assert_ne!(
+            overlays_last_run(&harness),
+            before_start,
+            "overlay must rerun to hide when title-bar drag starts"
+        );
+
+        // Further window movement while dragging must not schedule `update_overlays`.
+        let before_move = overlays_last_run(&harness);
+        harness.world().write_message(Event::MouseDragged {
+            point: CGPoint::new(300.0, 30.0),
+            modifiers: Modifiers::empty(),
+            button: MouseButton::Left,
+        });
+        harness.mock_state.os_move_window(0, IVec2::new(100, 20));
+        harness.advance(Duration::from_millis(20));
+        assert_eq!(
+            overlays_last_run(&harness),
+            before_move,
+            "overlay must stay paused across mid-drag window movement"
+        );
+
+        // Releasing must run `update_overlays` again to restore the overlay.
+        let before_end = overlays_last_run(&harness);
+        harness.world().write_message(Event::MouseUp {
+            point: CGPoint::new(300.0, 30.0),
+            modifiers: Modifiers::empty(),
+            button: MouseButton::Left,
+        });
+        harness.advance(Duration::from_millis(20));
+        assert!(
+            !harness
+                .world()
+                .resource::<super::drag::WindowDrag>()
+                .dragging()
+        );
+        assert_ne!(
+            overlays_last_run(&harness),
+            before_end,
+            "overlay must rerun to reappear when title-bar drag ends"
         );
     }
 }

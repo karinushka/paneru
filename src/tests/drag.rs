@@ -7,7 +7,9 @@ use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions};
 use crate::ecs::drag::WindowDrag;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{ActiveWorkspaceMarker, Position, SelectedVirtualMarker, Unmanaged};
+use crate::ecs::{
+    ActiveDisplayMarker, ActiveWorkspaceMarker, Position, SelectedVirtualMarker, Unmanaged,
+};
 use crate::events::{Event, MouseButton};
 use crate::manager::{Origin, Window};
 use crate::platform::{Modifiers, WinID, WorkspaceId};
@@ -515,6 +517,7 @@ fn escape_during_a_press_lets_it_go() {
     assert!(!held(&mut h));
     assert_eq!(order(&mut h), [0, 1, 2]);
 }
+
 fn strip_x(h: &mut TestHarness) -> i32 {
     let world = h.world();
     let mut strips = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
@@ -578,6 +581,13 @@ fn active_space(h: &mut TestHarness) -> WorkspaceId {
     let world = h.world();
     let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
     strips.single(world).expect("one active strip").id()
+}
+
+fn active_display_id(h: &mut TestHarness) -> u32 {
+    let world = h.world();
+    let mut displays =
+        world.query_filtered::<&crate::manager::Display, With<ActiveDisplayMarker>>();
+    displays.single(world).expect("one active display").id()
 }
 
 fn three_beside_a_full_screen_one() -> TestHarness {
@@ -672,11 +682,33 @@ fn let_go_on_another_display_a_focused_window_takes_focus_there() {
     h.mock_state.focus_window(0);
     h.advance(SETTLE);
     assert_eq!(active_space(&mut h), TEST_WORKSPACE_ID);
+    assert_eq!(active_display_id(&mut h), TEST_DISPLAY_ID);
     let at = onto_the_second(&mut h);
     release(&mut h, at);
     h.advance(SETTLE);
     assert_eq!(active_space(&mut h), EXT_WORKSPACE_ID);
+    assert_eq!(active_display_id(&mut h), EXT_DISPLAY_ID);
     assert_eq!(order(&mut h), [0, 100, 101]);
+
+    // Subsequent horizontal scrolling must clamp against the destination
+    // display's viewport, not pull the strip back into Display 1's coordinates.
+    let before_x = strip_x(&mut h);
+    assert_eq!(before_x, TEST_DISPLAY_WIDTH);
+    send(&mut h, Event::TouchpadDown);
+    send(
+        &mut h,
+        Event::Swipe {
+            delta: 0.04,
+            fingers: 3,
+            distance_cm: 0.0,
+            elapsed_secs: Some(0.016),
+        },
+    );
+    assert!(
+        strip_x(&mut h) >= TEST_DISPLAY_WIDTH - 400,
+        "post-drop swipe must use the destination display's bounds, got {}",
+        strip_x(&mut h)
+    );
 }
 
 #[test]
@@ -801,6 +833,7 @@ fn a_stacked_column_carries_its_rows_there() {
     assert_eq!(lower.width(), 750);
     assert_eq!(lower.max.y, EXT_DISPLAY_HEIGHT);
 }
+
 #[test]
 fn crossing_displays_keeps_the_active_tab() {
     let mut h = three_beside_two();
@@ -858,4 +891,47 @@ fn escape_after_crossing_displays_restores_both_strips() {
     assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [0, 1, 2]);
     assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 101]);
     assert_eq!(os_frame(&mut h, 0), frame);
+}
+
+#[test]
+fn mid_drag_window_resize_does_not_clobber_target_slot_or_strip_offset() {
+    let mut h = three_beside_two();
+    let at = onto_the_second(&mut h);
+
+    // Simulate a cross-DPI OS resize notification while the window is still
+    // held on the destination display, with a slightly shifted origin.
+    let held_frame = os_frame(&mut h, 0);
+    h.mock_state
+        .os_move_window(0, held_frame.min + IVec2::new(5, 0));
+    h.mock_state
+        .os_resize_window(0, held_frame.size() - IVec2::new(0, 2));
+    h.advance(Duration::from_millis(40));
+
+    let ext_strip_x = {
+        let world = h.world();
+        let mut strips = world.query::<(&LayoutStrip, &Position)>();
+        strips
+            .iter(world)
+            .find(|(strip, _)| strip.id() == EXT_WORKSPACE_ID)
+            .expect("external strip")
+            .1
+            .0
+            .x
+    };
+    assert_eq!(
+        ext_strip_x, TEST_DISPLAY_WIDTH,
+        "mid-drag WindowResized on the held window must not shift the destination strip"
+    );
+
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert_eq!(
+        os_frame(&mut h, 0),
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            TEST_MENUBAR_HEIGHT,
+            TEST_DISPLAY_WIDTH + 750,
+            EXT_DISPLAY_HEIGHT
+        )
+    );
 }

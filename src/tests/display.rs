@@ -910,8 +910,7 @@ fn test_exit_keeps_hidden_windows_on_their_display() {
 
     harness
         .on_iteration(1, |world, _state| {
-            // Run the cleanup alone: a frame would also run the exit save,
-            // which writes the user's real state file.
+            // Run just the frame-restoration system before checking the layout.
             world.write_message(AppExit::Success);
             world
                 .run_system_once(crate::ecs::systems::cleanup_on_exit)

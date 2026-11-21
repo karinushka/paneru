@@ -1075,11 +1075,11 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         SnippetDialect::Toml
     });
 
-    if let Some(previous_state) =
-        PaneruState::load_from_file(&PaneruState::default_state_file_path())
-    {
+    let state_file = PaneruState::default_state_file_path();
+    if let Some(previous_state) = PaneruState::load_from_file(&state_file) {
         app.insert_resource(previous_state);
     }
+    app.insert_resource(state::LayoutStateFile(state_file));
 
     // Overwrites the empty store `register_commands` put there, which is what
     // the mock harness keeps: only the real app reads the user's file.

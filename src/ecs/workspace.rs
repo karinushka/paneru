@@ -23,6 +23,7 @@ use crate::commands::{
     Direction, MoveFocus, Operation, filter_window_operations, get_window_in_direction,
 };
 use crate::config::Config;
+use crate::ecs::drag::{ColumnInTransit, WindowDrag};
 use crate::ecs::focus::FocusHistory;
 use crate::ecs::layout::{
     LayoutStrip, PARKED_STRIP_SLIVER, compensate_left_removal, origin_exposing,
@@ -299,6 +300,9 @@ type ChangeableWorkspaces<'w, 's> = Query<
 
 #[derive(SystemParam)]
 pub(crate) struct MovedWindowGuards<'w, 's> {
+    drag: Res<'w, WindowDrag>,
+    in_transit: Query<'w, 's, &'static ColumnInTransit>,
+
     sticky_windows: Query<'w, 's, (), With<crate::ecs::desktop::StickyWindowMarker>>,
     desktop_bridge: Option<NonSend<'w, crate::manager::spaces::DesktopBridge>>,
     reconcile_state: Option<Res<'w, crate::ecs::display::DisplayReconcileState>>,
@@ -618,6 +622,19 @@ pub(crate) fn detect_moved_windows(
         return;
     }
 
+    let moved_windows: Vec<_> = moved_windows
+        .into_iter()
+        .filter(|&entity| {
+            !guards.drag.carries(entity)
+                && !guards
+                    .in_transit
+                    .iter()
+                    .any(|column| column.contains(entity))
+        })
+        .collect();
+    if moved_windows.is_empty() {
+        return;
+    }
     let sticky_map = guards.desktop_bridge.as_ref().map(|bridge| {
         let wids: Vec<WinID> = moved_windows
             .iter()
@@ -1890,6 +1907,7 @@ fn renumber_virtual_indexes(mut set: RenumberStrips) {
 /// is somewhere to go, and stays until it's left, as `reap_empty_virtual_workspaces`
 /// has it. Neither the first, nor one a display shows.
 fn reap_emptied_virtual_workspaces(
+    drag: Res<WindowDrag>,
     changed_strips: ChangedStrips,
     all_strips: Query<Entity, With<LayoutStrip>>,
     mut lengths: Local<EntityHashMap<usize>>,
@@ -1897,6 +1915,9 @@ fn reap_emptied_virtual_workspaces(
 ) {
     lengths.retain(|&entity, _| all_strips.contains(entity));
     for (entity, strip, active, selected) in &changed_strips {
+        if drag.keeps_strip(entity) {
+            continue;
+        }
         let len = strip.len();
         let had = lengths.get(&entity).copied().unwrap_or(0);
         if had > 0
@@ -1920,6 +1941,7 @@ fn reap_emptied_virtual_workspaces(
 }
 
 fn reap_empty_virtual_workspaces(
+    drag: Res<WindowDrag>,
     changed: Single<Entity, Added<ActiveWorkspaceMarker>>,
     strips: Populated<(Entity, &LayoutStrip)>,
     mut commands: Commands,
@@ -1944,6 +1966,7 @@ fn reap_empty_virtual_workspaces(
     // empty rows left behind should be removed.
     for (entity, strip) in rows {
         if entity != changed_entity
+            && !drag.keeps_strip(entity)
             && strip.virtual_index > 0
             && strip.len() == 0
             && let Ok(mut entity_commands) = commands.get_entity(entity)

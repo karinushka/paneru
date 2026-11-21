@@ -7,10 +7,10 @@ use crate::commands::{Command, Direction, Operation};
 use crate::config::{Config, MainOptions};
 use crate::ecs::drag::WindowDrag;
 use crate::ecs::layout::LayoutStrip;
-use crate::ecs::{ActiveWorkspaceMarker, Position, Unmanaged};
+use crate::ecs::{ActiveWorkspaceMarker, Position, SelectedVirtualMarker, Unmanaged};
 use crate::events::{Event, MouseButton};
 use crate::manager::{Origin, Window};
-use crate::platform::{Modifiers, WinID};
+use crate::platform::{Modifiers, WinID, WorkspaceId};
 
 use super::*;
 
@@ -519,4 +519,343 @@ fn strip_x(h: &mut TestHarness) -> i32 {
     let world = h.world();
     let mut strips = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
     strips.single(world).expect("one active strip").0.x
+}
+
+const FULLSCREEN_WORKSPACE_ID: WorkspaceId = 30;
+
+fn three_beside_two() -> TestHarness {
+    let mut h = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(
+                TEST_DISPLAY_WIDTH,
+                0,
+                TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+                EXT_DISPLAY_HEIGHT,
+            ),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_windows(3)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |_| {})
+        .with_workspace_window(101, EXT_WORKSPACE_ID, |_| {});
+    h.advance(SETTLE);
+    assert_eq!(order(&mut h), [0, 1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 101]);
+    h
+}
+
+fn order_of(h: &mut TestHarness, space: WorkspaceId) -> Vec<WinID> {
+    let world = h.world();
+    let columns = {
+        let mut strips = world.query::<(&LayoutStrip, Has<SelectedVirtualMarker>)>();
+        strips
+            .iter(world)
+            .filter(|(strip, _)| strip.id() == space)
+            .min_by_key(|(strip, selected)| (!*selected, strip.virtual_index))
+            .expect("a strip")
+            .0
+            .columns()
+            .filter_map(crate::ecs::layout::Column::top)
+            .collect::<Vec<_>>()
+    };
+    let mut windows = world.query::<&Window>();
+    columns
+        .into_iter()
+        .map(|entity| windows.get(world, entity).expect("a window").id())
+        .collect()
+}
+
+fn onto_the_second(h: &mut TestHarness) -> Origin {
+    let start = title_bar(h, 0);
+    press(h, start);
+    let at = drag(h, 0, start, &[100; 9]);
+    assert!(at.x > TEST_DISPLAY_WIDTH);
+    h.advance(SETTLE);
+    at
+}
+
+fn active_space(h: &mut TestHarness) -> WorkspaceId {
+    let world = h.world();
+    let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+    strips.single(world).expect("one active strip").id()
+}
+
+fn three_beside_a_full_screen_one() -> TestHarness {
+    full_screen_on_the_second(three_beside_two())
+}
+
+fn full_screen_on_the_second(mut h: TestHarness) -> TestHarness {
+    h.mock_state.activate_display(EXT_DISPLAY_ID);
+    h.mock_state.focus_window(101);
+    h.advance(SETTLE);
+    h.mock_state.update_window(101, |window| {
+        window.workspace_id = FULLSCREEN_WORKSPACE_ID;
+        window.is_full_screen = true;
+    });
+    h.mock_state
+        .activate_workspace(EXT_DISPLAY_ID, FULLSCREEN_WORKSPACE_ID, true);
+    h.world().write_message::<Event>(Event::SpaceChanged);
+    h.advance(SETTLE);
+    h
+}
+
+#[test]
+fn over_another_display_the_column_joins_its_strip() {
+    let mut h = three_beside_two();
+    onto_the_second(&mut h);
+    // Its own strip closes up, and the other's parts for it at the slot
+    // nearest its left edge, as wide as its share of that display.
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+    assert_eq!(x(&mut h, 1), 0);
+    assert_eq!(x(&mut h, 100), TEST_DISPLAY_WIDTH + 750);
+    assert_eq!(x(&mut h, 101), TEST_DISPLAY_WIDTH + 750 + 400);
+    // The held window keeps its size, and stays where the pointer has it.
+    let held = os_frame(&mut h, 0);
+    assert_eq!(held.size(), IVec2::new(400, 748));
+    assert_eq!(held.min.x, 900);
+}
+
+#[test]
+fn a_carried_column_follows_the_slots_there() {
+    let mut h = three_beside_two();
+    let at = onto_the_second(&mut h);
+    // Its left edge at 1400, nearest the slot past window 100, at 1424.
+    drag(&mut h, 0, at, &[100; 5]);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 0, 101]);
+    assert_eq!(x(&mut h, 100), TEST_DISPLAY_WIDTH);
+    assert_eq!(x(&mut h, 101), TEST_DISPLAY_WIDTH + 400 + 750);
+}
+
+#[test]
+fn back_on_its_display_the_column_rejoins_its_strip() {
+    let mut h = three_beside_two();
+    let at = onto_the_second(&mut h);
+    // Its left edge at 600: a tie between the slots at 400 and 800 goes to
+    // the earlier.
+    let at = drag(&mut h, 0, at, &[-100; 3]);
+    assert!(at.x < TEST_DISPLAY_WIDTH);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [1, 0, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 101]);
+    assert_eq!(x(&mut h, 100), TEST_DISPLAY_WIDTH);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert_eq!(os_frame(&mut h, 0).min.x, 400);
+    assert_eq!(os_frame(&mut h, 0).size(), IVec2::new(400, 748));
+}
+
+#[test]
+fn let_go_on_another_display_the_window_lands_in_the_gap_there() {
+    let mut h = three_beside_two();
+    let at = onto_the_second(&mut h);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert!(!held(&mut h));
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+    assert_eq!(
+        os_frame(&mut h, 0),
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            TEST_MENUBAR_HEIGHT,
+            TEST_DISPLAY_WIDTH + 750,
+            EXT_DISPLAY_HEIGHT
+        )
+    );
+    assert_eq!(x(&mut h, 100), TEST_DISPLAY_WIDTH + 750);
+}
+
+#[test]
+fn let_go_on_another_display_a_focused_window_takes_focus_there() {
+    let mut h = three_beside_two();
+    h.mock_state.focus_window(0);
+    h.advance(SETTLE);
+    assert_eq!(active_space(&mut h), TEST_WORKSPACE_ID);
+    let at = onto_the_second(&mut h);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert_eq!(active_space(&mut h), EXT_WORKSPACE_ID);
+    assert_eq!(order(&mut h), [0, 100, 101]);
+}
+
+#[test]
+fn its_old_strip_shown_again_keeps_none_of_the_column() {
+    let mut h = three_beside_two();
+    h.mock_state.focus_window(100);
+    h.advance(SETTLE);
+    assert_eq!(active_space(&mut h), EXT_WORKSPACE_ID);
+    let at = onto_the_second(&mut h);
+    // Activated, the strip it left looks for windows on its Space it hasn't
+    // got, and macOS lists window 0 there until it's let go and moved.
+    h.mock_state.focus_window(1);
+    h.advance(SETTLE);
+    assert_eq!(active_space(&mut h), TEST_WORKSPACE_ID);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+    release(&mut h, at);
+    h.advance(Duration::from_millis(200));
+    h.mock_state.focus_window(100);
+    h.advance(Duration::from_millis(200));
+    h.mock_state.focus_window(1);
+    h.advance(Duration::from_millis(200));
+    assert_eq!(active_space(&mut h), TEST_WORKSPACE_ID);
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+}
+
+#[test]
+fn display_reconciliation_does_not_steal_the_carried_column() {
+    let mut h = three_beside_two();
+    let at = onto_the_second(&mut h);
+    crate::ecs::display::migrate_moved_windows_across_displays(h.world());
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+
+    release(&mut h, at);
+    h.advance(Duration::from_millis(20));
+    crate::ecs::display::migrate_moved_windows_across_displays(h.world());
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+}
+
+#[test]
+fn let_go_over_full_screen_with_frame_on_other_display_returns_home() {
+    let mut h = three_beside_a_full_screen_one();
+    let at = onto_the_second(&mut h);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert!(!held(&mut h));
+    assert_eq!(x(&mut h, 0), 0);
+}
+
+#[test]
+fn onto_a_third_display_the_column_goes_on() {
+    const THIRD_DISPLAY_ID: u32 = 3;
+    const THIRD_WORKSPACE_ID: WorkspaceId = 21;
+    let third = TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH;
+    let mut h = TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(TEST_DISPLAY_WIDTH, 0, third, EXT_DISPLAY_HEIGHT),
+            vec![EXT_WORKSPACE_ID],
+        )
+        .with_display(
+            THIRD_DISPLAY_ID,
+            IRect::new(third, 0, third + TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![THIRD_WORKSPACE_ID],
+        )
+        .with_windows(3)
+        .with_workspace_window(100, EXT_WORKSPACE_ID, |_| {})
+        .with_workspace_window(200, THIRD_WORKSPACE_ID, |_| {});
+    h.advance(SETTLE);
+    let start = title_bar(&mut h, 0);
+    press(&mut h, start);
+    let at = drag(&mut h, 0, start, &[100; 20]);
+    assert!(TEST_DISPLAY_WIDTH < at.x && at.x < third);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 0]);
+    // Past the second display's right edge, its left edge at 2800.
+    let at = drag(&mut h, 0, at, &[100; 8]);
+    assert!(at.x > third);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100]);
+    assert_eq!(order_of(&mut h, THIRD_WORKSPACE_ID), [0, 200]);
+    assert_eq!(x(&mut h, 200), third + 400);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert_eq!(x(&mut h, 0), third);
+}
+
+#[test]
+fn a_stacked_column_carries_its_rows_there() {
+    let mut h = three_beside_two();
+    for command in [
+        Command::Window(Operation::Focus(Direction::First)),
+        Command::Window(Operation::Focus(Direction::East)),
+        Command::Window(Operation::Stack(true)),
+    ] {
+        send(&mut h, Event::Command { command });
+    }
+    h.advance(SETTLE);
+    assert_eq!(order(&mut h), [0, 2]);
+    let lower = os_frame(&mut h, 1);
+    let start = title_bar(&mut h, 1);
+    press(&mut h, start);
+    let at = drag(&mut h, 1, start, &[100; 9]);
+    assert!(at.x > TEST_DISPLAY_WIDTH);
+    h.advance(SETTLE);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+    // Window 0, its row above, glides into the gap at that display's size;
+    // window 1 stays under the pointer.
+    let upper = os_frame(&mut h, 0);
+    assert_eq!(
+        upper.min,
+        IVec2::new(TEST_DISPLAY_WIDTH, TEST_MENUBAR_HEIGHT)
+    );
+    assert_eq!(upper.width(), 750);
+    assert_eq!(os_frame(&mut h, 1).size(), lower.size());
+    release(&mut h, at);
+    h.advance(SETTLE);
+    let lower = os_frame(&mut h, 1);
+    assert_eq!(lower.min.x, TEST_DISPLAY_WIDTH);
+    assert_eq!(lower.width(), 750);
+    assert_eq!(lower.max.y, EXT_DISPLAY_HEIGHT);
+}
+#[test]
+fn crossing_displays_keeps_the_active_tab() {
+    let mut h = three_beside_two();
+    for operation in [
+        Operation::Focus(Direction::First),
+        Operation::Focus(Direction::East),
+        Operation::Stack(true),
+        Operation::ToggleTabbedDisplay,
+    ] {
+        send(
+            &mut h,
+            Event::Command {
+                command: Command::Window(operation),
+            },
+        );
+    }
+    h.advance(SETTLE);
+    let active = {
+        let world = h.world();
+        let first = find_window_entity(0, world);
+        world
+            .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single(world)
+            .expect("one active strip")
+            .active_tab(first)
+            .expect("an active tab")
+    };
+    let active_id = h.world().get::<Window>(active).expect("active window").id();
+    let start = title_bar(&mut h, active_id);
+    press(&mut h, start);
+    let at = drag(&mut h, active_id, start, &[100; 9]);
+    release(&mut h, at);
+    h.advance(SETTLE);
+
+    let world = h.world();
+    let strip = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == EXT_WORKSPACE_ID && strip.contains(active))
+        .expect("the destination received the stack");
+    assert_eq!(strip.active_tab(active), Some(active));
+}
+
+#[test]
+fn escape_after_crossing_displays_restores_both_strips() {
+    let mut h = three_beside_two();
+    let frame = os_frame(&mut h, 0);
+    let at = onto_the_second(&mut h);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [0, 100, 101]);
+
+    send(&mut h, Event::CancelDrag);
+    release(&mut h, at);
+    h.advance(SETTLE);
+
+    assert_eq!(order_of(&mut h, TEST_WORKSPACE_ID), [0, 1, 2]);
+    assert_eq!(order_of(&mut h, EXT_WORKSPACE_ID), [100, 101]);
+    assert_eq!(os_frame(&mut h, 0), frame);
 }

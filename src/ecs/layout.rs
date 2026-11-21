@@ -561,6 +561,30 @@ impl LayoutStrip {
         }
     }
 
+    /// Move a whole column and its active-tab mapping between strips.
+    pub(crate) fn transfer_column(&mut self, to: &mut Self, from: usize, slot: usize) -> bool {
+        let Some(column) = self.columns.get(from) else {
+            return false;
+        };
+        if self.is_fullscreen()
+            || to.is_fullscreen()
+            || slot > to.len()
+            || column.window_iter().any(|entity| to.contains(entity))
+        {
+            return false;
+        }
+        let Some(column) = self.columns.remove(from) else {
+            return false;
+        };
+        for entity in column.window_iter() {
+            if let Some(active) = self.tabbed_stacks.remove(&entity) {
+                to.tabbed_stacks.insert(entity, active);
+            }
+        }
+        to.columns.insert(slot, column);
+        true
+    }
+
     pub fn new(id: WorkspaceId, virtual_index: u32) -> Self {
         Self {
             id,

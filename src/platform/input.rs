@@ -96,14 +96,16 @@ enum DragInput {
 }
 
 /// Follows the left button through `event_type`, and says what becomes of
-/// the event. `keycode` is a key press's, and `dragging` whether a window is
-/// being dragged.
+/// the event. `keycode` and `modifiers` are a key press's, and `dragging`
+/// whether a window is being dragged.
 fn drag_input(
     button: &mut LeftButton,
     event_type: CGEventType,
     keycode: i64,
+    modifiers: Modifiers,
     dragging: bool,
 ) -> DragInput {
+    let plain_escape = keycode == ESCAPE && modifiers.is_empty();
     match (event_type, *button) {
         (CGEventType::LeftMouseDown, _) => {
             *button = LeftButton::Down;
@@ -123,11 +125,11 @@ fn drag_input(
             *button = LeftButton::Up;
             DragInput::Pass
         }
-        (CGEventType::KeyDown, LeftButton::Down) if keycode == ESCAPE && dragging => {
+        (CGEventType::KeyDown, LeftButton::Down) if plain_escape && dragging => {
             *button = LeftButton::Cancelled;
             DragInput::Cancel
         }
-        (CGEventType::KeyDown, LeftButton::Cancelled) if keycode == ESCAPE => DragInput::Swallow,
+        (CGEventType::KeyDown, LeftButton::Cancelled) if plain_escape => DragInput::Swallow,
         _ => DragInput::Pass,
     }
 }
@@ -578,7 +580,13 @@ impl InputHandler {
         };
         let dragging = DRAGGING.load(Ordering::Relaxed)
             && !crate::overview::OVERVIEW_OPEN.load(Ordering::Relaxed);
-        match drag_input(&mut self.left_button, event_type, keycode, dragging) {
+        match drag_input(
+            &mut self.left_button,
+            event_type,
+            keycode,
+            modifiers,
+            dragging,
+        ) {
             DragInput::Pass => {}
             DragInput::Swallow => return true,
             DragInput::Cancel => {
@@ -588,14 +596,18 @@ impl InputHandler {
                 }
                 return true;
             }
-            DragInput::Move | DragInput::Release => {
-                if event_type == CGEventType::LeftMouseDragged {
-                    CGEvent::set_type(Some(event), CGEventType::MouseMoved);
-                }
-                let point = CGEvent::location(Some(event));
-                if let Err(err) = events.send(Event::MouseMoved { point, modifiers }) {
-                    error!("error sending event: {err}");
-                }
+            DragInput::Move => {
+                // Rewrite to MouseMoved so WindowServer stops pulling the
+                // window with the pointer, without forwarding MouseMoved into
+                // ECS while the button is still held (which would let
+                // focus-follows-mouse steal focus before release).
+                CGEvent::set_type(Some(event), CGEventType::MouseMoved);
+                return false;
+            }
+            DragInput::Release => {
+                // Let the real LeftMouseUp reach WindowServer to end its drag
+                // loop without forwarding a drop or synthetic MouseMoved to
+                // Paneru; normal pointer movement resumes FFM afterwards.
                 return false;
             }
         }
@@ -1190,8 +1202,15 @@ mod tests {
     #[test]
     fn escape_calls_off_a_drag_till_the_button_comes_up() {
         let mut button = LeftButton::Up;
-        let mut step =
-            |event_type, keycode, dragging| drag_input(&mut button, event_type, keycode, dragging);
+        let mut step = |event_type, keycode, dragging| {
+            drag_input(
+                &mut button,
+                event_type,
+                keycode,
+                Modifiers::empty(),
+                dragging,
+            )
+        };
         // Escape with no drag, or only a press, is the app's.
         assert_eq!(step(CGEventType::KeyDown, ESCAPE, true), DragInput::Pass);
         assert_eq!(step(CGEventType::LeftMouseDown, 0, false), DragInput::Pass);
@@ -1225,19 +1244,77 @@ mod tests {
     }
 
     #[test]
-    fn a_lost_release_after_escape_ends_the_cancel() {
+    fn modified_escape_passes_through_during_drag() {
         let mut button = LeftButton::Down;
+        for modifiers in [
+            Modifiers::LCMD | Modifiers::LALT,
+            Modifiers::LCMD,
+            Modifiers::LCTRL,
+            Modifiers::LSHIFT,
+        ] {
+            assert_eq!(
+                drag_input(&mut button, CGEventType::KeyDown, ESCAPE, modifiers, true),
+                DragInput::Pass,
+                "modified Escape ({modifiers:?}) must not cancel a drag"
+            );
+            assert_eq!(button, LeftButton::Down);
+        }
+
+        // Plain Escape still cancels, and modified Escape afterwards is not swallowed.
         assert_eq!(
-            drag_input(&mut button, CGEventType::KeyDown, ESCAPE, true),
+            drag_input(
+                &mut button,
+                CGEventType::KeyDown,
+                ESCAPE,
+                Modifiers::empty(),
+                true
+            ),
             DragInput::Cancel
         );
         assert_eq!(
-            drag_input(&mut button, CGEventType::MouseMoved, 0, true),
+            drag_input(
+                &mut button,
+                CGEventType::KeyDown,
+                ESCAPE,
+                Modifiers::LCMD | Modifiers::LALT,
+                false
+            ),
+            DragInput::Pass
+        );
+    }
+
+    #[test]
+    fn a_lost_release_after_escape_ends_the_cancel() {
+        let mut button = LeftButton::Down;
+        assert_eq!(
+            drag_input(
+                &mut button,
+                CGEventType::KeyDown,
+                ESCAPE,
+                Modifiers::empty(),
+                true
+            ),
+            DragInput::Cancel
+        );
+        assert_eq!(
+            drag_input(
+                &mut button,
+                CGEventType::MouseMoved,
+                0,
+                Modifiers::empty(),
+                true
+            ),
             DragInput::Pass
         );
         assert_eq!(button, LeftButton::Up);
         assert_eq!(
-            drag_input(&mut button, CGEventType::LeftMouseDragged, 0, true),
+            drag_input(
+                &mut button,
+                CGEventType::LeftMouseDragged,
+                0,
+                Modifiers::empty(),
+                true
+            ),
             DragInput::Pass
         );
     }

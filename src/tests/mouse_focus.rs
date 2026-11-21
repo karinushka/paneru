@@ -460,11 +460,13 @@ fn click_focus_leaves_the_pointer_where_the_user_clicked() {
                 };
                 world.write_message(Event::MouseDown {
                     point,
+                    button: crate::events::MouseButton::Left,
                     modifiers: Modifiers::empty(),
                 });
                 if focus_after_release {
                     world.write_message(Event::MouseUp {
                         point,
+                        button: crate::events::MouseButton::Left,
                         modifiers: Modifiers::empty(),
                     });
                 }
@@ -475,6 +477,7 @@ fn click_focus_leaves_the_pointer_where_the_user_clicked() {
                 if !focus_after_release {
                     world.write_message(Event::MouseUp {
                         point: CGPoint { x: 0.0, y: 0.0 },
+                        button: crate::events::MouseButton::Left,
                         modifiers: Modifiers::empty(),
                     });
                 }
@@ -559,10 +562,12 @@ fn clicking_already_focused_window_does_not_recenter_strip() {
             let point = CGPoint { x: 100.0, y: 100.0 };
             world.write_message(Event::MouseDown {
                 point,
+                button: crate::events::MouseButton::Left,
                 modifiers: Modifiers::empty(),
             });
             world.write_message(Event::MouseUp {
                 point,
+                button: crate::events::MouseButton::Left,
                 modifiers: Modifiers::empty(),
             });
         })
@@ -634,10 +639,12 @@ fn clicking_partially_offscreen_focused_window_brings_it_into_view() {
             let point = CGPoint { x: 100.0, y: 100.0 };
             world.write_message(Event::MouseDown {
                 point,
+                button: crate::events::MouseButton::Left,
                 modifiers: Modifiers::empty(),
             });
             world.write_message(Event::MouseUp {
                 point,
+                button: crate::events::MouseButton::Left,
                 modifiers: Modifiers::empty(),
             });
         })

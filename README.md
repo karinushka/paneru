@@ -45,6 +45,8 @@ https://github.com/user-attachments/assets/793e7eaa-7909-4086-8380-1fb7861f8780
   avoid an extra click.
 - **Sliding windows with touchpad:** Using a touchpad is quite natural for
   navigation of the window pane.
+- **Title-bar reordering:** Drag a tiled window by its title bar to move its column within the current strip.
+  Escape returns the column to its original slot.
 - **Native macOS tabs support:** Applications like Ghostty use these, so
   Paneru manages them on the layout strip like other windows.
 - **Optimal for Large Displays:** Standard tiling window managers can be

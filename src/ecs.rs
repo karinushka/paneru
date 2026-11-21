@@ -42,6 +42,7 @@ use crate::platform::{Modifiers, PlatformCallbacks, WinID, WorkspaceId};
 
 pub mod desktop;
 pub mod display;
+pub(crate) mod drag;
 pub mod focus;
 pub mod layout;
 pub mod layout_ops;

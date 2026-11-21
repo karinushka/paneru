@@ -175,11 +175,15 @@ impl TryFrom<&Event> for LuaEvent {
                 window_id: *window_id,
             },
 
-            Event::MouseDown { point, modifiers } => LuaEvent::MouseDown(mouse(point, *modifiers)),
-            Event::MouseUp { point, modifiers } => LuaEvent::MouseUp(mouse(point, *modifiers)),
-            Event::MouseDragged { point, modifiers } => {
-                LuaEvent::MouseDragged(mouse(point, *modifiers))
-            }
+            Event::MouseDown {
+                point, modifiers, ..
+            } => LuaEvent::MouseDown(mouse(point, *modifiers)),
+            Event::MouseUp {
+                point, modifiers, ..
+            } => LuaEvent::MouseUp(mouse(point, *modifiers)),
+            Event::MouseDragged {
+                point, modifiers, ..
+            } => LuaEvent::MouseDragged(mouse(point, *modifiers)),
             Event::MouseMoved { point, modifiers } => {
                 LuaEvent::MouseMoved(mouse(point, *modifiers))
             }
@@ -259,6 +263,7 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::WindowCreated { .. }
             | Event::Command { .. }
             | Event::TabIndicatorClicked { .. }
+            | Event::CancelDrag
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
             | Event::StateSubscribe { .. }
@@ -561,6 +566,7 @@ mod tests {
             &lua,
             &Event::MouseDown {
                 point: objc2_core_foundation::CGPoint { x: 10.0, y: 20.0 },
+                button: crate::events::MouseButton::Left,
                 modifiers: Modifiers::ALT,
             },
         )

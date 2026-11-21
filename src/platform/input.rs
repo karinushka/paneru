@@ -57,16 +57,6 @@ pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
 /// Escape's key code.
 const ESCAPE: i64 = 53;
 
-/// Whether a window is being dragged, as the ECS last said, for Escape to
-/// call off.
-static DRAGGING: AtomicBool = AtomicBool::new(false);
-
-/// Says whether a window is being dragged. Called from the ECS thread as a
-/// drag begins and ends.
-pub fn set_dragging(dragging: bool) {
-    DRAGGING.store(dragging, Ordering::Relaxed);
-}
-
 /// The left button as the tap has seen it.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 enum LeftButton {
@@ -302,6 +292,9 @@ pub(crate) enum TapHealth {
 #[allow(clippy::struct_excessive_bools, reason = "independent gesture flags")]
 pub(super) struct InputHandler {
     left_button: LeftButton,
+    /// Shared with the ECS `WindowDrag` resource so the tap knows when
+    /// unmodified Escape should cancel an active title-bar drag.
+    dragging: Arc<AtomicBool>,
     /// The `EventSender` for dispatching input events.
     events: Option<EventSender>,
     /// The application `Config` for looking up keybindings.
@@ -363,9 +356,10 @@ impl InputHandler {
     /// # Returns
     ///
     /// A new `InputHandler`.
-    pub(super) fn new(events: EventSender, config: Config) -> Self {
+    pub(super) fn new(events: EventSender, config: Config, dragging: Arc<AtomicBool>) -> Self {
         InputHandler {
             left_button: LeftButton::default(),
+            dragging,
             events: Some(events),
             config,
             previous_touches: Vec::new(),
@@ -578,7 +572,7 @@ impl InputHandler {
         } else {
             0
         };
-        let dragging = DRAGGING.load(Ordering::Relaxed)
+        let dragging = self.dragging.load(Ordering::Relaxed)
             && !crate::overview::OVERVIEW_OPEN.load(Ordering::Relaxed);
         match drag_input(
             &mut self.left_button,
@@ -1792,7 +1786,7 @@ mod tests {
         let (sender, receiver) = EventSender::new();
         let config =
             Config::try_from("[swipe.gesture]\nfingers_count = 3\nvertical = false\n").unwrap();
-        let mut handler = InputHandler::new(sender, config);
+        let mut handler = InputHandler::new(sender, config, Arc::new(AtomicBool::new(false)));
 
         handler.dispatch_swipe_movement(Some(SwipeMovement::Vertical(0.02)), 3, Some(0.008), 0.0);
 
@@ -1815,7 +1809,7 @@ mod tests {
             let (sender, receiver) = EventSender::new();
             let config = Config::try_from(toml).unwrap();
             let fingers = config.swipe_gesture_fingers().unwrap();
-            let mut handler = InputHandler::new(sender, config);
+            let mut handler = InputHandler::new(sender, config, Arc::new(AtomicBool::new(false)));
             handler.finger_landed_at = Some(10.0);
 
             handler.dispatch_swipe_movement(
@@ -1844,7 +1838,7 @@ mod tests {
         let (sender, receiver) = EventSender::new();
         let config =
             Config::try_from("[swipe.gesture]\nfingers_count = 3\noverview_fingers = 4\n").unwrap();
-        let mut handler = InputHandler::new(sender, config);
+        let mut handler = InputHandler::new(sender, config, Arc::new(AtomicBool::new(false)));
         handler.finger_landed_at = Some(10.0);
 
         handler.dispatch_swipe_movement(
@@ -1894,7 +1888,7 @@ mod tests {
         let (sender, receiver) = EventSender::new();
         let config =
             Config::try_from("[bindings]\nwindow_focus_west = \"cmd - h\"\n").expect("config");
-        let handler = InputHandler::new(sender, config);
+        let handler = InputHandler::new(sender, config, Arc::new(AtomicBool::new(false)));
 
         // When closed, bare Escape (53) and Return (36) pass through untouched.
         crate::overview::OVERVIEW_OPEN.store(false, Ordering::Relaxed);

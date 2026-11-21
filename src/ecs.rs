@@ -1032,8 +1032,9 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let menu_events = sender.clone();
     let tab_indicator_events = sender.clone();
     let overview_events = sender.clone();
+    let dragging = app.world().resource::<drag::WindowDrag>().tap_flag();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
-    let initial_config = platform_callbacks.setup_handlers()?;
+    let initial_config = platform_callbacks.setup_handlers(dragging)?;
     let mtm = platform_callbacks.main_thread_marker;
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);

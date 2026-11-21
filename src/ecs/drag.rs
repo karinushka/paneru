@@ -10,6 +10,8 @@ use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, ParamSet, Query, Res, ResMut};
 use bevy::math::IRect;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 use tracing::debug;
 
@@ -26,11 +28,42 @@ use crate::ecs::{
 };
 use crate::events::{Event, MouseButton};
 use crate::manager::{Display, Origin, Window, WindowManager, origin_from};
-use crate::platform::{WorkspaceId, input::set_dragging};
+use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
-#[derive(Default, Resource)]
-pub(crate) struct WindowDrag(Option<Press>);
+/// Tracks a left-button press and active title-bar column drag, owning the
+/// shared atomic flag read by `InputHandler` on the `CGEventTap`.
+#[derive(Resource)]
+pub(crate) struct WindowDrag {
+    press: Option<Press>,
+    tap_flag: Arc<AtomicBool>,
+}
+
+impl Default for WindowDrag {
+    fn default() -> Self {
+        Self {
+            press: None,
+            tap_flag: Arc::new(AtomicBool::new(false)),
+        }
+    }
+}
+
+/// RAII guard that keeps the shared tap flag set for the exact lifetime of a
+/// [`Drag`], clearing it automatically on drop, cancel, or world teardown.
+struct DragFlagGuard(Arc<AtomicBool>);
+
+impl DragFlagGuard {
+    fn new(flag: &Arc<AtomicBool>) -> Self {
+        flag.store(true, Ordering::Relaxed);
+        Self(Arc::clone(flag))
+    }
+}
+
+impl Drop for DragFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::Relaxed);
+    }
+}
 
 struct Press {
     window: Entity,
@@ -56,6 +89,7 @@ struct Drag {
     crossed: bool,
     origin: usize,
     held: Vec<Entity>,
+    _tap_guard: DragFlagGuard,
 }
 
 /// Briefly ignore stale Space membership while a dropped column reaches its slot.
@@ -71,13 +105,19 @@ impl ColumnInTransit {
 }
 
 impl WindowDrag {
+    /// Returns a cloned handle to the lock-free dragging flag shared with the
+    /// `CGEventTap` input handler.
+    pub(crate) fn tap_flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.tap_flag)
+    }
+
     #[cfg(test)]
     pub(crate) fn pressed(&self) -> bool {
-        self.0.is_some()
+        self.press.is_some()
     }
 
     pub(super) fn press(&mut self, window: Option<(Entity, Entity, IRect)>) {
-        self.0 = window.map(|(window, strip, frame)| Press {
+        self.press = window.map(|(window, strip, frame)| Press {
             window,
             strip,
             frame,
@@ -88,7 +128,7 @@ impl WindowDrag {
     }
 
     pub(super) fn track(&mut self, event: &Event) {
-        let Some(press) = self.0.as_mut().filter(|press| press.end.is_none()) else {
+        let Some(press) = self.press.as_mut().filter(|press| press.end.is_none()) else {
             return;
         };
         match event {
@@ -114,28 +154,30 @@ impl WindowDrag {
     }
 
     pub(super) fn holds(&self, entity: Entity) -> bool {
-        self.0
+        self.press
             .as_ref()
             .and_then(|press| press.drag.as_ref())
             .is_some_and(|drag| drag.held.contains(&entity))
     }
 
     pub(super) fn carries(&self, entity: Entity) -> bool {
-        self.0
+        self.press
             .as_ref()
             .and_then(|press| press.drag.as_ref())
             .is_some_and(|drag| drag.members.iter().any(|(member, _)| *member == entity))
     }
 
     pub(super) fn keeps_strip(&self, entity: Entity) -> bool {
-        self.0
+        self.press
             .as_ref()
             .and_then(|press| press.drag.as_ref())
             .is_some_and(|drag| drag.home == entity)
     }
 
     pub(crate) fn dragging(&self) -> bool {
-        self.0.as_ref().is_some_and(|press| press.drag.is_some())
+        self.press
+            .as_ref()
+            .is_some_and(|press| press.drag.is_some())
     }
 }
 
@@ -144,7 +186,7 @@ pub(super) fn register(app: &mut App) {
         Update,
         reorder_column
             .in_set(UpdateSet::Workspace)
-            .run_if(|drag: Res<WindowDrag>| drag.0.is_some()),
+            .run_if(|drag: Res<WindowDrag>| drag.press.is_some()),
     );
 }
 
@@ -195,7 +237,8 @@ fn reorder_column(
     mouse_held: Query<(Entity, &MouseHeldMarker)>,
     mut commands: Commands,
 ) {
-    let Some(press) = state.0.as_mut() else {
+    let tap_flag = Arc::clone(&state.tap_flag);
+    let Some(press) = state.press.as_mut() else {
         return;
     };
     let Ok((strip, parent, _, moving, scrolling, parked, _, _)) = strips.get(press.strip) else {
@@ -239,20 +282,20 @@ fn reorder_column(
             || strip.is_fullscreen()
             || matches!(press.end, Some(End::Cancel))
         {
-            state.0 = None;
+            state.press = None;
             return;
         }
         let layout_moving = moving || scrolling || repositioning || resizing;
         if layout_moving || press.pointer.is_none() || frame.min == press.frame.min {
             if press.end.is_some() {
-                state.0 = None;
+                state.press = None;
             } else if layout_moving || press.pointer.is_none() {
                 press.frame = frame;
             }
             return;
         }
         if frame.size() != press.frame.size() {
-            state.0 = None;
+            state.press = None;
             return;
         }
         let held = strip
@@ -294,8 +337,8 @@ fn reorder_column(
             crossed: false,
             origin: index,
             held,
+            _tap_guard: DragFlagGuard::new(&tap_flag),
         });
-        set_dragging(true);
     }
 
     let Some(drag) = &mut press.drag else {
@@ -449,13 +492,12 @@ fn finish(
     mouse_held: &Query<(Entity, &MouseHeldMarker)>,
     commands: &mut Commands,
 ) {
-    let Some(press) = state.0.take() else {
+    let Some(press) = state.press.take() else {
         return;
     };
     let Some(drag) = press.drag else {
         return;
     };
-    set_dragging(false);
     if drag.crossed
         && let Ok((mut home, ..)) = strips.get_mut(drag.home)
         && home.len() == 0

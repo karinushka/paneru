@@ -935,3 +935,52 @@ fn mid_drag_window_resize_does_not_clobber_target_slot_or_strip_offset() {
         )
     );
 }
+
+#[test]
+fn tap_flag_tracks_drag_lifecycle_and_resets_on_drop() {
+    use std::sync::atomic::Ordering;
+
+    let mut first = three();
+    let first_flag = first.world().resource::<WindowDrag>().tap_flag();
+    assert!(!first_flag.load(Ordering::Relaxed));
+
+    let start = title_bar(&mut first, 0);
+    press(&mut first, start);
+    assert!(
+        !first_flag.load(Ordering::Relaxed),
+        "a plain press must not arm Escape drag cancellation"
+    );
+
+    let at = drag(&mut first, 0, start, &[50; 4]);
+    assert!(
+        first_flag.load(Ordering::Relaxed),
+        "an active title-bar drag must set its World-owned tap flag"
+    );
+
+    // A second isolated World tracks its own flag and clears it on drop
+    // without touching the first World's flag.
+    let second_flag = {
+        let mut second = three();
+        let flag = second.world().resource::<WindowDrag>().tap_flag();
+        let s = title_bar(&mut second, 0);
+        press(&mut second, s);
+        drag(&mut second, 0, s, &[50; 4]);
+        assert!(flag.load(Ordering::Relaxed));
+        flag
+    };
+    assert!(
+        !second_flag.load(Ordering::Relaxed),
+        "dropping a World mid-drag must clear its tap flag via Drop"
+    );
+    assert!(
+        first_flag.load(Ordering::Relaxed),
+        "dropping another World must not affect this World's tap flag"
+    );
+
+    release(&mut first, at);
+    first.advance(SETTLE);
+    assert!(
+        !first_flag.load(Ordering::Relaxed),
+        "releasing the drag must clear the tap flag"
+    );
+}

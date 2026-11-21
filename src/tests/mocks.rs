@@ -449,10 +449,12 @@ impl MockState {
         let point = CGPoint::new(point.x.into(), point.y.into());
         inner.event_queue.push_back(Event::MouseDown {
             point,
+            button: crate::events::MouseButton::Left,
             modifiers: Modifiers::empty(),
         });
         inner.event_queue.push_back(Event::MouseUp {
             point,
+            button: crate::events::MouseButton::Left,
             modifiers: Modifiers::empty(),
         });
     }
@@ -474,14 +476,17 @@ impl MockState {
         let end_p = CGPoint::new(end.x.into(), end.y.into());
         inner.event_queue.push_back(Event::MouseDown {
             point: start_p,
+            button: crate::events::MouseButton::Left,
             modifiers: Modifiers::empty(),
         });
         inner.event_queue.push_back(Event::MouseDragged {
             point: end_p,
+            button: crate::events::MouseButton::Left,
             modifiers: Modifiers::empty(),
         });
         inner.event_queue.push_back(Event::MouseUp {
             point: end_p,
+            button: crate::events::MouseButton::Left,
             modifiers: Modifiers::empty(),
         });
     }

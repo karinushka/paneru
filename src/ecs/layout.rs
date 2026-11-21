@@ -551,6 +551,16 @@ pub struct LayoutStrip {
 }
 
 impl LayoutStrip {
+    /// Move a column within this strip, preserving its stack and active tab.
+    pub(crate) fn move_column(&mut self, from: usize, to: usize) {
+        if from != to
+            && to < self.columns.len()
+            && let Some(column) = self.columns.remove(from)
+        {
+            self.columns.insert(to, column);
+        }
+    }
+
     pub fn new(id: WorkspaceId, virtual_index: u32) -> Self {
         Self {
             id,
@@ -2041,6 +2051,7 @@ fn insert_strip_window_contexts(
 /// the layout strip against the current display viewport.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn position_layout_windows(
+    drag: Res<crate::ecs::drag::WindowDrag>,
     positioned_windows: RepositionedWindows,
     workspaces: StripsForWindowPositioning,
     snap_guards: Query<&SnapStripMarker>,
@@ -2069,6 +2080,9 @@ fn position_layout_windows(
     for (entity, window, layout_position, mut position, mut bounds, resize, was_parked_tab) in
         positioned_windows
     {
+        if drag.holds(entity) {
+            continue;
+        }
         let Some(context) = strip_contexts.get(&entity) else {
             continue;
         };

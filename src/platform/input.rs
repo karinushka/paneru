@@ -17,6 +17,7 @@ use std::ffi::c_void;
 use std::marker::PhantomPinned;
 use std::pin::Pin;
 use std::ptr::null_mut;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
 use stdext::function_name;
@@ -26,8 +27,19 @@ use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::focus_direction;
 use crate::errors::{Error, Result};
-use crate::events::{Event, EventSender};
+use crate::events::{Event, EventSender, MouseButton};
 use crate::platform::Modifiers;
+
+fn mouse_button(event_type: CGEventType) -> MouseButton {
+    if matches!(
+        event_type,
+        CGEventType::RightMouseDown | CGEventType::RightMouseUp | CGEventType::RightMouseDragged
+    ) {
+        MouseButton::Right
+    } else {
+        MouseButton::Left
+    }
+}
 
 const NX_DEVICEFNKEYMASK: u64 = 0x0080_0100;
 
@@ -40,6 +52,84 @@ static FOCUSED_PASSTHROUGH: LazyLock<ArcSwap<Vec<(u8, Modifiers)>>> =
 /// key-down. Called from the ECS thread on focus change and config reload.
 pub fn set_focused_passthrough(keys: Vec<(u8, Modifiers)>) {
     FOCUSED_PASSTHROUGH.store(Arc::new(keys));
+}
+
+/// Escape's key code.
+const ESCAPE: i64 = 53;
+
+/// Whether a window is being dragged, as the ECS last said, for Escape to
+/// call off.
+static DRAGGING: AtomicBool = AtomicBool::new(false);
+
+/// Says whether a window is being dragged. Called from the ECS thread as a
+/// drag begins and ends.
+pub fn set_dragging(dragging: bool) {
+    DRAGGING.store(dragging, Ordering::Relaxed);
+}
+
+/// The left button as the tap has seen it.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum LeftButton {
+    #[default]
+    Up,
+    Down,
+    /// Down, with the drag it held called off by Escape: the window server
+    /// sees the pointer move without it till the button comes up, and its
+    /// drag ends then.
+    Cancelled,
+}
+
+/// What the tap does with an event, for a drag Escape calls off.
+#[derive(Debug, PartialEq, Eq)]
+enum DragInput {
+    /// Handled as ever.
+    Pass,
+    /// Escape during a drag: swallowed, and the drag called off.
+    Cancel,
+    /// Escape again before the button comes up, or repeating: swallowed.
+    Swallow,
+    /// A drag after a cancel: the pointer only moves, and the window stays.
+    Move,
+    /// The release after a cancel: it ends the window server's drag, which
+    /// only the hand's own release does, but drops nothing here.
+    Release,
+}
+
+/// Follows the left button through `event_type`, and says what becomes of
+/// the event. `keycode` is a key press's, and `dragging` whether a window is
+/// being dragged.
+fn drag_input(
+    button: &mut LeftButton,
+    event_type: CGEventType,
+    keycode: i64,
+    dragging: bool,
+) -> DragInput {
+    match (event_type, *button) {
+        (CGEventType::LeftMouseDown, _) => {
+            *button = LeftButton::Down;
+            DragInput::Pass
+        }
+        (CGEventType::LeftMouseUp, was) => {
+            *button = LeftButton::Up;
+            if was == LeftButton::Cancelled {
+                DragInput::Release
+            } else {
+                DragInput::Pass
+            }
+        }
+        (CGEventType::LeftMouseDragged, LeftButton::Cancelled) => DragInput::Move,
+        // The pointer moving without the button: its release was lost.
+        (CGEventType::MouseMoved, _) => {
+            *button = LeftButton::Up;
+            DragInput::Pass
+        }
+        (CGEventType::KeyDown, LeftButton::Down) if keycode == ESCAPE && dragging => {
+            *button = LeftButton::Cancelled;
+            DragInput::Cancel
+        }
+        (CGEventType::KeyDown, LeftButton::Cancelled) if keycode == ESCAPE => DragInput::Swallow,
+        _ => DragInput::Pass,
+    }
 }
 
 /// How long to suppress scroll wheel events after a vertical swipe gesture,
@@ -209,6 +299,7 @@ pub(crate) enum TapHealth {
 /// It intercepts keyboard and mouse events, processes gestures, and dispatches them as higher-level `Event`s.
 #[allow(clippy::struct_excessive_bools, reason = "independent gesture flags")]
 pub(super) struct InputHandler {
+    left_button: LeftButton,
     /// The `EventSender` for dispatching input events.
     events: Option<EventSender>,
     /// The application `Config` for looking up keybindings.
@@ -272,6 +363,7 @@ impl InputHandler {
     /// A new `InputHandler`.
     pub(super) fn new(events: EventSender, config: Config) -> Self {
         InputHandler {
+            left_button: LeftButton::default(),
             events: Some(events),
             config,
             previous_touches: Vec::new(),
@@ -479,26 +571,65 @@ impl InputHandler {
         let flags = CGEvent::flags(Some(event));
         let modifiers = get_modifiers(flags);
 
+        let keycode = if event_type == CGEventType::KeyDown {
+            CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode)
+        } else {
+            0
+        };
+        let dragging = DRAGGING.load(Ordering::Relaxed)
+            && !crate::overview::OVERVIEW_OPEN.load(Ordering::Relaxed);
+        match drag_input(&mut self.left_button, event_type, keycode, dragging) {
+            DragInput::Pass => {}
+            DragInput::Swallow => return true,
+            DragInput::Cancel => {
+                info!("drag called off by Escape");
+                if let Err(err) = events.send(Event::CancelDrag) {
+                    error!("error sending event: {err}");
+                }
+                return true;
+            }
+            DragInput::Move | DragInput::Release => {
+                if event_type == CGEventType::LeftMouseDragged {
+                    CGEvent::set_type(Some(event), CGEventType::MouseMoved);
+                }
+                let point = CGEvent::location(Some(event));
+                if let Err(err) = events.send(Event::MouseMoved { point, modifiers }) {
+                    error!("error sending event: {err}");
+                }
+                return false;
+            }
+        }
+
         let result = match event_type {
             CGEventType::LeftMouseDown | CGEventType::RightMouseDown => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseDown { point, modifiers })
+                events.send(Event::MouseDown {
+                    point,
+                    modifiers,
+                    button: mouse_button(event_type),
+                })
             }
             CGEventType::LeftMouseUp | CGEventType::RightMouseUp => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseUp { point, modifiers })
+                events.send(Event::MouseUp {
+                    point,
+                    modifiers,
+                    button: mouse_button(event_type),
+                })
             }
             CGEventType::LeftMouseDragged | CGEventType::RightMouseDragged => {
                 let point = CGEvent::location(Some(event));
-                events.send(Event::MouseDragged { point, modifiers })
+                events.send(Event::MouseDragged {
+                    point,
+                    modifiers,
+                    button: mouse_button(event_type),
+                })
             }
             CGEventType::MouseMoved => {
                 let point = CGEvent::location(Some(event));
                 events.send(Event::MouseMoved { point, modifiers })
             }
             CGEventType::KeyDown => {
-                let keycode =
-                    CGEvent::integer_value_field(Some(event), CGEventField::KeyboardEventKeycode);
                 // handle_keypress can intercept the event, so it may return true.
                 return self.handle_keypress(keycode, flags);
             }
@@ -1055,6 +1186,61 @@ fn accept_window_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn escape_calls_off_a_drag_till_the_button_comes_up() {
+        let mut button = LeftButton::Up;
+        let mut step =
+            |event_type, keycode, dragging| drag_input(&mut button, event_type, keycode, dragging);
+        // Escape with no drag, or only a press, is the app's.
+        assert_eq!(step(CGEventType::KeyDown, ESCAPE, true), DragInput::Pass);
+        assert_eq!(step(CGEventType::LeftMouseDown, 0, false), DragInput::Pass);
+        assert_eq!(step(CGEventType::KeyDown, ESCAPE, false), DragInput::Pass);
+        assert_eq!(
+            step(CGEventType::LeftMouseDragged, 0, true),
+            DragInput::Pass
+        );
+        // Another key during the drag is too.
+        assert_eq!(step(CGEventType::KeyDown, 0, true), DragInput::Pass);
+        assert_eq!(step(CGEventType::KeyDown, ESCAPE, true), DragInput::Cancel);
+        assert_eq!(
+            step(CGEventType::KeyDown, ESCAPE, false),
+            DragInput::Swallow
+        );
+        assert_eq!(
+            step(CGEventType::LeftMouseDragged, 0, false),
+            DragInput::Move
+        );
+        assert_eq!(step(CGEventType::LeftMouseUp, 0, false), DragInput::Release);
+        // After the release, all is as ever.
+        assert_eq!(
+            step(CGEventType::LeftMouseDragged, 0, false),
+            DragInput::Pass
+        );
+        assert_eq!(step(CGEventType::KeyDown, ESCAPE, true), DragInput::Pass);
+        // A drop's release, then Escape before the drag's end is shared.
+        assert_eq!(step(CGEventType::LeftMouseDown, 0, true), DragInput::Pass);
+        assert_eq!(step(CGEventType::LeftMouseUp, 0, true), DragInput::Pass);
+        assert_eq!(step(CGEventType::KeyDown, ESCAPE, true), DragInput::Pass);
+    }
+
+    #[test]
+    fn a_lost_release_after_escape_ends_the_cancel() {
+        let mut button = LeftButton::Down;
+        assert_eq!(
+            drag_input(&mut button, CGEventType::KeyDown, ESCAPE, true),
+            DragInput::Cancel
+        );
+        assert_eq!(
+            drag_input(&mut button, CGEventType::MouseMoved, 0, true),
+            DragInput::Pass
+        );
+        assert_eq!(button, LeftButton::Up);
+        assert_eq!(
+            drag_input(&mut button, CGEventType::LeftMouseDragged, 0, true),
+            DragInput::Pass
+        );
+    }
 
     fn three_fingers(x: f64) -> Vec<Touch<usize>> {
         (0..3)

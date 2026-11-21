@@ -26,6 +26,10 @@ use crate::types::windowset::WindowSet;
 pub const STATE_FILE_NAME: &str = "state.json";
 const SUPPORTED_STATE_VERSION: u32 = 3;
 
+/// Destination for the live layout. Worlds without one keep their state in memory.
+#[derive(Resource)]
+pub(crate) struct LayoutStateFile(pub PathBuf);
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Resource)]
 pub struct PaneruState {
     pub version: u32,
@@ -902,33 +906,39 @@ fn now_timestamp() -> u64 {
         .as_secs()
 }
 
-pub fn periodic_state_save(
+pub(super) fn periodic_state_save(
+    state_file: Option<Res<LayoutStateFile>>,
     workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
 ) {
+    let Some(state_file) = state_file else {
+        return;
+    };
     let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
-    let path = PaneruState::default_state_file_path();
-    if let Err(e) = state.save_to_file(&path) {
+    let path = &state_file.0;
+    if let Err(e) = state.save_to_file(path) {
         warn!("Failed to save state: {e}");
     } else {
         debug!("State saved to {}", path.display());
     }
 }
 
-pub fn cleanup_on_exit(
+pub(crate) fn cleanup_on_exit(
+    state_file: Option<Res<LayoutStateFile>>,
     mut exit_events: MessageReader<AppExit>,
     workspaces: Query<(Option<&ChildOf>, &LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     displays: Query<(&Display, Entity, Has<ActiveDisplayMarker>)>,
     windows: Windows,
     apps: Query<&Application>,
 ) {
-    if exit_events.read().next().is_some() {
+    if let Some(state_file) = state_file
+        && exit_events.read().next().is_some()
+    {
         info!("Exiting, saving state...");
         let state = PaneruState::extract(&workspaces, &displays, &windows, &apps);
-        let path = PaneruState::default_state_file_path();
-        if let Err(e) = state.save_to_file(&path) {
+        if let Err(e) = state.save_to_file(&state_file.0) {
             error!("Failed to save state on exit: {e}");
         }
     }

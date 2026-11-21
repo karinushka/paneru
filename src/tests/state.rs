@@ -335,6 +335,36 @@ fn test_state_save_is_loadable_from_path() {
     let _ = std::fs::remove_file(path);
 }
 
+#[test]
+fn exit_save_uses_the_layout_state_file_for_its_world() {
+    use crate::tests::TestHarness;
+
+    use bevy::app::AppExit;
+    use bevy::ecs::system::RunSystemOnce;
+
+    use crate::ecs::state::{LayoutStateFile, cleanup_on_exit};
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(std::time::Duration::from_secs(1));
+    let path = unique_state_path("exit-save");
+    let world = harness.world();
+    assert!(!world.contains_resource::<LayoutStateFile>());
+    world.insert_resource(LayoutStateFile(path.clone()));
+    world.write_message(AppExit::Success);
+    world
+        .run_system_once(cleanup_on_exit)
+        .expect("save on exit");
+
+    let saved = PaneruState::load_from_file(&path).expect("layout saved to the world's path");
+    assert!(
+        saved
+            .workspaces
+            .iter()
+            .any(|space| space.workspace_id == TEST_WORKSPACE_ID)
+    );
+    std::fs::remove_file(path).expect("remove test layout");
+}
+
 fn unique_state_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "paneru-{name}-{}-{}.json",

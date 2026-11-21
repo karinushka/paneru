@@ -15,7 +15,7 @@ use tracing::{Level, instrument};
 use crate::commands::{Command, Direction, Operation};
 use crate::config::Config;
 use crate::config::swipe::{SwipeGestureDirection, focus_direction};
-use crate::ecs::layout::LayoutStrip;
+use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::{ActiveDisplay, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, PreUpdateSet,
@@ -662,29 +662,25 @@ fn clamp_viewport_offset<W>(
 where
     W: Fn(Entity) -> Option<IRect>,
 {
-    let total_strip_width = layout_strip
-        .last()
-        .and_then(|entity| {
-            windows
-                .layout_position(entity)
-                .zip(get_window_frame(entity))
-        })
-        .map(|(position, frame)| position.x + frame.width())?;
-
-    let continuous_swipe = config.continuous_swipe();
-    let strip_position = |entity: Option<Entity>| {
-        entity
-            .and_then(|entity| windows.layout_position(entity))
-            .map(|position| position.0.x)
+    let geometry = |entity| {
+        windows
+            .layout_position(entity)
+            .zip(get_window_frame(entity))
+            .map(|(position, frame)| (position.x, position.x + frame.width()))
     };
-
-    let left_snap = strip_position(layout_strip.last());
-    // NOTE: this snaps to the second window on purpose.
-    // For a single colum workspace this will return None
-    let right_snap = strip_position(layout_strip.column_at(1));
+    let live_column = |column: &Column| {
+        column
+            .top()
+            .map(|entity| layout_strip.active_tab(entity).unwrap_or(entity))
+            .and_then(geometry)
+            .or_else(|| column.window_iter().find_map(geometry))
+    };
+    let (left_snap, total_strip_width) = layout_strip.columns().rev().find_map(live_column)?;
 
     Some(
-        if continuous_swipe && let Some((left_snap, right_snap)) = left_snap.zip(right_snap) {
+        if config.continuous_swipe()
+            && let Some((right_snap, _)) = layout_strip.columns().filter_map(live_column).nth(1)
+        {
             // Allow to scroll away until the last or first window snaps.
             current_offset.clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
         } else if viewport.width() < total_strip_width {

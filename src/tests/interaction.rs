@@ -5353,3 +5353,52 @@ fn test_clock_samples_the_current_event_pump_interval() {
         assert_eq!(world.resource::<Time>().delta(), interval);
     }
 }
+
+#[test]
+fn swipe_ignores_stale_entity_at_strip_end() {
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(true),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.advance(Duration::from_millis(40));
+
+    let stale = harness.world().spawn_empty().id();
+    harness.world().entity_mut(stale).despawn();
+    let initial_x = {
+        let world = harness.world();
+        let (mut strip, position) = world
+            .query_filtered::<(&mut LayoutStrip, &Position), With<ActiveWorkspaceMarker>>()
+            .single_mut(world)
+            .expect("active strip");
+        let x = position.0.x;
+        strip.append(stale);
+        x
+    };
+
+    let world = harness.world();
+    world.write_message::<Event>(Event::TouchpadDown);
+    world.write_message::<Event>(Event::Swipe {
+        delta: 0.04,
+        fingers: 3,
+        distance_cm: 0.0,
+        elapsed_secs: Some(0.016),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    let world = harness.world();
+    let position = world
+        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active strip");
+    assert_ne!(
+        position.0.x, initial_x,
+        "a stale entity at the strip end must not block horizontal scrolling"
+    );
+}

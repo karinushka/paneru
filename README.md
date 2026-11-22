@@ -297,6 +297,8 @@ $ paneru send-cmd <command> [args...]
 | `window vertical resize`   | Cycle a stacked window through `preset_stack_heights` |
 | `window vertical grow`     | Grow a stacked window to the next preset height  |
 | `window vertical shrink`   | Shrink a stacked window to the previous preset height |
+| `window step [grow\|shrink]` | Change the column width by `window_resize_step` |
+| `window vertical step [grow\|shrink]` | Change a stacked window's height by `window_resize_step` |
 | `window fullwidth`         | Toggle full-width mode for the focused window    |
 | `window manage`            | Toggle managed/floating state                    |
 | `window raise floating`    | Raise floating windows above tiled windows       |

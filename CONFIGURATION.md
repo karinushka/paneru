@@ -36,6 +36,7 @@ General behavior settings for the window manager.
 | `menubar_height` | Integer (px) | *Auto* | Manually override the detected macOS menubar height. |
 | `window_hidden_ratio` | Float (0.0–1.0) | `0.0` | How much of a window can be hidden before it's forced into view on focus change. `0.0` = eager, `1.0` = lazy. |
 | `window_resize_cycle` | Boolean | `true` | If disabled, `window_resize` and `window_shrink` (and their `window_vertical_*` counterparts) stop at the largest/smallest preset instead of cycling back. |
+| `window_resize_step` | Float, above 0.0 and at most 1.0 | `0.05` | Share of the viewport width or height that `window_step_*` and `window_vertical_step_*` add or remove. Values out of range fall back to `0.05`. |
 | `mouse_resize_modifier` | String | *None* | If enabled allows window resizing using mouse movement. For example `cmd + shift` will allow resizing of the window when holding those keys. Proximity of the pointer to left or right window edge determines which side will be adjusted. |
 | `remember_display_setups` | Boolean | `false` | Remembers the layout of each display setup (the set of connected displays), and restores it when that setup returns: which display each window is on, the order of its columns, stacks and tabs, its virtual workspace and its width. A saved space maps to the space at the same position on the same display. |
 | `reap_empty_workspaces` | String | `false` | If enabled, a virtual workspace without any windows will be removed. |
@@ -268,6 +269,8 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_vertical_resize` | Cycle a stacked window through preset heights (Grow). No-op outside a stack. |
 | `window_vertical_grow` | Alias for `window_vertical_resize`. |
 | `window_vertical_shrink` | Cycle a stacked window through preset heights (Shrink). |
+| `window_step_grow` / `_shrink` | Widen/narrow the column by `window_resize_step` of the viewport width. Stops at full width and at one step, without wrapping. |
+| `window_vertical_step_grow` / `_shrink` | Make a stacked window taller/shorter by `window_resize_step` of the viewport height. Its neighbour absorbs the difference. No-op outside a stack. |
 | `window_fullwidth` | Toggle full-width mode. |
 | `window_manage` | Toggle between tiled and floating state. |
 | `window_stack` | Stack the current window into the column on the left. |

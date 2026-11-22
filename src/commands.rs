@@ -180,8 +180,10 @@ fn cancel_resize_intent(
             interrupted |= match command {
                 Command::Window(
                     Operation::Resize(_)
+                    | Operation::ResizeStep(_)
                     | Operation::SetWidth(_)
                     | Operation::ResizeVertical(_)
+                    | Operation::ResizeVerticalStep(_)
                     | Operation::FullWidth,
                 )
                 | Command::PrintState
@@ -987,7 +989,8 @@ fn command_center_window(
     }
 }
 
-/// Resizes the focused window based on preset column widths.
+/// Resizes the focused window to the next or previous preset column width, or
+/// by one `window_resize_step` of the viewport width.
 ///
 /// # Arguments
 ///
@@ -1004,7 +1007,10 @@ fn resize_window(
     mut commands: Commands,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
-        matches!(op, Operation::Resize(_) | Operation::SetWidth(_))
+        matches!(
+            op,
+            Operation::Resize(_) | Operation::ResizeStep(_) | Operation::SetWidth(_)
+        )
     })
     .next() else {
         return;
@@ -1055,6 +1061,10 @@ fn resize_window(
                     fallback
                 }
             }),
+        Operation::ResizeStep(direction) => {
+            let step = config.window_resize_step();
+            step_ratio(current_ratio, *direction, step, step)
+        }
         _ => return,
     };
 
@@ -1081,9 +1091,18 @@ fn resize_window(
     commands.reshuffle_around(entity);
 }
 
-/// Cycles the focused window's height through `preset_stack_heights`, letting
-/// the neighbour below (or above, when the window is last) absorb the
-/// difference.
+/// One step from `ratio` in `direction`, kept between `min_ratio` and the full
+/// viewport. A ratio already outside that range never moves further out of it.
+fn step_ratio(ratio: f64, direction: ResizeDirection, step: f64, min_ratio: f64) -> f64 {
+    match direction {
+        ResizeDirection::Grow => (ratio + step).min(ratio.max(1.0)),
+        ResizeDirection::Shrink => (ratio - step).max(ratio.min(min_ratio)),
+    }
+}
+
+/// Cycles the focused window's height through `preset_stack_heights`, or
+/// changes it by one `window_resize_step` of the viewport height, letting the
+/// neighbour below (or above, when the window is last) absorb the difference.
 ///
 /// Only stacks are eligible: `binpack_heights` stretches a column's lone member
 /// to the full strip height, so a height written anywhere else is overwritten on
@@ -1095,12 +1114,17 @@ fn resize_window_vertical(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some(&Operation::ResizeVertical(direction)) =
-        filter_window_operations(&mut messages, |op| {
-            matches!(op, Operation::ResizeVertical(_))
-        })
-        .next()
-    else {
+    let Some((direction, stepped)) = filter_window_operations(&mut messages, |op| {
+        matches!(
+            op,
+            Operation::ResizeVertical(_) | Operation::ResizeVerticalStep(_)
+        )
+    })
+    .find_map(|op| match *op {
+        Operation::ResizeVertical(direction) => Some((direction, false)),
+        Operation::ResizeVerticalStep(direction) => Some((direction, true)),
+        _ => None,
+    }) else {
         return;
     };
 
@@ -1157,6 +1181,9 @@ fn resize_window_vertical(
     // The presets are assumed sorted ascending, and the `0.05` dead-band keeps
     // float noise from re-selecting the preset the window is already at.
     let next_ratio = match direction {
+        // The vertical floor is `MIN_WINDOW_HEIGHT` enforced below, so use 0.0
+        // here to avoid stranding a large `window_resize_step` above it.
+        _ if stepped => step_ratio(current_ratio, direction, config.window_resize_step(), 0.0),
         ResizeDirection::Grow => heights
             .iter()
             .copied()
@@ -2289,5 +2316,31 @@ mod tests {
             pick_nearest_in_direction(&Direction::Last, focused, candidates),
             None,
         );
+    }
+
+    #[test]
+    fn step_ratio_clamps_within_bounds_without_jumping_out_of_range_ratios() {
+        let approx = |actual: f64, expected: f64| {
+            assert!(
+                (actual - expected).abs() < 1e-12,
+                "expected {expected}, got {actual}"
+            );
+        };
+
+        // Normal clamping within [min_ratio, 1.0].
+        approx(step_ratio(0.9, ResizeDirection::Grow, 0.25, 0.25), 1.0);
+        approx(step_ratio(0.3, ResizeDirection::Shrink, 0.25, 0.25), 0.25);
+
+        // Already oversized (> 1.0): Grow holds steady, Shrink steps back down.
+        approx(step_ratio(1.5, ResizeDirection::Grow, 0.25, 0.25), 1.5);
+        approx(step_ratio(1.5, ResizeDirection::Shrink, 0.25, 0.25), 1.25);
+
+        // Already below min_ratio: Shrink holds steady, Grow steps back up.
+        approx(step_ratio(0.15, ResizeDirection::Shrink, 0.25, 0.25), 0.15);
+        approx(step_ratio(0.15, ResizeDirection::Grow, 0.25, 0.25), 0.4);
+
+        // Vertical floor (min_ratio = 0.0) allows shrinking below a large step.
+        approx(step_ratio(0.5, ResizeDirection::Shrink, 0.5, 0.0), 0.0);
+        approx(step_ratio(0.75, ResizeDirection::Shrink, 0.5, 0.0), 0.25);
     }
 }

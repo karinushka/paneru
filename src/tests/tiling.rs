@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use crate::commands::{Command, Direction, Operation, ResizeDirection};
 use crate::config::{
-    Config, InitialWindowWidth, InitialWindowWidthMode, MainOptions, WindowParams,
+    Config, InitialWindowWidth, InitialWindowWidthMode, MainOptions, WindowParams, parse_command,
 };
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::{ActiveWorkspaceMarker, SpawnWindowTrigger};
@@ -573,6 +573,151 @@ fn test_stack_joining_a_full_height_window_is_split_evenly() {
             assert_four_window_stack_split_evenly(world);
         })
         .run(commands);
+}
+
+/// A command as its keybinding names it, e.g. `window_step_grow`.
+fn binding(name: &str) -> Event {
+    let argv = name.split('_').collect::<Vec<_>>();
+    Event::Command {
+        command: parse_command(&argv).unwrap_or_else(|err| panic!("{name}: {err}")),
+    }
+}
+
+fn resize_step_config(step: f64) -> Config {
+    Config::try_from(format!("[options]\nwindow_resize_step = {step}\n[bindings]\n").as_str())
+        .expect("config should parse")
+}
+
+/// The width steps by `window_resize_step` of the display, stops at the full
+/// display width and at one step, and never wraps around.
+#[test]
+fn test_window_step_resize_changes_width_by_the_step_without_wrapping() {
+    let mut commands = vec![Event::MenuOpened { window_id: 0 }];
+    commands.extend((0..4).map(|_| binding("window_step_grow")));
+    commands.extend((0..4).map(|_| binding("window_step_shrink")));
+
+    // A quarter of the 1024px display is 256px.
+    let widths = [656, 912, 1024, 1024, 768, 512, 256, 256];
+    let mut harness = TestHarness::new()
+        .with_config(resize_step_config(0.25))
+        .with_windows(1);
+    for (index, width) in widths.into_iter().enumerate() {
+        harness = harness.on_iteration(index + 1, move |world, _state| {
+            assert_window_size!(world, 0, width, TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT);
+        });
+    }
+    harness.run(commands);
+}
+
+/// The default step is five percentage points of the display width.
+#[test]
+fn test_window_step_resize_defaults_to_five_points() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, |world, _state| {
+            // 400px is 39.0625% of 1024px, and 44.0625% is 451.2px.
+            assert_window_size!(world, 0, 451, VIEWPORT_HEIGHT);
+        })
+        .on_iteration(2, |world, _state| {
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            binding("window_step_grow"),
+            binding("window_step_shrink"),
+        ]);
+}
+
+/// In a stack, the height steps by `window_resize_step` of the viewport, the
+/// neighbour absorbs the difference, and the neighbour keeps its minimum.
+#[test]
+fn test_window_vertical_step_resize_changes_height_by_the_step() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    let mut commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        binding("window_vertical_step_grow"),
+        binding("window_vertical_step_shrink"),
+    ];
+    commands.extend((0..4).map(|_| binding("window_vertical_step_grow")));
+
+    // A tenth of the 748px viewport is 74.8px, and 548px leaves the neighbour
+    // its 200px minimum.
+    let heights = [449, 374, 449, 524, 548, 548];
+    let mut harness = TestHarness::new()
+        .with_config(resize_step_config(0.1))
+        .with_windows(2)
+        .on_iteration(3, |world, _state| {
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT / 2);
+        });
+    for (index, height) in heights.into_iter().enumerate() {
+        harness = harness.on_iteration(index + 4, move |world, _state| {
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, height);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT - height);
+        });
+    }
+    harness.run(commands);
+}
+
+/// Even with a large `window_resize_step`, shrinking a stacked window still
+/// reaches `MIN_WINDOW_HEIGHT` rather than getting stranded at one step.
+#[test]
+fn test_window_vertical_step_shrink_reaches_minimum_height_with_large_step() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+    const MIN_HEIGHT: i32 = 200;
+
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::First)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Stack(true)),
+        },
+        binding("window_vertical_step_shrink"),
+    ];
+
+    TestHarness::new()
+        .with_config(resize_step_config(0.5))
+        .with_windows(2)
+        .on_iteration(3, |world, _state| {
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT / 2);
+        })
+        .on_iteration(4, |world, _state| {
+            assert_window_size!(world, 1, TEST_WINDOW_WIDTH, MIN_HEIGHT);
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT - MIN_HEIGHT);
+        })
+        .run(commands);
+}
+
+/// Outside a stack a column's lone window always fills the viewport height.
+#[test]
+fn test_window_vertical_step_resize_is_a_noop_outside_a_stack() {
+    const VIEWPORT_HEIGHT: i32 = TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT;
+
+    TestHarness::new()
+        .with_windows(1)
+        .on_iteration(1, |world, _state| {
+            assert_window_size!(world, 0, TEST_WINDOW_WIDTH, VIEWPORT_HEIGHT);
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            binding("window_vertical_step_shrink"),
+        ]);
 }
 
 #[test]
@@ -2362,6 +2507,22 @@ fn test_window_resize_pressed_again_while_refused_starts_from_the_kept_width() {
     harness.run(vec![shrink()]);
     harness.advance(Duration::from_millis(300));
     harness.run(vec![shrink()]);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_window_size!(world, 1, 400, 748);
+    assert_window_at!(world, 0, 0, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 1, 400, TEST_MENUBAR_HEIGHT);
+    assert_window_at!(world, 2, 800, TEST_MENUBAR_HEIGHT);
+}
+
+#[test]
+fn test_window_step_resize_pressed_again_while_refused_leaves_the_strip_in_place() {
+    let mut harness = focused_middle_window_with_min_width(400);
+
+    harness.run(vec![binding("window_step_shrink")]);
+    harness.advance(Duration::from_millis(300));
+    harness.run(vec![binding("window_step_shrink")]);
     harness.advance(Duration::from_secs(2));
 
     let world = harness.world();

@@ -23,6 +23,7 @@ use super::{
     RetryFrontSwitch, SpawnWindowTrigger, Timeout, VerifyWindowPosition,
 };
 
+use crate::commands::Command;
 use crate::config::{Config, decorations::BorderRadiusOption};
 use crate::ecs::display::FloatingLayer;
 use crate::ecs::layout::{Column, LayoutStrip, StackItem};
@@ -1161,35 +1162,72 @@ pub(crate) fn gather_initial_processes(
     };
     let mut initial_processes: Vec<BProcess> = Vec::new();
     let mut toml_config = None;
+    let mut exiting = false;
     loop {
-        match receiver.recv().expect("error reading initial processes") {
-            Event::ProcessesLoaded => break,
-            Event::Exit => {
-                exit.write(AppExit::Success);
+        match receiver.recv() {
+            Ok(Event::ProcessesLoaded) => break,
+            Ok(
+                Event::Exit
+                | Event::Command {
+                    command: Command::Quit,
+                },
+            ) => {
+                exiting = true;
+            }
+            Err(_) => {
+                exiting = true;
                 break;
             }
-            Event::ApplicationLaunched { psn, observer } => {
-                let process: BProcess = Process::new(&psn, observer.clone()).into();
-                if process.pid() != 0 {
-                    initial_processes.push(process);
-                } else {
-                    debug!("Skipping process with PID 0 (likely kernel_task).");
+            Ok(Event::ApplicationLaunched { psn, observer }) => {
+                if !exiting {
+                    let process: BProcess = Process::new(&psn, observer.clone()).into();
+                    if process.pid() != 0 {
+                        initial_processes.push(process);
+                    } else {
+                        debug!("Skipping process with PID 0 (likely kernel_task).");
+                    }
                 }
             }
-            Event::InitialConfig(config) => {
+            Ok(Event::InitialConfig(config)) => {
                 toml_config = Some(config);
             }
-            event => warn!("Stray event during initial process gathering: {event:?}"),
+            Ok(event) => warn!("Stray event during initial process gathering: {event:?}"),
         }
+    }
+
+    // Always ensure `Config` is present even when exiting: Bevy runs the rest
+    // of `Startup` (`initialise_workspaces`) and the first frame before
+    // `autorelease_runner` checks `app.should_exit()`.
+    //
+    // The input event tap holds its own clone of the `Config` handle from
+    // `InitialConfig` and reads swipe/scroll settings off it per event. A Lua
+    // `paneru.setup{...}` builds a fresh handle, so its settings must be
+    // published into the tap's existing handle rather than replacing it, or
+    // gestures would keep reading stale settings.
+    match (existing_config.as_deref(), toml_config.clone()) {
+        #[cfg(feature = "lua")]
+        (Some(lua_config), Some(shared)) => {
+            shared.replace_inner_from(lua_config);
+            commands.insert_resource(shared);
+        }
+        (None, Some(config)) => commands.insert_resource(config),
+        (None, None) if exiting => {
+            if let Ok(defaults) = Config::defaults() {
+                commands.insert_resource(defaults);
+            }
+        }
+        _ => {}
+    }
+
+    if exiting {
+        exit.write(AppExit::Success);
+        return;
     }
 
     // A Lua `paneru.setup{...}` config is inserted at build time and wins; the
     // TOML config drained from the channel is only the fallback. Use whichever
     // is authoritative for the force-manage and menubar decisions below.
-    let effective = existing_config
-        .as_deref()
-        .cloned()
-        .or_else(|| toml_config.clone());
+    let effective = existing_config.as_deref().cloned().or(toml_config);
 
     if let Some(config) = &effective {
         let height = config.menubar_height();
@@ -1203,21 +1241,6 @@ pub(crate) fn gather_initial_processes(
             .as_ref()
             .is_some_and(|c| c.should_force_manage_process(&**process));
         spawn_initial_process(process, forced, &mut commands);
-    }
-
-    // The input event tap holds its own clone of the `Config` handle from
-    // `InitialConfig` and reads swipe/scroll settings off it per event. A Lua
-    // `paneru.setup{...}` builds a fresh handle, so its settings must be
-    // published into the tap's existing handle rather than replacing it, or
-    // gestures would keep reading stale settings.
-    match (existing_config.as_deref(), toml_config) {
-        #[cfg(feature = "lua")]
-        (Some(lua_config), Some(shared)) => {
-            shared.replace_inner_from(lua_config);
-            commands.insert_resource(shared);
-        }
-        (None, Some(config)) => commands.insert_resource(config),
-        _ => {}
     }
 }
 
@@ -2057,7 +2080,8 @@ mod startup_tests {
 
     use bevy::prelude::*;
 
-    use super::gather_initial_processes;
+    use super::{gather_initial_processes, initialise_workspaces};
+    use crate::commands::Command;
     use crate::config::Config;
     use crate::events::Event;
 
@@ -2080,6 +2104,79 @@ mod startup_tests {
         app.update();
 
         assert_eq!(app.should_exit(), Some(AppExit::Success));
+    }
+
+    /// Ctrl-C / SIGTERM arriving before `InitialConfig` must keep draining
+    /// until `ProcessesLoaded` so `Config` is still inserted for chained
+    /// `Startup` systems like `initialise_workspaces`.
+    #[test]
+    fn exit_before_initial_config_still_provides_config_for_chained_startup() {
+        let (sender, receiver) = channel();
+        sender.send(Event::Exit).expect("send exit");
+        sender
+            .send(Event::InitialConfig(
+                Config::defaults().expect("defaults should parse"),
+            ))
+            .expect("send initial config");
+        sender.send(Event::ProcessesLoaded).expect("send loaded");
+
+        let mut app = App::new();
+        app.insert_non_send(receiver);
+        app.add_systems(
+            Startup,
+            (gather_initial_processes, initialise_workspaces).chain(),
+        );
+        app.update();
+
+        assert!(app.world().contains_resource::<Config>());
+        assert_eq!(app.should_exit(), Some(AppExit::Success));
+    }
+
+    #[test]
+    fn quit_command_and_disconnect_during_startup_stop_cleanly() {
+        // `paneru send-cmd quit` received ahead of `ProcessesLoaded`.
+        {
+            let (sender, receiver) = channel();
+            sender
+                .send(Event::Command {
+                    command: Command::Quit,
+                })
+                .expect("send quit");
+            sender
+                .send(Event::InitialConfig(
+                    Config::defaults().expect("defaults should parse"),
+                ))
+                .expect("send initial config");
+            sender.send(Event::ProcessesLoaded).expect("send loaded");
+
+            let mut app = App::new();
+            app.insert_non_send(receiver);
+            app.add_systems(
+                Startup,
+                (gather_initial_processes, initialise_workspaces).chain(),
+            );
+            app.update();
+
+            assert!(app.world().contains_resource::<Config>());
+            assert_eq!(app.should_exit(), Some(AppExit::Success));
+        }
+
+        // Channel disconnected before `InitialConfig` or `ProcessesLoaded`.
+        {
+            let (sender, receiver) = channel::<Event>();
+            drop(sender);
+
+            let mut app = App::new();
+            app.insert_non_send(receiver);
+            app.add_systems(
+                Startup,
+                (gather_initial_processes, initialise_workspaces).chain(),
+            );
+            app.update();
+
+            assert!(app.world().contains_resource::<Config>());
+            assert_eq!(app.should_exit(), Some(AppExit::Success));
+        }
     }
 }
 

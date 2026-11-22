@@ -3,10 +3,11 @@ use std::time::Duration;
 
 use bevy::MinimalPlugins;
 use bevy::app::App as BevyApp;
-use bevy::app::{First, Last, PostUpdate, PreUpdate, Startup};
+use bevy::app::{AppExit, First, Last, PostUpdate, PreUpdate, Startup};
 use bevy::ecs::change_detection::DetectChanges;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::lifecycle::RemovedComponents;
+use bevy::ecs::message::Messages;
 use bevy::ecs::query::{Added, Changed, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
@@ -232,6 +233,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
         };
     let native_tabs_enabled =
         |config: Option<Res<Config>>| config.is_none_or(|config| config.native_tabs_enabled());
+    let not_exiting =
+        |exit: Option<Res<Messages<AppExit>>>| exit.is_none_or(|exit| exit.is_empty());
 
     app.configure_sets(
         First,
@@ -281,7 +284,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
     app.add_message::<OverviewEvent>();
     // Sample Bevy time after the blocking OS wait, so this frame uses its own
     // elapsed interval rather than the previous frame's sleep.
-    app.add_systems(First, systems::pump_events.in_set(FirstSet::Pump));
+    app.add_systems(
+        First,
+        systems::pump_events
+            .in_set(FirstSet::Pump)
+            .run_if(not_exiting),
+    );
     app.add_systems(
         PreUpdate,
         (
@@ -338,7 +346,8 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .after(systems::add_existing_application),
             systems::finish_setup
                 .after(triggers::apply_window_positions)
-                .run_if(resource_exists::<Initializing>),
+                .run_if(resource_exists::<Initializing>)
+                .run_if(not_exiting),
         )
             .in_set(UpdateSet::Spawn),
     );
@@ -351,8 +360,10 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(resource_exists::<LowPowerMode>)
                 .run_if(on_timer(LOW_POWER_MODE_CHECK)),
             restore::tick_restore_grace,
-            state::periodic_state_save.run_if(on_timer(Duration::from_mins(5))),
-            state::cleanup_on_exit,
+            state::periodic_state_save
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_timer(Duration::from_mins(5))),
+            state::cleanup_on_exit.run_if(not(resource_exists::<Initializing>)),
             script_state::periodic_script_state_save.run_if(on_timer(Duration::from_mins(5))),
             script_state::script_state_cleanup_on_exit,
         )
@@ -1400,6 +1411,105 @@ mod tests {
             overlays_last_run(&harness),
             before_end,
             "overlay must rerun to reappear when title-bar drag ends"
+        );
+    }
+
+    #[test]
+    fn startup_exit_does_not_panic_finish_setup_or_overwrite_saved_state() {
+        use std::sync::mpsc::channel;
+
+        use bevy::ecs::schedule::ScheduleLabel;
+
+        use crate::events::Event;
+
+        let mut harness = TestHarness::new();
+        // Clear TestHarness's pre-seeded mock process/ExistingMarker and Config
+        // so the test mirrors a TOML startup where `finish_setup` would
+        // immediately clear `Initializing` unless gated off by `not_exiting`.
+        harness.world().remove_resource::<Config>();
+        let seeded: Vec<Entity> = harness
+            .world()
+            .query_filtered::<Entity, Or<(With<super::BProcess>, With<super::ExistingMarker>)>>()
+            .iter(harness.world())
+            .collect();
+        for entity in seeded {
+            harness.world().entity_mut(entity).despawn();
+        }
+
+        let (sender, receiver) = channel();
+        sender.send(Event::Exit).expect("send exit");
+        sender
+            .send(Event::InitialConfig(
+                Config::defaults().expect("defaults should parse"),
+            ))
+            .expect("send initial config");
+        sender.send(Event::ProcessesLoaded).expect("send loaded");
+        harness.app.insert_non_send(receiver);
+
+        let start_tick = harness.app.world().read_change_tick();
+        harness.app.update();
+        let end_tick = harness.app.world().read_change_tick();
+
+        assert_eq!(harness.app.should_exit(), Some(AppExit::Success));
+        assert!(harness.world().contains_resource::<Config>());
+        assert!(
+            harness.world().contains_resource::<super::Initializing>(),
+            "finish_setup must not clear Initializing when exiting during startup"
+        );
+        assert_eq!(
+            harness
+                .world()
+                .query::<&super::BProcess>()
+                .iter(harness.world())
+                .count(),
+            0,
+            "startup exit must not spawn BProcess entities"
+        );
+
+        let ran_in_schedule = |schedule: bevy::ecs::schedule::InternedScheduleLabel,
+                               system_type| {
+            let schedules = harness.app.world().resource::<Schedules>();
+            let mut systems = schedules.get(schedule).unwrap().systems().unwrap();
+            let last_run = systems
+                .find(|(_, system)| system.system_type() == system_type)
+                .map(|(_, system)| system.get_last_run())
+                .expect("system registered in schedule");
+            last_run.is_newer_than(start_tick, end_tick)
+        };
+        assert!(
+            ran_in_schedule(
+                Startup.intern(),
+                IntoSystem::into_system(super::systems::gather_initial_processes).system_type(),
+            ),
+            "gather_initial_processes must run during Startup"
+        );
+        assert!(
+            !ran_in_schedule(
+                First.intern(),
+                IntoSystem::into_system(super::systems::pump_events).system_type(),
+            ),
+            "pump_events must not run while AppExit is pending"
+        );
+        assert!(
+            !ran_in_schedule(
+                Update.intern(),
+                IntoSystem::into_system(super::systems::finish_setup).system_type(),
+            ),
+            "finish_setup must not run while AppExit is pending"
+        );
+        assert!(
+            !ran_in_schedule(
+                Update.intern(),
+                IntoSystem::into_system(super::state::cleanup_on_exit).system_type(),
+            ),
+            "state::cleanup_on_exit must not run and overwrite state.json during an aborted startup"
+        );
+        assert!(
+            !ran_in_schedule(
+                Update.intern(),
+                IntoSystem::into_system(super::state::periodic_state_save).system_type(),
+            ),
+            "state::periodic_state_save must not run while Initializing is active"
         );
     }
 }

@@ -2,7 +2,7 @@ use bevy::app::{App, Plugin, Update};
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, Or, With};
+use bevy::ecs::query::{Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, Local, Query, Res, ResMut, Single};
 use bevy::math::IRect;
@@ -17,7 +17,7 @@ use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{GlobalState, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, MissionControlActive, Position, RepositionMarker,
-    Scrolling, SpawnCommandsExt, UpdateSet,
+    Scrolling, SelectedVirtualMarker, SpawnCommandsExt, UpdateSet,
 };
 use bevy::ecs::schedule::common_conditions::on_message;
 
@@ -77,18 +77,24 @@ fn is_in_corner_dead_zone(
     point.x >= bounds.max.x - CORNER_DEAD_ZONE_PX && point.y >= bounds.max.y - CORNER_DEAD_ZONE_PX
 }
 
-/// Whether `entity` belongs to a workspace being switched away from and is
-/// still on its way out. It stays under the pointer as it slides, and focusing
-/// it would switch straight back.
-fn sliding_out_of_view(
-    entity: Entity,
-    moving: &Query<Entity, With<RepositionMarker>>,
-    active_workspaces: &Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
-) -> bool {
-    moving.contains(entity)
-        && !active_workspaces
-            .iter()
-            .any(|(_, strip)| strip.contains(entity))
+type HiddenWorkspaces<'w, 's> = Query<
+    'w,
+    's,
+    &'static LayoutStrip,
+    (
+        Without<ActiveWorkspaceMarker>,
+        Without<SelectedVirtualMarker>,
+    ),
+>;
+
+/// Whether `entity` belongs to a hidden (non-selected) virtual workspace.
+/// Focusing it on hover — on the switch frame itself, while its workspace
+/// slides out of view, or via a parked sliver — would yank focus straight back
+/// to the hidden workspace. Visible workspaces on other displays carry
+/// `SelectedVirtualMarker` and floating windows belong to no strip, so neither
+/// is affected.
+fn in_hidden_workspace(entity: Entity, hidden_workspaces: &HiddenWorkspaces) -> bool {
+    hidden_workspaces.iter().any(|strip| strip.contains(entity))
 }
 
 /// Handles mouse moved events.
@@ -118,6 +124,7 @@ fn mouse_moved_trigger(
     pending_focus_layout: Query<(), With<PendingFocusLayout>>,
     moving: Query<Entity, With<RepositionMarker>>,
     active_workspaces: Query<(Entity, &LayoutStrip), With<ActiveWorkspaceMarker>>,
+    hidden_workspaces: HiddenWorkspaces,
 ) {
     const FIND_WINDOW_THROTTLE: Duration = Duration::from_millis(50);
 
@@ -203,8 +210,8 @@ fn mouse_moved_trigger(
             trace!("can not find focused window: {window_id}");
             continue;
         };
-        if sliding_out_of_view(entity, &moving, &active_workspaces) {
-            trace!("mouse focus suppressed on a window sliding out of view");
+        if in_hidden_workspace(entity, &hidden_workspaces) {
+            trace!("mouse focus suppressed on a window in a hidden workspace");
             continue;
         }
 

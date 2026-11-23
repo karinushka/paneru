@@ -726,3 +726,62 @@ fn mouse_focus_ignores_windows_sliding_out_of_view() {
         "the pointer over a window sliding out must not switch back to its workspace"
     );
 }
+
+/// Even on the switch frame itself — before `show_active_workspace` runs to
+/// attach `RepositionMarker` (or when `virtual_workspace_animations` is off
+/// and windows snap without `RepositionMarker`) — a `MouseMoved` landing over
+/// an outgoing workspace's window must not yank focus back to it.
+#[test]
+fn mouse_focus_ignores_outgoing_workspace_on_the_switch_frame() {
+    for animate in [false, true] {
+        let config: Config = (
+            MainOptions {
+                focus_follows_mouse: Some(true),
+                mouse_follows_focus: Some(false),
+                animation_speed: Some(12.0),
+                virtual_workspace_animations: Some(animate),
+                ..Default::default()
+            },
+            vec![],
+        )
+            .into();
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        harness.run(vec![Event::Command {
+            command: Command::PrintState,
+        }]);
+        harness.advance(Duration::from_secs(1));
+        let unfocused = {
+            let world = harness.world();
+            let mut query =
+                world.query_filtered::<Entity, (With<Window>, Without<FocusedMarker>)>();
+            query.iter(world).next().expect("an unfocused window")
+        };
+        let center = harness
+            .world()
+            .get::<Window>(unfocused)
+            .unwrap()
+            .frame()
+            .center();
+
+        // Queue the workspace switch and the hover event in the exact same tick.
+        harness.world().write_message(Event::Command {
+            command: Command::Window(Operation::VirtualNumber(1)),
+        });
+        harness.world().write_message(Event::MouseMoved {
+            point: CGPoint {
+                x: f64::from(center.x),
+                y: f64::from(center.y),
+            },
+            modifiers: Modifiers::empty(),
+        });
+        harness.advance(Duration::from_secs(1));
+
+        let world = harness.world();
+        let mut active = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let strip = active.single(world).expect("one active workspace");
+        assert_eq!(
+            strip.virtual_index, 1,
+            "same-frame MouseMoved must not bounce back (virtual_workspace_animations={animate})"
+        );
+    }
+}

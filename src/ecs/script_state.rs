@@ -41,6 +41,8 @@ struct SavedScriptState {
 /// The live store.
 #[derive(Debug, Default, Resource)]
 pub struct ScriptStateStore {
+    /// Destination file for persistence; `None` keeps the store in memory (mock worlds).
+    path: Option<PathBuf>,
     state: ScriptState,
     /// Bumped on every applied mutation. The Lua worker compares this against
     /// the stamp its cached copy was hydrated at to know when to re-read.
@@ -54,12 +56,12 @@ impl ScriptStateStore {
     #[must_use]
     pub fn load() -> Self {
         let path = Self::default_file_path();
-        let Some(saved) = Self::read_file(&path) else {
-            return Self::default();
-        };
-        debug!("Loaded script state from {}", path.display());
+        let state = Self::read_file(&path)
+            .inspect(|_| debug!("Loaded script state from {}", path.display()))
+            .unwrap_or_default();
         Self {
-            state: saved,
+            path: Some(path),
+            state,
             ..Self::default()
         }
     }
@@ -139,8 +141,10 @@ impl ScriptStateStore {
         if !self.dirty {
             return;
         }
-        let path = Self::default_file_path();
-        match self.write_file(&path) {
+        let Some(path) = self.path.as_deref() else {
+            return;
+        };
+        match self.write_file(path) {
             Ok(()) => {
                 self.dirty = false;
                 debug!("Script state saved to {}", path.display());
@@ -377,6 +381,30 @@ mod tests {
         assert!(ScriptStateStore::read_file(&path).is_none());
 
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn default_store_stays_in_memory_and_path_backed_store_persists_when_dirty() {
+        // Default (mock world) store has no file path, so save_if_dirty is a no-op.
+        let mut memory_store = ScriptStateStore::default();
+        assert!(applied(&mut memory_store, &set("k", json!(1))));
+        assert!(memory_store.dirty);
+        memory_store.save_if_dirty();
+        assert!(memory_store.dirty);
+
+        // Path-backed store writes to its configured file and clears dirty.
+        let path = unique_path("save-if-dirty");
+        let mut file_store = ScriptStateStore {
+            path: Some(path.clone()),
+            ..ScriptStateStore::default()
+        };
+        assert!(applied(&mut file_store, &set("k", json!(42))));
+        file_store.save_if_dirty();
+        assert!(!file_store.dirty);
+
+        let loaded = ScriptStateStore::read_file(&path).expect("saved to configured path");
+        let _ = fs::remove_file(&path);
+        assert_eq!(loaded.get("k"), Some(&ScriptValue::from(json!(42))));
     }
 
     fn unique_path(name: &str) -> PathBuf {

@@ -11,7 +11,7 @@ use bevy::ecs::message::Messages;
 use bevy::ecs::query::{Added, Changed, Or, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::SystemCondition;
-use bevy::ecs::schedule::common_conditions::{not, resource_changed, resource_exists};
+use bevy::ecs::schedule::common_conditions::{not, on_message, resource_changed, resource_exists};
 use bevy::ecs::schedule::{ScheduleLabel as _, SingleThreadedExecutor, SystemSet};
 use bevy::ecs::system::{Commands, EntityCommands, Local, Query, Res, SystemId};
 use bevy::prelude::Event as BevyEvent;
@@ -361,11 +361,15 @@ pub fn register_systems(app: &mut bevy::app::App) {
                 .run_if(on_timer(LOW_POWER_MODE_CHECK)),
             restore::tick_restore_grace,
             state::periodic_state_save
+                .run_if(resource_exists::<state::LayoutStateFile>)
                 .run_if(not(resource_exists::<Initializing>))
                 .run_if(on_timer(Duration::from_mins(5))),
-            state::cleanup_on_exit.run_if(not(resource_exists::<Initializing>)),
+            state::cleanup_on_exit
+                .run_if(resource_exists::<state::LayoutStateFile>)
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_message::<AppExit>),
             script_state::periodic_script_state_save.run_if(on_timer(Duration::from_mins(5))),
-            script_state::script_state_cleanup_on_exit,
+            script_state::script_state_cleanup_on_exit.run_if(on_message::<AppExit>),
         )
             .in_set(UpdateSet::Housekeeping),
     );
@@ -404,7 +408,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
     // The runner exits only once the whole frame has run, so cleanup has to
     // come after every system that writes window frames, or a running
     // animation overwrites the frames it restores.
-    app.add_systems(Last, systems::cleanup_on_exit);
+    app.add_systems(Last, systems::cleanup_on_exit.run_if(on_message::<AppExit>));
 }
 
 /// Registers all the event triggers for the window manager.
@@ -1414,11 +1418,26 @@ mod tests {
         );
     }
 
+    fn system_ran_between<M>(
+        harness: &TestHarness,
+        schedule: impl bevy::ecs::schedule::ScheduleLabel,
+        system: impl IntoSystem<(), (), M>,
+        start: bevy::ecs::change_detection::Tick,
+        end: bevy::ecs::change_detection::Tick,
+    ) -> bool {
+        let target = IntoSystem::into_system(system).system_type();
+        let schedules = harness.app.world().resource::<Schedules>();
+        let mut systems = schedules.get(schedule).unwrap().systems().unwrap();
+        let last_run = systems
+            .find(|(_, registered)| registered.system_type() == target)
+            .map(|(_, registered)| registered.get_last_run())
+            .expect("system registered in schedule");
+        last_run.is_newer_than(start, end)
+    }
+
     #[test]
     fn startup_exit_does_not_panic_finish_setup_or_overwrite_saved_state() {
         use std::sync::mpsc::channel;
-
-        use bevy::ecs::schedule::ScheduleLabel;
 
         use crate::events::Event;
 
@@ -1445,10 +1464,29 @@ mod tests {
             .expect("send initial config");
         sender.send(Event::ProcessesLoaded).expect("send loaded");
         harness.app.insert_non_send(receiver);
+        // Supply a LayoutStateFile so the `Initializing` guard — not the
+        // absence of a file path — is what prevents `state::cleanup_on_exit`.
+        let state_path = std::env::temp_dir().join(format!(
+            "paneru-startup-exit-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        harness
+            .app
+            .insert_resource(super::state::LayoutStateFile(state_path.clone()));
 
-        let start_tick = harness.app.world().read_change_tick();
+        let start = harness.app.world().read_change_tick();
         harness.app.update();
-        let end_tick = harness.app.world().read_change_tick();
+        let end = harness.app.world().read_change_tick();
+        let state_written = state_path.exists();
+        let _ = std::fs::remove_file(&state_path);
+        assert!(
+            !state_written,
+            "aborted startup must not write LayoutStateFile"
+        );
 
         assert_eq!(harness.app.should_exit(), Some(AppExit::Success));
         assert!(harness.world().contains_resource::<Config>());
@@ -1465,51 +1503,41 @@ mod tests {
             0,
             "startup exit must not spawn BProcess entities"
         );
-
-        let ran_in_schedule = |schedule: bevy::ecs::schedule::InternedScheduleLabel,
-                               system_type| {
-            let schedules = harness.app.world().resource::<Schedules>();
-            let mut systems = schedules.get(schedule).unwrap().systems().unwrap();
-            let last_run = systems
-                .find(|(_, system)| system.system_type() == system_type)
-                .map(|(_, system)| system.get_last_run())
-                .expect("system registered in schedule");
-            last_run.is_newer_than(start_tick, end_tick)
-        };
         assert!(
-            ran_in_schedule(
-                Startup.intern(),
-                IntoSystem::into_system(super::systems::gather_initial_processes).system_type(),
+            system_ran_between(
+                &harness,
+                Startup,
+                super::systems::gather_initial_processes,
+                start,
+                end,
             ),
             "gather_initial_processes must run during Startup"
         );
         assert!(
-            !ran_in_schedule(
-                First.intern(),
-                IntoSystem::into_system(super::systems::pump_events).system_type(),
-            ),
+            !system_ran_between(&harness, First, super::systems::pump_events, start, end),
             "pump_events must not run while AppExit is pending"
         );
         assert!(
-            !ran_in_schedule(
-                Update.intern(),
-                IntoSystem::into_system(super::systems::finish_setup).system_type(),
-            ),
+            !system_ran_between(&harness, Update, super::systems::finish_setup, start, end),
             "finish_setup must not run while AppExit is pending"
         );
         assert!(
-            !ran_in_schedule(
-                Update.intern(),
-                IntoSystem::into_system(super::state::cleanup_on_exit).system_type(),
-            ),
+            !system_ran_between(&harness, Update, super::state::cleanup_on_exit, start, end),
             "state::cleanup_on_exit must not run and overwrite state.json during an aborted startup"
         );
         assert!(
-            !ran_in_schedule(
-                Update.intern(),
-                IntoSystem::into_system(super::state::periodic_state_save).system_type(),
+            !system_ran_between(
+                &harness,
+                Update,
+                super::state::periodic_state_save,
+                start,
+                end,
             ),
             "state::periodic_state_save must not run while Initializing is active"
+        );
+        assert!(
+            system_ran_between(&harness, Last, super::systems::cleanup_on_exit, start, end),
+            "systems::cleanup_on_exit must still run in Last when AppExit is pending"
         );
     }
 }

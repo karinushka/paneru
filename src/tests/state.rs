@@ -344,9 +344,17 @@ fn exit_save_uses_the_layout_state_file_for_its_world() {
 
     use crate::ecs::state::{LayoutStateFile, cleanup_on_exit};
 
+    struct RemoveOnDrop(std::path::PathBuf);
+    impl Drop for RemoveOnDrop {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_file(&self.0);
+        }
+    }
+
     let mut harness = TestHarness::new().with_windows(1);
     harness.advance(std::time::Duration::from_secs(1));
     let path = unique_state_path("exit-save");
+    let _cleanup = RemoveOnDrop(path.clone());
     let world = harness.world();
     assert!(!world.contains_resource::<LayoutStateFile>());
     world.insert_resource(LayoutStateFile(path.clone()));
@@ -362,7 +370,6 @@ fn exit_save_uses_the_layout_state_file_for_its_world() {
             .iter()
             .any(|space| space.workspace_id == TEST_WORKSPACE_ID)
     );
-    std::fs::remove_file(path).expect("remove test layout");
 }
 
 fn unique_state_path(name: &str) -> std::path::PathBuf {

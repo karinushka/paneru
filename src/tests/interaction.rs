@@ -5013,9 +5013,8 @@ fn observer_registration_recovery(all_failed: bool) {
 /// Exit cleanup must leave a floating window exactly where the user put it,
 /// while a tiled window parked off-screen still comes back onto a display.
 ///
-/// Driven directly at the system: sending `AppExit` through the full schedule
-/// also runs the state-saving exit systems, which write the real user state
-/// file.
+/// Driven directly at `systems::cleanup_on_exit` to assert the restored frames
+/// in isolation.
 #[test]
 fn test_exit_cleanup_leaves_floating_windows_in_place() {
     use bevy::app::AppExit;

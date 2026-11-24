@@ -10,7 +10,10 @@ use crate::ecs::{DockPosition, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WinID;
-use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
+use crate::{
+    assert_focused, assert_not_on_workspace, assert_on_workspace, assert_window_at,
+    assert_window_size,
+};
 
 use super::*;
 
@@ -272,6 +275,69 @@ fn test_next_display_inserts_into_target_strip() {
             assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
         })
         .run(commands);
+}
+
+#[test]
+fn test_layout_op_place_carries_the_tabbed_column_without_following() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Stack {
+                window: 2,
+                onto: 1,
+                tabs: true,
+            },
+            LayoutOp::Focus(0),
+        ]),
+    });
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let first = find_window_entity(1, world);
+    let second = find_window_entity(2, world);
+    let active_tab = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap()
+        .active_tab(first)
+        .unwrap();
+    assert_focused!(world, 0);
+
+    // The target is addressed by its Space and may still be unfocused.
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 2,
+            space: EXT_WORKSPACE_ID,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let moved = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == EXT_WORKSPACE_ID)
+        .unwrap();
+    assert_eq!(moved.index_of(first).unwrap(), 0);
+    assert_eq!(moved.index_of(second).unwrap(), 0);
+    assert_eq!(moved.active_tab(first), Some(active_tab));
+    assert_not_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
+    assert_focused!(world, 0);
+    assert!(world.get::<Window>(active_tab).unwrap().frame().min.x >= TEST_DISPLAY_WIDTH);
 }
 
 /// A window macOS filled covers its display and ignores the edge padding, so

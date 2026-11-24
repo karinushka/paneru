@@ -607,7 +607,9 @@ fn test_display_configuration_catches_late_geometry_change() {
 }
 
 #[test]
-fn test_empty_display_list_keeps_layout_after_retries() {
+fn test_empty_display_list_keeps_layout_and_stops_retrying_until_display_returns() {
+    use crate::ecs::display::DisplayReconcileState;
+
     let mut harness = TestHarness::new().with_windows(1);
     harness.advance(Duration::from_millis(500));
     harness.mock_state.remove_display(TEST_DISPLAY_ID);
@@ -616,8 +618,8 @@ fn test_empty_display_list_keeps_layout_after_retries() {
         .write_message::<Event>(Event::DisplayConfigured {
             display_id: TEST_DISPLAY_ID,
         });
-    // Keep the scan empty past the normal retry budget.
-    harness.advance(Duration::from_secs(6));
+    // Advance past the full bounded retry schedule (350ms + 1s + 1s + 2s + 4s = 8.35s).
+    harness.advance(Duration::from_secs(10));
 
     let world = harness.world();
     let display_entity = world
@@ -632,19 +634,60 @@ fn test_empty_display_list_keeps_layout_after_retries() {
         world.get::<ChildOf>(strip_entity).unwrap().parent(),
         display_entity
     );
+    let reconcile = world.resource::<DisplayReconcileState>();
+    assert!(
+        reconcile.is_idle(),
+        "reconcile must stop polling once retries are exhausted"
+    );
+    assert!(
+        !reconcile.is_settling(),
+        "reconcile must not remain stuck in settling state while idle"
+    );
+
+    // A returning display wakes reconciliation via a display event.
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(100, 0, TEST_DISPLAY_WIDTH + 100, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID],
+    );
+    harness.world().write_message::<Event>(Event::DisplayAdded {
+        display_id: TEST_DISPLAY_ID,
+    });
+    harness.advance(Duration::from_millis(600));
+    let world = harness.world();
+    let display = world.query::<&Display>().single(world).unwrap();
+    assert_eq!(
+        display.bounds().min.x,
+        100,
+        "display event should wake reconciliation and apply the recovered display"
+    );
+}
+
+#[test]
+fn test_empty_display_list_recovers_within_slow_dock_retry_window() {
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.advance(Duration::from_millis(500));
+    harness.mock_state.remove_display(TEST_DISPLAY_ID);
+    harness
+        .world()
+        .write_message::<Event>(Event::DisplayConfigured {
+            display_id: TEST_DISPLAY_ID,
+        });
+    // Still within the extended 8.35s backoff window (past the old 3.35s cap).
+    harness.advance(Duration::from_secs(5));
 
     harness.mock_state.add_display(
         TEST_DISPLAY_ID,
         IRect::new(100, 0, TEST_DISPLAY_WIDTH + 100, TEST_DISPLAY_HEIGHT),
         vec![TEST_WORKSPACE_ID],
     );
-    harness.advance(Duration::from_millis(1600));
+    harness.advance(Duration::from_secs(4));
     let world = harness.world();
     let display = world.query::<&Display>().single(world).unwrap();
     assert_eq!(
         display.bounds().min.x,
         100,
-        "retry should use the recovered display"
+        "extended bounded retry should catch a slow dock before going idle"
     );
 }
 

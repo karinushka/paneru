@@ -281,3 +281,13 @@ The index is measured after lifting the column out of its source and may point j
 The destination workspace must already exist.
 The whole column moves, including its stack or tabs, without switching to the destination workspace.
 Stale or invalid destinations are skipped, as with other layout operations.
+
+To move one window out of a stack, send `unstack` before `place` in the same request.
+Paneru applies the operations in order.
+
+```json
+{"WindowSetApply":[{"unstack":42},{"place":{"window":42,"space":7,"workspace":2,"index":0}}]}
+```
+
+If the destination is stale, a successful unstack still takes effect.
+A group of native macOS tabs stays together.

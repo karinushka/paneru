@@ -1257,6 +1257,44 @@ fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
 }
 
 #[test]
+fn test_layout_op_place_reorders_and_ignores_invalid_destinations() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+    let layout = |harness: &mut TestHarness| {
+        let state = extract_window_set(harness.world()).unwrap();
+        let columns = state
+            .current()
+            .unwrap()
+            .columns
+            .iter()
+            .map(|column| column.top().unwrap().id)
+            .collect::<Vec<_>>();
+        (columns, state.focused())
+    };
+    let (before, focused) = layout(&mut harness);
+    let window = before[0];
+    for (workspace, index) in [(1, 2), (2, 0), (1, 3), (0, 0)] {
+        harness.world().write_message(Event::Command {
+            command: Command::Layout(vec![LayoutOp::Place {
+                window,
+                space: TEST_WORKSPACE_ID,
+                workspace,
+                index,
+            }]),
+        });
+        harness.app.update();
+        assert_eq!(
+            layout(&mut harness),
+            (vec![before[1], before[2], window], focused)
+        );
+    }
+}
+
+#[test]
 fn test_layout_op_stack_lands_in_the_named_column() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;

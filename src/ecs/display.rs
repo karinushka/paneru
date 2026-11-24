@@ -40,8 +40,14 @@ use bevy::ecs::system::ResMut;
 const ORPHANED_SPACES_TIMEOUT_SEC: u64 = 30;
 const DISPLAY_SETTLE_DELAY: Duration = Duration::from_millis(350);
 const DISPLAY_VERIFY_DELAY: Duration = Duration::from_secs(1);
-const DISPLAY_RETRY_DELAY: Duration = Duration::from_secs(1);
-const DISPLAY_RETRIES: u8 = 3;
+/// Bounded backoff schedule for incomplete or empty display scans (~8s total)
+/// to tolerate slow Thunderbolt/USB-C dock re-enumeration without polling forever.
+const DISPLAY_RETRY_DELAYS: [Duration; 4] = [
+    Duration::from_secs(1),
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+];
 
 /// Width shares awaiting an orphan's destination. Owned by the strip so its
 /// existing 30-second timeout also bounds this snapshot's lifetime.
@@ -163,7 +169,7 @@ fn apply_width_ratios(world: &mut World, display_entity: Entity, ratios: EntityH
 #[derive(Default, Resource)]
 pub(crate) struct DisplayReconcileState {
     pending: Option<Timer>,
-    retries_left: u8,
+    retry_index: usize,
     verify_again: bool,
 }
 
@@ -174,6 +180,28 @@ impl DisplayReconcileState {
 
     pub(crate) fn is_idle(&self) -> bool {
         self.pending.is_none()
+    }
+
+    /// Defers applying an empty or incomplete display scan. Returns `true` when
+    /// the caller should skip this scan — either because another bounded retry
+    /// was scheduled, or because the scan is still empty after retries and the
+    /// current layout should be preserved until a display returns.
+    fn defer_incomplete_scan(&mut self, empty: bool) -> bool {
+        if let Some(&delay) = DISPLAY_RETRY_DELAYS.get(self.retry_index) {
+            self.retry_index += 1;
+            warn!("Display list is incomplete; retrying in {delay:?}");
+            self.pending = Some(Timer::new(delay, TimerMode::Once));
+            return true;
+        }
+        if empty {
+            warn!(
+                "Display list is still empty after retries; keeping current layout until a display returns"
+            );
+            self.verify_again = false;
+            return true;
+        }
+        warn!("Display list is still incomplete after retries; applying the latest scan");
+        false
     }
 }
 
@@ -279,7 +307,7 @@ pub(crate) fn reconcile_displays(
     });
     if needs_reconcile {
         state.pending = Some(Timer::new(DISPLAY_SETTLE_DELAY, TimerMode::Once));
-        state.retries_left = DISPLAY_RETRIES;
+        state.retry_index = 0;
         state.verify_again = true;
         return;
     }
@@ -301,18 +329,12 @@ pub(crate) fn reconcile_displays(
         .into_iter()
         .map(|(display, workspaces)| (display.id(), (display, workspaces)))
         .collect();
-    if present_displays.is_empty()
+    let incomplete = present_displays.is_empty()
         || present_displays
             .values()
-            .any(|(_, spaces)| spaces.is_empty())
-    {
-        if state.retries_left > 0 || present_displays.is_empty() {
-            state.retries_left = state.retries_left.saturating_sub(1);
-            debug!("Display list is incomplete; retrying in {DISPLAY_RETRY_DELAY:?}");
-            state.pending = Some(Timer::new(DISPLAY_RETRY_DELAY, TimerMode::Once));
-            return;
-        }
-        warn!("Display list is still incomplete after retries; applying the latest scan");
+            .any(|(_, spaces)| spaces.is_empty());
+    if incomplete && state.defer_incomplete_scan(present_displays.is_empty()) {
+        return;
     }
 
     let previous_bounds: HashMap<Entity, IRect> = displays
@@ -378,6 +400,7 @@ pub(crate) fn reconcile_displays(
         // assignment even after a quiet period. Verify once more without
         // requiring a second notification from Core Graphics.
         state.verify_again = false;
+        state.retry_index = 0;
         state.pending = Some(Timer::new(DISPLAY_VERIFY_DELAY, TimerMode::Once));
     } else {
         commands.trigger(crate::ecs::setups::DisplaysSettled);

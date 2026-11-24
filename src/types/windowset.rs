@@ -37,6 +37,15 @@ pub enum LayoutOp {
         workspace: u32,
         follow: bool,
     },
+    /// Move the window's tiled column to an existing virtual workspace.
+    /// The workspace number is one-based. The column index is zero-based and
+    /// refers to the order after lifting the column from its source.
+    Place {
+        window: WinID,
+        space: u64,
+        workspace: u32,
+        index: usize,
+    },
     /// Show a virtual workspace on its display.
     View { workspace: u32 },
     /// Take `window` out of the tiling layout, or put it back in.
@@ -68,6 +77,7 @@ impl LayoutOp {
             | LayoutOp::Swap(window, _)
             | LayoutOp::Unstack(window)
             | LayoutOp::MoveToWorkspace { window, .. }
+            | LayoutOp::Place { window, .. }
             | LayoutOp::SetFloating { window, .. }
             | LayoutOp::SetManaged { window, .. }
             | LayoutOp::SetWidth { window, .. }

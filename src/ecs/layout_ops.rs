@@ -18,6 +18,7 @@ use tracing::debug;
 
 use crate::commands::{Command, MoveFocus, Operation};
 use crate::config::Config;
+use crate::ecs::drag::ColumnInTransit;
 use crate::ecs::layout::{Column, LayoutStrip};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::VirtualMoveMarker;
@@ -27,6 +28,7 @@ use crate::ecs::{
 };
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size};
+use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
 /// Every strip, whether it is the one on screen, and the display it is on.
@@ -37,6 +39,7 @@ type Strips<'w, 's> = Query<
         &'static mut LayoutStrip,
         Has<ActiveWorkspaceMarker>,
         Option<&'static ChildOf>,
+        Entity,
     ),
     Without<Window>,
 >;
@@ -116,9 +119,9 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: window {other} is gone");
                 return;
             };
-            let Some((mut strip, _, _)) = workspaces
+            let Some((mut strip, _, _, _)) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _)| strip.contains(entity) && strip.contains(other_entity))
+                .find(|(strip, _, _, _)| strip.contains(entity) && strip.contains(other_entity))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
@@ -150,6 +153,26 @@ fn apply(
                         MoveFocus::Stay
                     },
                 });
+            }
+        }
+
+        LayoutOp::Place {
+            space,
+            workspace,
+            index,
+            ..
+        } => {
+            let entity = entity.expect("Place names a window");
+            if !floated.contains(&entity) {
+                place_column(
+                    entity,
+                    (space, workspace, index),
+                    windows,
+                    workspaces,
+                    displays,
+                    config,
+                    commands,
+                );
             }
         }
 
@@ -205,9 +228,9 @@ fn apply(
             // the display its strip is on. Storing a `WidthRatio` would not
             // do: nothing reacts to it, and the next bounds sync recomputes it
             // from the live frame.
-            let Some((strip, _, parent)) = workspaces
+            let Some((strip, _, parent, _)) = workspaces
                 .iter()
-                .find(|(strip, _, _)| strip.contains(entity))
+                .find(|(strip, _, _, _)| strip.contains(entity))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the window is in no strip");
                 return;
@@ -265,9 +288,9 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: window {onto} is gone");
                 return;
             };
-            let Some((mut strip, _, _)) = workspaces
+            let Some((mut strip, _, _, _)) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _)| strip.contains(entity) && strip.contains(onto_entity))
+                .find(|(strip, _, _, _)| strip.contains(entity) && strip.contains(onto_entity))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
@@ -328,9 +351,9 @@ fn apply(
 
         LayoutOp::Unstack(_) => {
             let entity = entity.expect("Unstack names a window");
-            let Some((mut strip, _, _)) = workspaces
+            let Some((mut strip, _, _, _)) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _)| strip.contains(entity))
+                .find(|(strip, _, _, _)| strip.contains(entity))
             else {
                 return;
             };
@@ -346,6 +369,102 @@ fn apply(
 /// Takes a window out of the tiling layout or puts it back. Mirrors
 /// `manage_window`: floating→tiled has to re-append the window to a strip
 /// itself, since nothing downstream does it automatically.
+/// Place a whole tiled column without switching displays or workspaces.
+fn place_column(
+    entity: Entity,
+    (space, workspace, index): (WorkspaceId, u32, usize),
+    windows: &Windows,
+    workspaces: &mut Strips,
+    displays: &Query<(&Display, Option<&DockPosition>)>,
+    config: &Config,
+    commands: &mut Commands,
+) {
+    let Some(workspace) = workspace.checked_sub(1) else {
+        return;
+    };
+    let Some((source, source_active, Some(source_display), source_id)) =
+        workspaces.iter().find(|(strip, ..)| strip.contains(entity))
+    else {
+        return;
+    };
+    let Some((target, _, Some(target_display), target_id)) = workspaces
+        .iter()
+        .find(|(strip, ..)| strip.id() == space && strip.virtual_index == workspace)
+    else {
+        return;
+    };
+    if source.is_fullscreen() || target.is_fullscreen() {
+        return;
+    }
+    let Ok(from) = source.index_of(entity) else {
+        return;
+    };
+
+    if source_id == target_id {
+        if index < source.len()
+            && from != index
+            && let Ok((mut strip, ..)) = workspaces.get_mut(source_id)
+        {
+            strip.move_column(from, index);
+        }
+        return;
+    }
+
+    let source_display = source_display.parent();
+    let target_display = target_display.parent();
+    let (Ok((source_viewport, source_dock)), Ok((target_viewport, target_dock))) =
+        (displays.get(source_display), displays.get(target_display))
+    else {
+        return;
+    };
+    let Ok(column) = source.get(from) else {
+        return;
+    };
+    let members: Vec<_> = column.window_iter().collect();
+    if index > target.len() || members.iter().any(|member| target.contains(*member)) {
+        return;
+    }
+    let source_focus = windows.focused().map(|(_, focused)| focused);
+    let neighbour = source_focus
+        .filter(|focused| source_active && members.contains(focused))
+        .and_then(|focused| {
+            source
+                .left_neighbour(focused)
+                .or_else(|| source.right_neighbour(focused))
+        });
+
+    let Ok([(mut source, ..), (mut target, ..)]) = workspaces.get_many_mut([source_id, target_id])
+    else {
+        return;
+    };
+    if !source.transfer_column(&mut target, from, index) {
+        return;
+    }
+    if let Some(neighbour) = neighbour {
+        commands.focus_entity(neighbour, false);
+    }
+    if source_display != target_display {
+        let source_width = source_viewport
+            .actual_display_bounds(source_dock, config)
+            .width();
+        let target_width = target_viewport
+            .actual_display_bounds(target_dock, config)
+            .width();
+        if source_width > 0 && target_width > 0 {
+            for &member in &members {
+                if let Some(size) = windows.moving_frame(member).map(|frame| frame.size()) {
+                    let ratio = f64::from(size.x) / f64::from(source_width);
+                    let width = round_px(ratio * f64::from(target_width)).clamp(1, target_width);
+                    commands.resize_entity(member, Size::new(width, size.y));
+                }
+            }
+        }
+    }
+    if source_display != target_display || source.id() != target.id() {
+        ColumnInTransit::spawn(members, commands);
+    }
+}
+
 fn set_floating(entity: Entity, floating: bool, workspaces: &mut Strips, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         if floating {
@@ -358,8 +477,8 @@ fn set_floating(entity: Entity, floating: bool, workspaces: &mut Strips, command
     if !floating
         && !workspaces
             .iter()
-            .any(|(strip, _, _)| strip.contains(entity))
-        && let Some((mut strip, _, _)) = workspaces.iter_mut().find(|(_, active, _)| *active)
+            .any(|(strip, _, _, _)| strip.contains(entity))
+        && let Some((mut strip, _, _, _)) = workspaces.iter_mut().find(|(_, active, _, _)| *active)
     {
         strip.append(entity);
         commands.reshuffle_around(entity);

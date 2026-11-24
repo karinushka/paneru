@@ -190,6 +190,12 @@ mod tests {
         round_trip(&Request::Query(StateQueryKind::Desktops));
         round_trip(&Request::WindowSet);
         round_trip(&Request::WindowSetApply(vec![LayoutOp::Focus(7)]));
+        round_trip(&Request::WindowSetApply(vec![LayoutOp::Place {
+            window: 7,
+            space: 123,
+            workspace: 2,
+            index: 0,
+        }]));
         round_trip(&Request::Subscribe);
         round_trip(&Request::ScriptState(ScriptStateRequest::Get {
             key: "pads.term".to_string(),

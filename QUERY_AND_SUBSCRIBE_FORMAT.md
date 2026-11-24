@@ -4,11 +4,8 @@ Paneru exposes structured state over the same IPC channel used by `send-cmd`:
 a Mach service named `com.github.karinushka.paneru`. The CLI commands below
 require a running Paneru daemon.
 
-**The JSON below is what the CLI prints, not what crosses between processes.**
-Requests and responses travel as typed values in a compact binary encoding
-(`postcard`); `paneru query` and `paneru subscribe` render them as JSON because
-a terminal — and `jq`, and a status bar's shell script — needs text. Anything
-consuming these commands' output sees exactly the shapes documented here.
+Requests and responses use MessagePack with named fields over IPC.
+The `paneru query` and `paneru subscribe` commands render their results as JSON.
 
 A client written in Rust can skip the JSON entirely by using the
 `paneru::types` module (`src/types`): its `wire::Request` and `wire::Response`
@@ -269,3 +266,18 @@ window_virtualnum_3 = "cmd + alt - 3"
 window_virtualmovenum_3 = "cmd + alt + ctrl - 3"
 window_virtualsendnum_3 = "cmd + alt + shift - 3"
 ```
+
+## Placing a tiled column
+
+The IPC request `WindowSetApply` can carry a `place` layout operation.
+Name any window in the column and give the destination native Space ID, one-based virtual workspace number and zero-based column index.
+The JSON shows the structure of the MessagePack request.
+The index is measured after lifting the column out of its source and may point just past the last remaining column to append.
+
+```json
+{"WindowSetApply":[{"place":{"window":42,"space":7,"workspace":2,"index":0}}]}
+```
+
+The destination workspace must already exist.
+The whole column moves, including its stack or tabs, without switching to the destination workspace.
+Stale or invalid destinations are skipped, as with other layout operations.

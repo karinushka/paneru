@@ -366,9 +366,6 @@ fn apply(
     }
 }
 
-/// Takes a window out of the tiling layout or puts it back. Mirrors
-/// `manage_window`: floating→tiled has to re-append the window to a strip
-/// itself, since nothing downstream does it automatically.
 /// Place a whole tiled column without switching displays or workspaces.
 fn place_column(
     entity: Entity,
@@ -465,6 +462,9 @@ fn place_column(
     }
 }
 
+/// Takes a window out of the tiling layout or puts it back. Mirrors
+/// `manage_window`: floating→tiled has to re-append the window to a strip
+/// itself, since nothing downstream does it automatically.
 fn set_floating(entity: Entity, floating: bool, workspaces: &mut Strips, commands: &mut Commands) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         if floating {

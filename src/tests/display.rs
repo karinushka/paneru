@@ -340,6 +340,56 @@ fn test_layout_op_place_carries_the_tabbed_column_without_following() {
     assert!(world.get::<Window>(active_tab).unwrap().frame().min.x >= TEST_DISPLAY_WIDTH);
 }
 
+#[test]
+fn test_layout_op_unstack_then_place_moves_only_one_window() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Stack {
+            window: 2,
+            onto: 1,
+            tabs: false,
+        }]),
+    });
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let first = find_window_entity(1, world);
+    let second = find_window_entity(2, world);
+    let source = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap();
+    assert_eq!(
+        source.index_of(first).unwrap(),
+        source.index_of(second).unwrap()
+    );
+
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Unstack(2),
+            LayoutOp::Place {
+                window: 2,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
+    assert_on_workspace!(world, 2, EXT_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
+}
+
 /// A window macOS filled covers its display and ignores the edge padding, so
 /// it is wider than the tiled viewport. Moved to another display, it fits
 /// that display's viewport instead of keeping the extra width past its edge.

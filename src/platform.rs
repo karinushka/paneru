@@ -243,7 +243,8 @@ impl Default for EventLoopWaker {
 /// Upper bound on a single display-link wait. A display that is asleep,
 /// disconnected or mid-reconfiguration stops delivering callbacks; past this
 /// the pass gives up and drains normally rather than wedging the daemon.
-const DISPLAY_LINK_SAFETY_TIMEOUT: Duration = Duration::from_millis(50);
+/// This allows for delayed callbacks on 24–30 Hz displays.
+const DISPLAY_LINK_SAFETY_TIMEOUT: Duration = Duration::from_millis(100);
 
 fn wait_for_display_callback(
     budget: Duration,
@@ -421,17 +422,19 @@ impl PlatformCallbacks {
         // Re-armed before the wait, not after it — see [`EventLoopWaker::rearm`].
         self.events.waker().rearm();
 
-        // Falls through to the ramped timeout below when there is no frame in
-        // flight, on macOS 13, or when the link could not be created.
-        let paced = display_id.is_some_and(|id| self.frame_pacer.arm(id));
-
         autoreleasepool(|_| {
-            if paced {
-                if self.wait_for_frame() {
-                    self.frame_pacer.pause();
-                } else {
-                    self.frame_pacer.fall_back_to_timer();
-                }
+            // Falls through to the ramped timeout below when there is no frame
+            // in flight, on macOS 13, or when the link could not be created.
+            // Keep the link active across paced frames so it can follow the
+            // display's cadence until motion ends.
+            let paced = if let Some(id) = display_id {
+                self.frame_pacer.arm(id)
+            } else {
+                self.frame_pacer.pause();
+                false
+            };
+            if paced && !self.wait_for_frame() {
+                self.frame_pacer.fall_back_to_timer();
             }
 
             // Only the *first* dequeue may block. Once something has arrived,

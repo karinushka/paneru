@@ -66,6 +66,7 @@ pub(super) struct DisplayFramePacer {
     target: Retained<DisplayLinkTarget>,
     display_id: Option<CGDirectDisplayID>,
     link: Option<Retained<CADisplayLink>>,
+    paused: bool,
     retry_at: Option<Instant>,
 }
 
@@ -76,32 +77,30 @@ impl DisplayFramePacer {
             target: DisplayLinkTarget::new(mtm),
             display_id: None,
             link: None,
+            paused: true,
             retry_at: None,
         }
     }
 
     pub(super) fn arm(&mut self, display_id: CGDirectDisplayID) -> bool {
-        if macos_major_version() < 14 {
+        if pacing_mode(macos_major_version(), true) == FramePacingMode::TimerFallback {
             return false;
         }
-        if self.display_id != Some(display_id) {
-            self.retry_at = None;
-            self.configure(display_id);
-        } else if self
-            .retry_at
-            .is_some_and(|retry_at| Instant::now() >= retry_at)
+        if self.display_id != Some(display_id)
+            || self
+                .retry_at
+                .is_some_and(|retry_at| Instant::now() >= retry_at)
         {
             self.configure(display_id);
-        }
-        if pacing_mode(macos_major_version(), self.link.is_some()) == FramePacingMode::TimerFallback
-        {
-            return false;
         }
         let Some(link) = self.link.as_ref() else {
             return false;
         };
         self.target.ivars().fired.set(false);
-        link.setPaused(false);
+        if self.paused {
+            link.setPaused(false);
+            self.paused = false;
+        }
         true
     }
 
@@ -109,9 +108,12 @@ impl DisplayFramePacer {
         self.target.ivars().fired.get()
     }
 
-    pub(super) fn pause(&self) {
-        if let Some(link) = self.link.as_ref() {
+    pub(super) fn pause(&mut self) {
+        if !self.paused
+            && let Some(link) = self.link.as_ref()
+        {
             link.setPaused(true);
+            self.paused = true;
         }
     }
 
@@ -119,6 +121,7 @@ impl DisplayFramePacer {
         if let Some(link) = self.link.take() {
             link.invalidate();
         }
+        self.paused = true;
         self.retry_at = Some(Instant::now() + LINK_RETRY_DELAY);
     }
 
@@ -126,6 +129,7 @@ impl DisplayFramePacer {
         if let Some(link) = self.link.take() {
             link.invalidate();
         }
+        self.paused = true;
         self.display_id = Some(display_id);
         self.retry_at = None;
 

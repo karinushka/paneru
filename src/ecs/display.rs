@@ -306,9 +306,9 @@ pub(crate) fn reconcile_displays(
             .values()
             .any(|(_, spaces)| spaces.is_empty())
     {
-        if state.retries_left > 0 {
-            state.retries_left -= 1;
-            warn!("Display list is incomplete; retrying in {DISPLAY_RETRY_DELAY:?}");
+        if state.retries_left > 0 || present_displays.is_empty() {
+            state.retries_left = state.retries_left.saturating_sub(1);
+            debug!("Display list is incomplete; retrying in {DISPLAY_RETRY_DELAY:?}");
             state.pending = Some(Timer::new(DISPLAY_RETRY_DELAY, TimerMode::Once));
             return;
         }

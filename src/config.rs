@@ -107,7 +107,9 @@ fn create_configuration_file_at(path: &Path) -> std::io::Result<bool> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "configuration path has no parent")
     })?;
-    create_dir_all(parent)?;
+    if !parent.as_os_str().is_empty() {
+        create_dir_all(parent)?;
+    }
 
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -188,8 +190,9 @@ fn default_lua_file() -> std::io::Result<PathBuf> {
     Ok(config_home.join("paneru").join("init.lua"))
 }
 
-/// Finds the first existing Lua init script from supported locations, mirroring
-/// [`discover_configuration_file`]. Honors `$PANERU_LUA` first.
+/// Finds the first existing Lua init script from supported locations.
+/// Honors `$PANERU_LUA` first, falling back to `$HOME/.paneru.lua` and XDG
+/// locations if it does not exist.
 #[cfg(feature = "lua")]
 pub fn discover_lua_file() -> Option<PathBuf> {
     if let Ok(path_str) = env::var("PANERU_LUA") {
@@ -249,7 +252,9 @@ fn create_lua_file_at(path: &Path) -> std::io::Result<bool> {
     let parent = path.parent().ok_or_else(|| {
         std::io::Error::new(ErrorKind::InvalidInput, "Lua script path has no parent")
     })?;
-    create_dir_all(parent)?;
+    if !parent.as_os_str().is_empty() {
+        create_dir_all(parent)?;
+    }
 
     match OpenOptions::new().write(true).create_new(true).open(path) {
         Ok(mut file) => {
@@ -2952,6 +2957,7 @@ fn startup_config_lookup(root: &Path, explicit: &Path) -> Option<PathBuf> {
             "--ignored",
             "--nocapture",
         ])
+        .current_dir(root)
         .env(STARTUP_LOOKUP_CHILD, "1")
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("xdg"))
@@ -3024,6 +3030,61 @@ fn test_missing_explicit_config_is_created_at_that_path() {
     assert!(
         !root.join("xdg").exists(),
         "nothing should be created in the XDG configuration directory"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_bare_relative_explicit_config_is_created_in_working_directory() {
+    let root = scratch_config_root("explicit-bare-relative");
+    let explicit = Path::new("paneru.toml");
+
+    assert_eq!(
+        startup_config_lookup(&root, explicit),
+        Some(explicit.to_path_buf())
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join(explicit)).unwrap(),
+        DEFAULT_CONFIGURATION
+    );
+    assert!(
+        !root.join("xdg").exists(),
+        "nothing should be created in the XDG configuration directory"
+    );
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn test_empty_explicit_config_falls_back_to_standard_locations() {
+    let root = scratch_config_root("explicit-empty");
+    let standalone = root.join("home").join(".paneru.toml");
+    let custom = "[options]\nauto_center = false\n\n[bindings]\n";
+    std::fs::write(&standalone, custom).unwrap();
+
+    assert_eq!(
+        startup_config_lookup(&root, Path::new("")),
+        Some(standalone.clone())
+    );
+    assert_eq!(std::fs::read_to_string(&standalone).unwrap(), custom);
+
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(feature = "lua")]
+#[test]
+fn test_existing_lua_script_takes_precedence_over_missing_explicit_config() {
+    let root = scratch_config_root("explicit-under-lua");
+    let lua_dir = root.join("xdg").join("paneru");
+    create_dir_all(&lua_dir).unwrap();
+    std::fs::write(lua_dir.join("init.lua"), "-- custom lua\n").unwrap();
+    let explicit = root.join("app").join("paneru.toml");
+
+    assert_eq!(startup_config_lookup(&root, &explicit), None);
+    assert!(
+        !explicit.exists(),
+        "explicit TOML must not be created when an init.lua already exists"
     );
 
     std::fs::remove_dir_all(root).unwrap();

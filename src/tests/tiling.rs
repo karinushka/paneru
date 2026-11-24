@@ -2407,6 +2407,44 @@ fn test_rule_tiles_a_non_resizable_window() {
         ]);
 }
 
+/// Native fullscreen temporarily makes `AXSize` non-settable on macOS;
+/// discovering a fullscreen window must not classify it as `Unmanaged::Floating`.
+#[test]
+fn test_native_fullscreen_window_reporting_fixed_size_does_not_float() {
+    TestHarness::new()
+        .with_windows(1)
+        .with_focused_window(0)
+        .on_iteration(0, |world, state| {
+            let window = state.spawn_window(
+                TEST_PROCESS_ID,
+                TEST_WORKSPACE_ID,
+                1,
+                IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            );
+            state.update_window(1, |window| {
+                window.fixed_size = true;
+                window.is_full_screen = true;
+            });
+            world.trigger(SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            let entity = find_window_entity(1, world);
+            assert!(
+                world
+                    .entity(entity)
+                    .get::<crate::ecs::Unmanaged>()
+                    .is_none(),
+                "a native fullscreen window must not be floated when AXSize is unsettable"
+            );
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+        ]);
+}
+
 /// Regression test: during startup (`Initializing`), `apply_window_defaults` and
 /// `apply_window_positions` must classify floating windows as `Unmanaged::Floating`
 /// *before* `finish_setup` populates the workspace strip and selects the initial

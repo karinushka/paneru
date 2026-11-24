@@ -355,6 +355,30 @@ fn alive_after_role_read(ax_error: OSStatus) -> bool {
     ax_error != kAXErrorInvalidUIElement
 }
 
+/// Resolves whether a window is resizable from an `AXUIElementIsAttributeSettable`
+/// probe, caching the result once a definitive non-transient answer is read.
+///
+/// Transient AX failures fail open (`true`) without caching. Native fullscreen
+/// temporarily makes `AXSize` non-settable on macOS, so `Ok(false)` while
+/// fullscreen also returns `true` without poisoning the cache.
+fn resolve_resizable(
+    cache: &OnceLock<bool>,
+    probe_settable: impl FnOnce() -> Result<bool>,
+    is_full_screen: impl FnOnce() -> bool,
+) -> bool {
+    if let Some(&resizable) = cache.get() {
+        return resizable;
+    }
+    let Ok(resizable) = probe_settable() else {
+        return true;
+    };
+    if !resizable && is_full_screen() {
+        return true;
+    }
+    let _ = cache.set(resizable);
+    resizable
+}
+
 fn read_enhanced_ui(app_element: &CFRetained<AXUIWrapper>) -> Result<EnhancedUiFlag> {
     let name = CFString::from_static_str("AXEnhancedUserInterface");
     let mut attribute: *mut CFType = null_mut();
@@ -481,8 +505,9 @@ pub trait WindowApi: Send + Sync {
     fn is_alive(&self) -> bool;
     fn is_minimized(&self) -> bool;
     fn is_full_screen(&self) -> bool;
-    /// Whether the app lets the window's size change. A fresh cross-process
-    /// read. A failed read counts as resizable.
+    /// Whether the app lets the window's size change. Cached after the first
+    /// definitive read; failed reads and native fullscreen windows count as
+    /// resizable without poisoning the cache.
     fn is_resizable(&self) -> bool;
     fn reposition(&mut self, origin: Origin);
     fn resize(&mut self, size: Size);
@@ -585,6 +610,9 @@ pub struct WindowOS {
     /// Never caches `AXUnknown`: some apps report it briefly while a window
     /// is still being created.
     subrole: OnceLock<String>,
+    /// Cached result of `AXUIElementIsAttributeSettable(kAXSizeAttribute)`.
+    /// Failed reads and temporary native-fullscreen states are not cached.
+    resizable: OnceLock<bool>,
 }
 
 impl WindowOS {
@@ -635,6 +663,7 @@ impl WindowOS {
             title: RwLock::new(None),
             role: OnceLock::new(),
             subrole: OnceLock::new(),
+            resizable: OnceLock::new(),
         };
 
         let forced = window.is_forced_manage(config, bundle_id);
@@ -974,15 +1003,22 @@ impl WindowApi for WindowOS {
     }
 
     fn is_resizable(&self) -> bool {
-        let mut settable = 0;
-        let result = unsafe {
-            AXUIElementIsAttributeSettable(
-                self.ax_element.as_ptr(),
-                CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                &mut settable,
-            )
-        };
-        result.to_result(function_name!()).is_err() || settable != 0
+        resolve_resizable(
+            &self.resizable,
+            || {
+                let mut settable = 0;
+                unsafe {
+                    AXUIElementIsAttributeSettable(
+                        self.ax_element.as_ptr(),
+                        CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                        &mut settable,
+                    )
+                }
+                .to_result(function_name!())
+                .map(|()| settable != 0)
+            },
+            || self.is_full_screen(),
+        )
     }
 
     #[instrument(level = Level::TRACE)]
@@ -1710,6 +1746,47 @@ mod tests {
         ));
         assert!(alive_after_role_read(
             accessibility_sys::kAXErrorAPIDisabled
+        ));
+    }
+
+    #[test]
+    fn resizable_skips_errors_and_fullscreen_then_caches_definitive_reads() {
+        let cache = OnceLock::new();
+
+        // Transient AX failure fails open without caching.
+        assert!(resolve_resizable(
+            &cache,
+            || Err(Error::Generic("busy".into())),
+            || panic!("is_full_screen must not be queried on AX error"),
+        ));
+        assert!(cache.get().is_none());
+
+        // Native fullscreen temporarily marks AXSize non-settable; must not
+        // float or poison the cache.
+        assert!(resolve_resizable(&cache, || Ok(false), || true));
+        assert!(cache.get().is_none());
+
+        // Non-fullscreen fixed-size window caches `false` and skips re-probing.
+        assert!(!resolve_resizable(&cache, || Ok(false), || false));
+        assert_eq!(cache.get(), Some(&false));
+        assert!(!resolve_resizable(
+            &cache,
+            || panic!("cached resizable state must not re-probe AX"),
+            || panic!("cached resizable state must not re-check fullscreen"),
+        ));
+
+        // Normal resizable window caches `true` without checking fullscreen.
+        let resizable_cache = OnceLock::new();
+        assert!(resolve_resizable(
+            &resizable_cache,
+            || Ok(true),
+            || panic!("is_full_screen must not be queried when AXSize is settable"),
+        ));
+        assert_eq!(resizable_cache.get(), Some(&true));
+        assert!(resolve_resizable(
+            &resizable_cache,
+            || panic!("cached resizable state must not re-probe AX"),
+            || panic!("cached resizable state must not re-check fullscreen"),
         ));
     }
 

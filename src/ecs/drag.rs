@@ -92,13 +92,23 @@ struct Drag {
     _tap_guard: DragFlagGuard,
 }
 
-/// Briefly ignore stale Space membership while a dropped column reaches its slot.
+/// How long to ignore stale Space membership while a column crossing displays
+/// reaches its new slot.
+const COLUMN_IN_TRANSIT_TTL: Duration = Duration::from_secs(2);
+
+/// Briefly ignore stale Space membership while a column moving between displays
+/// reaches its slot.
 #[derive(Component)]
-pub(super) struct ColumnInTransit {
+pub(crate) struct ColumnInTransit {
     members: Vec<Entity>,
 }
 
 impl ColumnInTransit {
+    pub(crate) fn spawn(members: Vec<Entity>, commands: &mut Commands) {
+        let timeout = Timeout::new(COLUMN_IN_TRANSIT_TTL, None, commands);
+        commands.spawn((timeout, Self { members }));
+    }
+
     pub(super) fn contains(&self, entity: Entity) -> bool {
         self.members.contains(&entity)
     }
@@ -596,13 +606,10 @@ fn finish(
         home.set_changed();
     }
     if drag.crossed {
-        let timeout = Timeout::new(Duration::from_secs(2), None, commands);
-        commands.spawn((
-            timeout,
-            ColumnInTransit {
-                members: drag.members.into_iter().map(|(entity, _)| entity).collect(),
-            },
-        ));
+        ColumnInTransit::spawn(
+            drag.members.into_iter().map(|(entity, _)| entity).collect(),
+            commands,
+        );
     }
     let (positions, sizes) = geometry;
     for entity in drag.held {

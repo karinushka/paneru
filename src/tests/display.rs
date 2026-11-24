@@ -2725,3 +2725,282 @@ fn test_vertical_focus_moves_the_pointer_to_the_nearest_display_in_that_directio
             .run(window_commands(Operation::Focus(direction)));
     }
 }
+
+/// Regression: moving a window to an empty display right after a focus change
+/// (whose OS `WindowFocused` arrives asynchronously) must not let a mid-flight
+/// `SpaceChanged` or stale `DisplayChanged` yank the window back via
+/// `detect_moved_windows` while `SkyLight` still lists it on the source Space.
+#[test]
+fn test_next_display_survives_delayed_focus_and_space_changed() {
+    use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+
+    let ext_bounds = IRect::new(
+        TEST_DISPLAY_WIDTH,
+        0,
+        TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+        EXT_DISPLAY_HEIGHT,
+    );
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(12.0),
+            focus_follows_mouse: Some(true),
+            mouse_follows_focus: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .with_display(EXT_DISPLAY_ID, ext_bounds, vec![EXT_WORKSPACE_ID]);
+
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+    ]);
+    harness.advance(Duration::from_secs(1));
+
+    // Focus left and back so the strip is still settling and the OS focus
+    // notification for window 3 is queued asynchronously.
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::West)),
+    });
+    harness.advance(Duration::from_millis(30));
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::East)),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    // Before SkyLight migrates window 3 out of TEST_WORKSPACE_ID, the OS
+    // delivers SpaceChanged (and even a transient DisplayChanged still naming
+    // Display 1). ColumnInTransit must keep window 3 on the destination strip.
+    harness.world().write_message(Event::SpaceChanged);
+    harness.advance(Duration::from_millis(20));
+    {
+        let world = harness.world();
+        let active_disp = world
+            .query_filtered::<&Display, With<ActiveDisplayMarker>>()
+            .single(world)
+            .expect("active display")
+            .id();
+        let active_ws = world
+            .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single(world)
+            .expect("active workspace")
+            .id();
+        assert_eq!(active_disp, EXT_DISPLAY_ID);
+        assert_eq!(active_ws, EXT_WORKSPACE_ID);
+    }
+
+    // Even if macOS transiently reports Display 1 active while Display 2 is
+    // empty, re-activating TEST_WORKSPACE_ID must not steal window 3 back.
+    harness.world().write_message(Event::DisplayChanged);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 3, EXT_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 3, TEST_WORKSPACE_ID);
+    let frame = harness.mock_state.create_window(3).frame();
+    assert!(
+        ext_bounds.contains(frame.center()),
+        "window 3 must finish on Display 2 ({ext_bounds:?}), got {frame:?}"
+    );
+    assert_eq!(
+        frame.width(),
+        750,
+        "window 3 should keep its 400/1024 proportion on 1920px Display 2"
+    );
+}
+
+/// Regression: sending a window to an empty display while a `FullWidth`
+/// toggle-off resize is still animating must keep the window on the target
+/// display (even when `WindowFocused` + `SpaceChanged` arrive mid-flight) and
+/// scale its intended post-toggle width rather than its transient frame width.
+#[test]
+fn test_next_display_after_fullwidth_toggle_keeps_target_display_and_intended_width() {
+    use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+
+    let ext_bounds = IRect::new(
+        TEST_DISPLAY_WIDTH,
+        0,
+        TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+        EXT_DISPLAY_HEIGHT,
+    );
+    let config: Config = (
+        MainOptions {
+            animation_speed: Some(12.0),
+            focus_follows_mouse: Some(true),
+            mouse_follows_focus: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(4)
+        .with_display(EXT_DISPLAY_ID, ext_bounds, vec![EXT_WORKSPACE_ID]);
+
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
+        },
+    ]);
+    harness.advance(Duration::from_secs(1));
+
+    // Expand to FullWidth and toggle back to normal size, then send mid-resize.
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::FullWidth),
+    });
+    harness.advance(Duration::from_millis(50));
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::FullWidth),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+    });
+    harness
+        .world()
+        .write_message(Event::WindowFocused { window_id: 3 });
+    harness.advance(Duration::from_millis(20));
+    harness.world().write_message(Event::SpaceChanged);
+    harness.advance(Duration::from_secs(2));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 3, EXT_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 3, TEST_WORKSPACE_ID);
+    let active_disp = world
+        .query_filtered::<&Display, With<ActiveDisplayMarker>>()
+        .single(world)
+        .expect("active display")
+        .id();
+    let active_ws = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active workspace")
+        .id();
+    assert_eq!(active_disp, EXT_DISPLAY_ID);
+    assert_eq!(active_ws, EXT_WORKSPACE_ID);
+    let frame = harness.mock_state.create_window(3).frame();
+    assert_eq!(
+        frame.width(),
+        750,
+        "window 3 must carry its intended pre-FullWidth ratio (400/1024 -> 750px), got {frame:?}"
+    );
+}
+
+/// Regression: `ToNextDisplay(MoveFocus::Stay)` must guard the moving window
+/// with `ColumnInTransit` so display migration or workspace reactivation while
+/// the window is mid-flight cannot pull it back onto the source display.
+#[test]
+fn test_next_display_send_survives_reconciliation_in_transit() {
+    let ext_bounds = IRect::new(
+        TEST_DISPLAY_WIDTH,
+        0,
+        TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+        EXT_DISPLAY_HEIGHT,
+    );
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        ext_bounds,
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_secs(1));
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Stay)),
+    });
+    harness.advance(Duration::from_millis(20));
+
+    // SkyLight still lists window 0 in TEST_WORKSPACE_ID while it animates.
+    crate::ecs::display::migrate_moved_windows_across_displays(harness.world());
+    harness.advance(Duration::from_secs(1));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+}
+
+/// Regression: moving a window to an empty display updates both active markers
+/// immediately, allowing an immediate send-back without losing the window or
+/// letting the first move's 150ms `refresh_size` apply the other display's size.
+#[test]
+fn test_next_display_rapid_round_trip_keeps_window_and_skips_stale_resize() {
+    use crate::ecs::{ActiveDisplayMarker, ActiveWorkspaceMarker};
+
+    let ext_bounds = IRect::new(
+        TEST_DISPLAY_WIDTH,
+        0,
+        TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+        EXT_DISPLAY_HEIGHT,
+    );
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        ext_bounds,
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_secs(1));
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+    });
+    harness.advance(Duration::from_millis(50));
+    {
+        let world = harness.world();
+        assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+        let active_disp = world
+            .query_filtered::<&Display, With<ActiveDisplayMarker>>()
+            .single(world)
+            .expect("active display")
+            .id();
+        let active_ws = world
+            .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+            .single(world)
+            .expect("active workspace")
+            .id();
+        assert_eq!(active_disp, EXT_DISPLAY_ID);
+        assert_eq!(active_ws, EXT_WORKSPACE_ID);
+    }
+
+    // Bounce straight back before the first move's 150ms refresh_size fires.
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::ToNextDisplay(MoveFocus::Follow)),
+    });
+    harness.advance(Duration::from_secs(1));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+    let active_disp = world
+        .query_filtered::<&Display, With<ActiveDisplayMarker>>()
+        .single(world)
+        .expect("active display")
+        .id();
+    let active_ws = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .expect("active workspace")
+        .id();
+    assert_eq!(active_disp, TEST_DISPLAY_ID);
+    assert_eq!(active_ws, TEST_WORKSPACE_ID);
+    let frame = harness.mock_state.create_window(0).frame();
+    assert_eq!(
+        frame.height(),
+        TEST_DISPLAY_HEIGHT - TEST_MENUBAR_HEIGHT,
+        "stale refresh_size from Display 2 must not resize window 0 back to Display 2's height: {frame:?}"
+    );
+}

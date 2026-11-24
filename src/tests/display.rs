@@ -29,7 +29,11 @@ fn test_multi_display_lifecycle() {
         },
     ];
 
-    let mut harness = TestHarness::new().with_windows(1);
+    let mut harness = TestHarness::new().with_windows(1).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
     harness
         .app
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
@@ -38,22 +42,30 @@ fn test_multi_display_lifecycle() {
 
     harness
         .on_iteration(1, |world, state| {
-            let mut query = world.query_filtered::<Entity, With<Display>>();
-            query.single(world).expect("should have one display");
+            assert!(
+                world
+                    .query::<&Display>()
+                    .iter(world)
+                    .any(|display| display.id() == TEST_DISPLAY_ID)
+            );
             state.remove_display(TEST_DISPLAY_ID);
         })
         .on_iteration(2, |world, mut state| {
             assert!(
                 world
-                    .query_filtered::<Entity, With<Display>>()
-                    .single(world)
-                    .is_err(),
+                    .query::<&Display>()
+                    .iter(world)
+                    .all(|display| display.id() != TEST_DISPLAY_ID),
                 "display should be despawned"
             );
 
             let workspace_entity = {
-                let mut query = world.query_filtered::<Entity, With<LayoutStrip>>();
-                query.single(world).expect("should have one workspace")
+                world
+                    .query::<(Entity, &LayoutStrip)>()
+                    .iter(world)
+                    .find(|(_, strip)| strip.id() == TEST_WORKSPACE_ID)
+                    .expect("the workspace should survive")
+                    .0
             };
             let workspace = world.entity(workspace_entity);
             assert!(
@@ -72,13 +84,19 @@ fn test_multi_display_lifecycle() {
         })
         .on_iteration(3, |world, _state| {
             let new_display_entity = world
-                .query_filtered::<Entity, With<Display>>()
-                .single(world)
-                .expect("display should be spawned again");
+                .query::<(Entity, &Display)>()
+                .iter(world)
+                .find(|(_, display)| display.id() == TEST_DISPLAY_ID)
+                .expect("display should be spawned again")
+                .0;
 
             let workspace_entity = {
-                let mut query = world.query_filtered::<Entity, With<LayoutStrip>>();
-                query.single(world).expect("should have one workspace")
+                world
+                    .query::<(Entity, &LayoutStrip)>()
+                    .iter(world)
+                    .find(|(_, strip)| strip.id() == TEST_WORKSPACE_ID)
+                    .expect("the workspace should survive")
+                    .0
             };
             let workspace = world.entity(workspace_entity);
             assert!(
@@ -113,21 +131,30 @@ fn test_multi_workspace_orphaning() {
     }));
 
     let workspaces = vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1];
-    let harness = TestHarness::new().with_display(
-        TEST_DISPLAY_ID,
-        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
-        workspaces,
-    );
+    let harness = TestHarness::new()
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            workspaces,
+        )
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        );
     harness
         .on_iteration(1, |world, state| {
             let display_entity = world
-                .query_filtered::<Entity, With<Display>>()
-                .single(world)
-                .expect("should have one display");
+                .query::<(Entity, &Display)>()
+                .iter(world)
+                .find(|(_, display)| display.id() == TEST_DISPLAY_ID)
+                .expect("the source display should exist")
+                .0;
 
             let workspace_entities = world
-                .query_filtered::<Entity, With<LayoutStrip>>()
+                .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
+                .filter_map(|(entity, strip)| (strip.id() != EXT_WORKSPACE_ID).then_some(entity))
                 .collect::<Vec<_>>();
             assert_eq!(workspace_entities.len(), 2, "should have two workspaces");
 
@@ -142,8 +169,9 @@ fn test_multi_workspace_orphaning() {
         })
         .on_iteration(8, |world, _state| {
             let workspace_entities = world
-                .query_filtered::<Entity, With<LayoutStrip>>()
+                .query::<(Entity, &LayoutStrip)>()
                 .iter(world)
+                .filter_map(|(entity, strip)| (strip.id() != EXT_WORKSPACE_ID).then_some(entity))
                 .collect::<Vec<_>>();
             for &ws in &workspace_entities {
                 let entity: EntityRef = world.entity(ws);
@@ -579,7 +607,7 @@ fn test_display_configuration_catches_late_geometry_change() {
 }
 
 #[test]
-fn test_transient_empty_display_list_keeps_layout_and_retries() {
+fn test_empty_display_list_keeps_layout_after_retries() {
     let mut harness = TestHarness::new().with_windows(1);
     harness.advance(Duration::from_millis(500));
     harness.mock_state.remove_display(TEST_DISPLAY_ID);
@@ -588,7 +616,8 @@ fn test_transient_empty_display_list_keeps_layout_and_retries() {
         .write_message::<Event>(Event::DisplayConfigured {
             display_id: TEST_DISPLAY_ID,
         });
-    harness.advance(Duration::from_millis(600));
+    // Keep the scan empty past the normal retry budget.
+    harness.advance(Duration::from_secs(6));
 
     let world = harness.world();
     let display_entity = world
@@ -1166,10 +1195,16 @@ fn test_empty_baseline_row_survives_display_removal() {
     });
 
     TestHarness::new()
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID],
+        )
         .on_iteration(0, |world, state| {
             let strips = world
                 .query::<&LayoutStrip>()
                 .iter(world)
+                .filter(|strip| strip.id() == TEST_WORKSPACE_ID)
                 .map(|strip| strip.virtual_index)
                 .collect::<Vec<_>>();
             assert_eq!(strips, vec![0], "the space starts with an empty row 0");
@@ -1177,9 +1212,11 @@ fn test_empty_baseline_row_survives_display_removal() {
         })
         .on_iteration(7, |world, mut state| {
             let entity = world
-                .query_filtered::<Entity, With<LayoutStrip>>()
-                .single(world)
-                .expect("empty row 0 should be orphaned, not despawned");
+                .query::<(Entity, &LayoutStrip)>()
+                .iter(world)
+                .find(|(_, strip)| strip.id() == TEST_WORKSPACE_ID)
+                .expect("empty row 0 should be orphaned, not despawned")
+                .0;
             assert!(
                 world.entity(entity).get::<Timeout>().is_some(),
                 "orphaned row 0 should carry a timeout"
@@ -1192,9 +1229,11 @@ fn test_empty_baseline_row_survives_display_removal() {
         })
         .on_iteration(8, |world, _state| {
             let entity = world
-                .query_filtered::<Entity, With<LayoutStrip>>()
-                .single(world)
-                .expect("row 0 should still exist after the display returns");
+                .query::<(Entity, &LayoutStrip)>()
+                .iter(world)
+                .find(|(_, strip)| strip.id() == TEST_WORKSPACE_ID)
+                .expect("row 0 should still exist after the display returns")
+                .0;
             assert!(
                 world.entity(entity).get::<ChildOf>().is_some(),
                 "row 0 should be re-parented to the returning display"

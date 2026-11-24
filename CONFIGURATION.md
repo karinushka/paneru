@@ -4,13 +4,13 @@ Paneru is configured via a TOML file *or* a Lua script — never both. By
 default, it looks for the TOML configuration in the following locations (in
 order):
 
-1.  `$PANERU_CONFIG` (environment variable)
-2.  `$HOME/.paneru`
-3.  `$HOME/.paneru.toml`
-4.  `$XDG_CONFIG_HOME/paneru/paneru.toml`
+1.  `$HOME/.paneru`
+2.  `$HOME/.paneru.toml`
+3.  `$XDG_CONFIG_HOME/paneru/paneru.toml`
 
-A nonempty `$PANERU_CONFIG` sets the only TOML path Paneru checks.
-If the file is missing and no Lua script takes precedence, Paneru creates it with the built-in defaults.
+A nonempty `$PANERU_CONFIG` overrides that search and sets the only TOML path
+Paneru checks. If the file is missing and no Lua script takes precedence, Paneru
+creates it at that path with the built-in defaults.
 
 The configuration is automatically reloaded when the file is saved.
 

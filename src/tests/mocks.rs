@@ -708,7 +708,7 @@ impl MockState {
                 .force_read()
                 .windows
                 .get(&id)
-                .is_some_and(|w| w.fixed_size)
+                .is_some_and(|w| w.fixed_size && !w.is_full_screen)
         });
 
         let s = self.clone();

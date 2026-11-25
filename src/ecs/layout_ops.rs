@@ -12,22 +12,21 @@ use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Has, Without};
-use bevy::ecs::system::{Commands, Query, Res};
+use bevy::ecs::system::{Commands, Query, Res, SystemParam};
 use bevy::platform::collections::HashSet;
 use tracing::debug;
 
 use crate::commands::{Command, MoveFocus, Operation};
 use crate::config::Config;
 use crate::ecs::drag::ColumnInTransit;
-use crate::ecs::layout::{Column, LayoutStrip};
+use crate::ecs::layout::{Column, DisplayViewports, LayoutStrip};
 use crate::ecs::params::Windows;
 use crate::ecs::workspace::VirtualMoveMarker;
 use crate::ecs::{
-    ActiveWorkspaceMarker, DockPosition, FullWidthMarker, SendMessageTrigger, SpawnCommandsExt,
-    Unmanaged, Window,
+    ActiveWorkspaceMarker, FullWidthMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged, Window,
 };
 use crate::events::Event;
-use crate::manager::{Display, Origin, Size};
+use crate::manager::{Origin, Size, WindowManager};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
@@ -44,12 +43,18 @@ type Strips<'w, 's> = Query<
     Without<Window>,
 >;
 
+#[derive(SystemParam)]
+pub(crate) struct LayoutDisplays<'w, 's> {
+    viewports: DisplayViewports<'w, 's>,
+    window_manager: Res<'w, WindowManager>,
+}
+
 /// Applies the layout operations a Lua handler returned.
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
     windows: Windows,
     mut workspaces: Strips,
-    displays: Query<(&Display, Option<&DockPosition>)>,
+    displays: LayoutDisplays,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -88,7 +93,7 @@ fn apply(
     op: LayoutOp,
     windows: &Windows,
     workspaces: &mut Strips,
-    displays: &Query<(&Display, Option<&DockPosition>)>,
+    displays: &LayoutDisplays,
     config: &Config,
     floated: &mut HashSet<Entity>,
     commands: &mut Commands,
@@ -236,7 +241,7 @@ fn apply(
                 return;
             };
             let Some(viewport) = parent
-                .and_then(|parent| displays.get(parent.parent()).ok())
+                .and_then(|parent| displays.viewports.get(parent.parent()).ok())
                 .map(|(display, dock)| display.actual_display_bounds(dock, config))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the strip is on no display");
@@ -372,7 +377,7 @@ fn place_column(
     (space, workspace, index): (WorkspaceId, u32, usize),
     windows: &Windows,
     workspaces: &mut Strips,
-    displays: &Query<(&Display, Option<&DockPosition>)>,
+    displays: &LayoutDisplays,
     config: &Config,
     commands: &mut Commands,
 ) {
@@ -393,6 +398,24 @@ fn place_column(
     if source.is_fullscreen() || target.is_fullscreen() {
         return;
     }
+    let target_display = target_display.parent();
+    let Ok((target_viewport, target_dock)) = displays.viewports.get(target_display) else {
+        return;
+    };
+    let display_id = target_viewport.id();
+    // Read the active native Space at dispatch time. The Space may have
+    // changed since the client queried its destination.
+    if !displays
+        .window_manager
+        .active_display_space(display_id)
+        .is_ok_and(|shown_space| shown_space == space)
+    {
+        debug!(
+            space,
+            display_id, "skipping Place: target native Space is not shown"
+        );
+        return;
+    }
     let Ok(from) = source.index_of(entity) else {
         return;
     };
@@ -408,10 +431,7 @@ fn place_column(
     }
 
     let source_display = source_display.parent();
-    let target_display = target_display.parent();
-    let (Ok((source_viewport, source_dock)), Ok((target_viewport, target_dock))) =
-        (displays.get(source_display), displays.get(target_display))
-    else {
+    let Ok((source_viewport, source_dock)) = displays.viewports.get(source_display) else {
         return;
     };
     let Ok(column) = source.get(from) else {

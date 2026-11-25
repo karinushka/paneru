@@ -3649,3 +3649,92 @@ fn test_next_display_rapid_round_trip_keeps_window_and_skips_stale_resize() {
         "stale refresh_size from Display 2 must not resize window 0 back to Display 2's height: {frame:?}"
     );
 }
+
+/// While the screen is locked, macOS moves windows across spaces when monitors
+/// sleep or disconnect and emits destroy notifications for them; ignoring those
+/// avoids dropping live windows before the real close sweep runs on unlock.
+#[test]
+fn test_window_destroyed_ignored_while_screen_locked() {
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+}
+
+/// While macOS reports no displays (e.g. lid-closed transition), space-change
+/// destroy notifications must not tear down windows that are still alive.
+#[test]
+fn test_window_destroyed_ignored_while_displays_unsettled() {
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.remove_display(TEST_DISPLAY_ID);
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+}
+
+/// A window that genuinely closes while the screen is locked stays until unlock,
+/// then is removed by the unordered-window sweep once the app list settles.
+#[test]
+fn test_window_closed_while_screen_locked_is_swept_after_unlock() {
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert_on_workspace!(harness.world(), 1, TEST_WORKSPACE_ID);
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert!(
+        !world.query::<&Window>().iter(world).any(|w| w.id() == 1),
+        "window 1 should be despawned after unlock"
+    );
+}

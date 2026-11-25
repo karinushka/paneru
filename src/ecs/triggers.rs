@@ -1082,7 +1082,9 @@ pub(super) fn window_managed_trigger(
 /// * `global_state` - Focus-follows-mouse and reshuffle flags.
 /// * `windows` - A query for all windows with their parent.
 /// * `openers` - The window each window was opened from, if any.
+/// * `window_manager` - Platform queries for lock state and active displays.
 /// * `commands` - Bevy commands to despawn entities and trigger events.
+#[allow(clippy::too_many_arguments)]
 #[instrument(level = Level::DEBUG, skip_all)]
 pub(super) fn window_destroyed_trigger(
     mut messages: MessageReader<Event>,
@@ -1091,6 +1093,7 @@ pub(super) fn window_destroyed_trigger(
     mut global_state: GlobalState,
     windows: Windows,
     openers: Query<&OpenedFrom>,
+    window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
     for event in messages.read() {
@@ -1102,6 +1105,22 @@ pub(super) fn window_destroyed_trigger(
             debug!("Duplicate event: window {window_id} already destroyed.");
             continue;
         };
+
+        // While the screen is locked, or while macOS reports no displays or a
+        // display with no spaces yet, display reconfiguration moves windows across
+        // spaces and emits destroy events for windows that are still alive. Keep
+        // them here; `cleanup_unordered_windows` removes any window that actually
+        // closed once it is unordered and Accessibility marks it invalid.
+        let present = window_manager.present_displays();
+        if window_manager.screen_locked()
+            || present.is_empty()
+            || present.iter().any(|(_, spaces)| spaces.is_empty())
+        {
+            debug!(
+                "Window {window_id} destroy ({source:?}) ignored while the screen is locked or displays are unsettled."
+            );
+            continue;
+        }
 
         // Only the SLS notification is ambiguous — it also fires when a window merely leaves a
         // space, so it needs confirming. A `kAXUIElementDestroyedNotification` means the AX element

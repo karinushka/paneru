@@ -5843,3 +5843,84 @@ fn test_column_jumps_focus_the_stacks_last_focused_window() {
         .on_iteration(9, |world, _state| assert_focused!(world, 1))
         .run(commands);
 }
+
+/// `window center` sent while a workspace switch is still sliding the strip up
+/// from its parked corner must only move the strip sideways. Taking the
+/// focused window's mid-slide height for the strip's left every window on the
+/// workspace stranded low on the screen once the animation ended.
+#[test]
+fn test_center_mid_switch_keeps_strip_height() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(true),
+            animation_speed: Some(12.0),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(4);
+    let settle = |h: &mut TestHarness, frames: usize| {
+        for _ in 0..frames {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let send = |h: &mut TestHarness, operation: Operation| {
+        h.app.world_mut().write_message::<Event>(Event::Command {
+            command: Command::Window(operation),
+        });
+    };
+    let heights = |h: &mut TestHarness| {
+        let world = h.app.world_mut();
+        let mut q = world.query::<&Window>();
+        let mut ys: Vec<(WinID, i32)> = q.iter(world).map(|w| (w.id(), w.frame().min.y)).collect();
+        ys.sort_unstable();
+        ys
+    };
+
+    settle(&mut h, 8);
+    let top = heights(&mut h)[0].1;
+
+    // Two windows go to workspace 2, which then sits parked.
+    send(&mut h, Operation::VirtualMoveNumber(1, MoveFocus::Stay));
+    settle(&mut h, 200);
+    send(&mut h, Operation::VirtualMoveNumber(1, MoveFocus::Stay));
+    settle(&mut h, 200);
+
+    // Switch to it, and center a couple of frames into the slide.
+    send(&mut h, Operation::VirtualNumber(1));
+    settle(&mut h, 2);
+    send(&mut h, Operation::Center);
+    settle(&mut h, 300);
+
+    let shown: Vec<WinID> = {
+        let world = h.app.world_mut();
+        let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let entities: Vec<Entity> = strips
+            .iter(world)
+            .flat_map(LayoutStrip::all_windows)
+            .collect();
+        entities
+            .into_iter()
+            .filter_map(|e| world.get::<Window>(e).map(|w| w.id()))
+            .collect()
+    };
+    assert_eq!(
+        shown.len(),
+        2,
+        "test setup: workspace 2 shows the two moved windows"
+    );
+    for (id, y) in heights(&mut h) {
+        if shown.contains(&id) {
+            assert_eq!(
+                y, top,
+                "window {id} must end at the top of the display, not at {y}"
+            );
+        }
+    }
+}

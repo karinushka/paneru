@@ -972,6 +972,7 @@ fn command_center_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    strips: Query<(&Position, Option<&RepositionMarker>), With<LayoutStrip>>,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut commands: Commands,
@@ -997,8 +998,14 @@ fn command_center_window(
             // record the placement as deliberate so a later reshuffle — a
             // repeated focus event, a return from another display — does not
             // re-derive the offset and undo the centering.
-            let strip_position = origin - layout_position.0;
             let strip_entity = active_display.active_strip_entity();
+            let mut strip_position = origin - layout_position.0;
+            // Centering is horizontal only. Keep the strip's target y so centering
+            // mid-way through a workspace switch does not strand the strip partway
+            // up from its parked corner.
+            if let Ok((position, moving)) = strips.get(strip_entity) {
+                strip_position.y = moving.map_or(position.0.y, |RepositionMarker(to)| to.y);
+            }
             commands.reposition_entity(strip_entity, strip_position);
             mark_manual_offset(
                 strip_entity,

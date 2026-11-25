@@ -189,6 +189,8 @@ pub trait WindowManagerApi: Send + Sync {
     fn windows_in_workspace(&self, space_id: WorkspaceId) -> Result<Vec<WinID>>;
     /// Returns `true` when a window is no longer ordered into the window list.
     fn window_is_unordered(&self, window_id: WinID) -> bool;
+    /// Returns `true` when the macOS login session is locked.
+    fn screen_locked(&self) -> bool;
 
     /// Sends an `Event::Exit` to the event loop, signaling the application to quit.
     ///
@@ -496,6 +498,10 @@ impl WindowManagerApi for WindowManagerOS {
             unsafe { SLSWindowIsOrderedIn(self.main_cid, window_id, &mut ordered_in) };
 
         ordered_status == 0 && ordered_in == 0
+    }
+
+    fn screen_locked(&self) -> bool {
+        screen_is_locked()
     }
 
     fn quit(&self) -> Result<()> {

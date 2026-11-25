@@ -278,7 +278,8 @@ The index is measured after lifting the column out of its source and may point j
 {"WindowSetApply":[{"place":{"window":42,"space":7,"workspace":2,"index":0}}]}
 ```
 
-The destination workspace must already exist.
+The destination virtual workspace must already exist on the native Space currently shown on its display.
+It can be an unselected virtual workspace within that Space.
 The whole column moves, including its stack or tabs, without switching to the destination workspace.
 Stale or invalid destinations are skipped, as with other layout operations.
 

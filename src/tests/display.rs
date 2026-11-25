@@ -362,6 +362,38 @@ fn test_layout_op_unstack_then_place_moves_only_one_window() {
     assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
 }
 
+#[test]
+fn test_layout_op_place_leaves_the_column_when_native_space_is_inactive() {
+    use crate::types::windowset::LayoutOp;
+
+    let inactive_space = EXT_WORKSPACE_ID + 1;
+    let mut harness = TestHarness::new().with_windows(1).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID, inactive_space],
+    );
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    assert!(
+        world
+            .query::<&LayoutStrip>()
+            .iter(world)
+            .any(|strip| strip.id() == inactive_space)
+    );
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: inactive_space,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, inactive_space);
+}
+
 /// A window macOS filled covers its display and ignores the edge padding, so
 /// it is wider than the tiled viewport. Moved to another display, it fits
 /// that display's viewport instead of keeping the extra width past its edge.

@@ -191,8 +191,13 @@ fn pin_mirror_event_handler(
 ) {
     for event in messages.read() {
         match event {
-            Event::PinMirrorReady { window_id } => {
-                // Re-run the sync so the panel shows now that it has content.
+            // `PinMirrorReady`: re-run the sync so the panel shows now that
+            // it has content. `WindowFocused`: Paneru marks a window focused
+            // before macOS has raised it, so a mirror slotted "under the
+            // focused pin" at that point lands under whatever still covers
+            // it. The OS's own focus report comes after the raise; syncing
+            // again then puts the mirror where it belongs.
+            Event::PinMirrorReady { window_id } | Event::WindowFocused { window_id } => {
                 if let Some((_, entity)) = windows.find(*window_id)
                     && let Ok(mut pin) = pinned.get_mut(entity)
                 {

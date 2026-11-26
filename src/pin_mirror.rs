@@ -510,7 +510,10 @@ impl PinMirrorManager {
             let show = target.visible && mirror.output.has_frame();
             if show {
                 mirror.panel.setFrame_display(frame, false);
-                if !mirror.shown || mirror.under != target.under {
+                // A tucked mirror is re-stacked on every sync: its place is
+                // relative to another app's window, which may have been
+                // raised since the last one.
+                if !mirror.shown || mirror.under != target.under || target.under.is_some() {
                     mirror.restack(target.under);
                 }
             } else if mirror.shown {

@@ -16,7 +16,7 @@ use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::on_message;
 use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res};
-use bevy::math::IRect;
+use bevy::math::{IRect, IVec2};
 use tracing::{debug, warn};
 
 use super::params::Windows;
@@ -300,7 +300,9 @@ fn sync_pin_mirrors(
                 window_id,
                 frame,
                 visible: on_screen && mirror_wanted(focused, frame, focused_pin),
-                badge: on_screen && indicator.shows(auto_pinned),
+                badge: on_screen
+                    && indicator.shows(auto_pinned)
+                    && !badge_buried(focused, frame, focused_pin),
                 drawn: drawn.as_ref().is_none_or(|ids| ids.contains(&window_id)),
             }
         })
@@ -335,6 +337,14 @@ fn mirror_wanted(focused: bool, frame: IRect, focused_pin: Option<IRect>) -> boo
     !focused && focused_pin.is_none_or(|focused_pin| focused_pin.intersect(frame).is_empty())
 }
 
+/// Whether an unfocused pinned window's badge corner (top-right; `frame` is
+/// CG, y-down) lies under the focused pinned window. Badges float above every
+/// window, so one left there would look like it belongs to the focused window.
+fn badge_buried(focused: bool, frame: IRect, focused_pin: Option<IRect>) -> bool {
+    let corner = IVec2::new(frame.max.x, frame.min.y);
+    !focused && focused_pin.is_some_and(|focused_pin| focused_pin.contains(corner))
+}
+
 /// `Window::frame()` includes Paneru's padding; the mirror must match the
 /// real window's own rect or it drifts off it.
 fn content_rect(window: &Window) -> IRect {
@@ -362,5 +372,21 @@ mod tests {
             mirror_wanted(false, overlapping, None),
             "a focused window that is not pinned gets covered"
         );
+    }
+
+    /// An unfocused pin's badge hides only when its top-right corner sits
+    /// under the focused pinned window.
+    #[test]
+    fn badge_hides_under_the_focused_pin() {
+        let focused_pin = IRect::new(600, 370, 1300, 1050);
+        // Top-right corner at (1110, 405): inside the focused window.
+        let corner_under = IRect::new(337, 405, 1110, 1178);
+        // Overlaps the focused window, but its corner is clear of it.
+        let corner_clear = IRect::new(900, 200, 1500, 600);
+
+        assert!(badge_buried(false, corner_under, Some(focused_pin)));
+        assert!(!badge_buried(false, corner_clear, Some(focused_pin)));
+        assert!(!badge_buried(true, focused_pin, Some(focused_pin)));
+        assert!(!badge_buried(false, corner_under, None));
     }
 }

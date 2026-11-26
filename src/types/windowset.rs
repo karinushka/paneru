@@ -1117,6 +1117,16 @@ mod tests {
             .target(),
             Some(4)
         );
+        assert_eq!(
+            LayoutOp::Place {
+                window: 4,
+                space: 7,
+                workspace: 2,
+                index: 0
+            }
+            .target(),
+            Some(4)
+        );
         assert_eq!(LayoutOp::View { workspace: 2 }.target(), None);
     }
 

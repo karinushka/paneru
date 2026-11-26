@@ -1406,11 +1406,12 @@ fn copy_window_rule(
 /// `display_entity`, applying `width_ratio` against the destination display's
 /// viewport once the cross-display move has settled. Skips the resize if the
 /// window has already left `display_entity` in the meantime.
-fn schedule_cross_display_resize(
+pub(crate) fn schedule_cross_display_resize(
     moved_window: Entity,
     moving_entities: Vec<Entity>,
     display_entity: Entity,
     width_ratio: Option<f64>,
+    reshuffle: bool,
     commands: &mut Commands,
 ) {
     let refresh_size = move |windows: Query<&Bounds, With<Window>>,
@@ -1418,11 +1419,11 @@ fn schedule_cross_display_resize(
                              displays: Query<(&Display, Option<&DockPosition>)>,
                              mut commands: Commands,
                              config: Res<Config>| {
-        if !strips.iter().any(|(strip, parent)| {
+        let Some((strip, _)) = strips.iter().find(|(strip, parent)| {
             parent.parent() == display_entity && strip.contains(moved_window)
-        }) {
+        }) else {
             return;
-        }
+        };
         let Ok((display, dock)) = displays.get(display_entity) else {
             return;
         };
@@ -1436,9 +1437,18 @@ fn schedule_cross_display_resize(
                 .min(viewport_bounds.width());
             let size = Size::new(width, viewport_bounds.height());
             for &member in &moving_entities {
-                commands.resize_entity(member, size);
+                if reshuffle {
+                    commands.resize_entity(member, size);
+                } else if strip.index_of(member).ok() == strip.index_of(moved_window).ok()
+                    && let Ok(Bounds(current)) = windows.get(member)
+                    && current.x != width
+                {
+                    commands.resize_entity(member, Size::new(width, current.y));
+                }
             }
-            commands.reshuffle_around(moved_window);
+            if reshuffle {
+                commands.reshuffle_around(moved_window);
+            }
         }
     };
     let system_id = commands.register_system(refresh_size);
@@ -1504,7 +1514,6 @@ fn to_next_display(
     };
     let target_display_id = other.id();
     let other_bounds = other.bounds();
-    let other_width = other.width();
 
     // Resolve and validate the destination strip before mutating the source
     // strip so a missing or native-fullscreen destination cannot drop the
@@ -1532,7 +1541,7 @@ fn to_next_display(
     debug!(
         "moving window (id {}, {entity}) to display {target_display_id}: {}.",
         window.id(),
-        other_width / 2,
+        other.width() / 2,
     );
     let center = other_bounds.center().x;
     let width_ratio =
@@ -1588,6 +1597,7 @@ fn to_next_display(
         moving_entities,
         display_entity,
         width_ratio,
+        true,
         &mut commands,
     );
 }

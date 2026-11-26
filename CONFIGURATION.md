@@ -34,7 +34,7 @@ General behavior settings for the window manager.
 | `preset_stack_heights` | Array (Float) | `[0.25, 0.33, 0.5, 0.66, 0.75]` | Ratios of the viewport height used by the `window_vertical_resize` command. Only applies to windows inside a stack; every window in the column is kept at least 200px tall, so a ratio that would starve a neighbour is clamped. |
 | `animation_speed` | Float | *None* | Speed of window animations. Comfortable range is from 8 to 20. Unset or set to a very high value to effectively disable animations. |
 | `auto_center` | Boolean | `false` | Automatically center the focused window on the screen when switching focus. |
-| `pin_floating` | Boolean | `false` | (Experimental) Pin every floating window above all others, as if `window_pin` were run on it. Needs Screen Recording permission. `window_pin` still unpins one. |
+| `pin_floating` | Boolean | `false` | (Experimental) Pin every floating window above all others, as if `window_pin` were run on it. Needs Screen Recording permission. Windows that float only because their size is fixed (dialogs, alerts) are skipped; `window_pin` still pins or unpins any single window. |
 | `pin_indicator` | String | `"manual"` | (Experimental) Which pinned windows show a small pin badge on their top-right corner: `"manual"` (only windows pinned with `window_pin`), `"all"` (also `pin_floating` pins), or `"off"`. |
 | `sliver_height` | Float (0.1–1.0) | `1.0` | Vertical ratio of off-screen windows kept visible to prevent macOS from relocating them. |
 | `sliver_width` | Integer (px) | `5` | Horizontal width of off-screen windows kept visible. |

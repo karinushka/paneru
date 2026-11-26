@@ -167,6 +167,34 @@ fn test_pin_floating_option_pins_floated_windows() {
         .run(commands);
 }
 
+/// `pin_floating` leaves windows that float only because their size is fixed
+/// (dialogs, alerts) unpinned.
+#[test]
+fn test_pin_floating_skips_fixed_size_windows() {
+    let frame = IRect::new(100, 100, 500, 400);
+    let commands = vec![
+        Event::MenuOpened { window_id: 0 }, // 0: spawn the dialog
+        Event::Command {
+            command: Command::PrintState,
+        }, // 1: settled
+    ];
+
+    TestHarness::new()
+        .with_windows(1)
+        .with_focused_window(0)
+        .with_config(pin_floating_config(true))
+        .on_iteration(0, move |world, state| {
+            let window = state.spawn_window(TEST_PROCESS_ID, TEST_WORKSPACE_ID, 1, frame);
+            state.update_window(1, |window| window.fixed_size = true);
+            world.trigger(crate::ecs::SpawnWindowTrigger(vec![window]));
+        })
+        .on_iteration(1, |world, _state| {
+            assert!(is_floating(world, 1), "a fixed-size window floats");
+            assert!(!is_pinned(world, 1), "but is not auto-pinned");
+        })
+        .run(commands);
+}
+
 /// Default off: floating a window does not pin it.
 #[test]
 fn test_pin_floating_option_defaults_off() {

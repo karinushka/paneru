@@ -64,6 +64,9 @@ pub struct PinTarget {
     /// Whether the pin badge should show on the window's corner right now.
     /// Independent of `visible`: the badge stays while the window has focus.
     pub badge: bool,
+    /// Whether `WindowServer` lists the real window as on screen. A badge
+    /// needs something under it: the real window or a showing mirror.
+    pub drawn: bool,
 }
 
 // ── Stream output: receives frames, owns the running stream ─────────────
@@ -450,7 +453,8 @@ impl PinMirrorManager {
             }
             mirror.shown = show;
 
-            if target.badge {
+            let badge = badge_visible(target, show);
+            if badge {
                 mirror.badge.setFrame_display(badge_frame(frame), false);
                 if !mirror.badge_shown {
                     mirror.badge.orderFront(None::<&AnyObject>);
@@ -458,9 +462,14 @@ impl PinMirrorManager {
             } else if mirror.badge_shown {
                 mirror.badge.orderOut(None::<&AnyObject>);
             }
-            mirror.badge_shown = target.badge;
+            mirror.badge_shown = badge;
         }
         failed
+    }
+
+    /// Whether any mirror (and so any badge) is still alive.
+    pub fn has_mirrors(&self) -> bool {
+        !self.mirrors.is_empty()
     }
 
     fn screen_capture_allowed(&mut self) -> bool {
@@ -517,6 +526,13 @@ const BADGE_SIZE: f64 = 20.0;
 const BADGE_OVERHANG: f64 = 6.0;
 /// Padding between the badge's edge and its glyph.
 const BADGE_GLYPH_INSET: f64 = 4.0;
+
+/// A wanted badge shows only over something: the real window as
+/// `WindowServer` draws it, or its mirror when that is what is on screen
+/// (e.g. the window lives on another Space). Never over a closed window.
+fn badge_visible(target: &PinTarget, mirror_shown: bool) -> bool {
+    target.badge && (target.drawn || mirror_shown)
+}
 
 /// The badge's Cocoa frame for a window at `window` (Cocoa, y-up): pinned to
 /// the top-right corner, overhanging it by `BADGE_OVERHANG`.
@@ -688,6 +704,26 @@ mod tests {
         assert_eq!(badge.size.height, BADGE_SIZE);
         assert_eq!(badge.origin.x + BADGE_SIZE, 500.0 + BADGE_OVERHANG);
         assert_eq!(badge.origin.y + BADGE_SIZE, 500.0 + BADGE_OVERHANG);
+    }
+
+    /// A badge never floats over nothing: it needs the real window drawn or
+    /// its mirror showing, and is never shown when it was not asked for.
+    #[test]
+    fn badge_needs_a_window_or_mirror_under_it() {
+        let target = |badge, drawn| PinTarget {
+            window_id: 1,
+            frame: IRect::new(0, 0, 10, 10),
+            visible: false,
+            badge,
+            drawn,
+        };
+        assert!(badge_visible(&target(true, true), false));
+        assert!(badge_visible(&target(true, false), true));
+        assert!(
+            !badge_visible(&target(true, false), false),
+            "closed or ordered-out window: no badge"
+        );
+        assert!(!badge_visible(&target(false, true), true));
     }
 
     #[test]

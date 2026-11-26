@@ -15,7 +15,7 @@ use bevy::ecs::message::MessageReader;
 use bevy::ecs::query::{Added, Changed, Has, Or, With, Without};
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::common_conditions::on_message;
-use bevy::ecs::system::{Commands, NonSendMut, Query, Res};
+use bevy::ecs::system::{Commands, NonSend, NonSendMut, Query, Res};
 use bevy::math::IRect;
 use tracing::{debug, warn};
 
@@ -26,7 +26,7 @@ use super::{
 use crate::commands::filter_window_operations;
 use crate::config::Config;
 use crate::events::Event;
-use crate::manager::{Origin, Window};
+use crate::manager::{Origin, Window, WindowManager};
 use crate::pin_mirror::{PinMirrorManager, PinTarget};
 use crate::types::commands::Operation;
 
@@ -116,8 +116,17 @@ fn pin_membership_dirty(
 
 type RetiledPins<'w, 's> =
     Query<'w, 's, Entity, (Without<Unmanaged>, Or<(With<Pinned>, With<PinOptOut>)>)>;
-type UnmanagedPinState<'w, 's> =
-    Query<'w, 's, (Entity, Ref<'static, Unmanaged>, Has<Pinned>, Has<PinOptOut>)>;
+type UnmanagedPinState<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Entity,
+        &'static Window,
+        Ref<'static, Unmanaged>,
+        Has<Pinned>,
+        Has<PinOptOut>,
+    ),
+>;
 
 /// A pinned window that is tiled again (e.g. `manage`) loses its pin: pinning
 /// only makes sense for windows the layout does not place.
@@ -132,6 +141,10 @@ fn unpin_retiled_windows(retiled: RetiledPins, mut commands: Commands) {
 /// `pin_floating`: pins windows as they become floating, pins every floating
 /// window when the option is turned on, and drops the auto pins when it is
 /// turned off. Manual pins (`window_pin`) are left alone either way.
+///
+/// Windows whose size cannot be set are skipped: those float only because
+/// they are dialogs, alerts or app overlays, which nobody means to keep on
+/// top. `is_resizable` is cached from spawn, so this asks no application.
 fn auto_pin_floating(
     config: Option<Res<Config>>,
     floating: UnmanagedPinState,
@@ -151,11 +164,12 @@ fn auto_pin_floating(
         }
         return;
     }
-    for (entity, unmanaged, pinned, opted_out) in &floating {
+    for (entity, window, unmanaged, pinned, opted_out) in &floating {
         if pinned
             || opted_out
             || !matches!(*unmanaged, Unmanaged::Floating)
             || !(config.is_changed() || unmanaged.is_changed())
+            || !window.is_resizable()
         {
             continue;
         }
@@ -223,6 +237,7 @@ fn pin_mirrors_dirty(
     mut focus_lost: RemovedComponents<FocusedMarker>,
     mission_control: Option<Res<MissionControlActive>>,
     config: Option<Res<Config>>,
+    manager: Option<NonSend<PinMirrorManager>>,
 ) -> bool {
     // Drain both readers every run so stale removals never trigger later.
     let unpinned = pinned_removed.read().count() > 0;
@@ -231,7 +246,9 @@ fn pin_mirrors_dirty(
         return true;
     }
     if any_pinned.is_empty() {
-        return false;
+        // A missed removal must not strand a mirror or badge on screen: one
+        // more sync with no targets tears them down, after which this is idle.
+        return manager.is_some_and(|manager| manager.has_mirrors());
     }
     unfocused
         || !pinned_moved.is_empty()
@@ -243,12 +260,13 @@ fn pin_mirrors_dirty(
 }
 
 /// Pushes every pinned window's frame and visibility to the mirror manager.
-/// Reads ECS state only (no AX calls).
+/// Reads ECS state plus one `WindowServer` list (no AX calls).
 fn sync_pin_mirrors(
     pinned: PinnedWindows,
     manager: Option<NonSendMut<PinMirrorManager>>,
     mission_control: Option<Res<MissionControlActive>>,
     config: Option<Res<Config>>,
+    window_manager: Option<Res<WindowManager>>,
     mut commands: Commands,
 ) {
     let Some(mut manager) = manager else {
@@ -258,16 +276,32 @@ fn sync_pin_mirrors(
     let indicator = config
         .map(|config| config.pin_indicator())
         .unwrap_or_default();
+    // The ECS can still track a window its app has closed or ordered out
+    // (a dismissed dialog the app keeps around), so ask `WindowServer` what
+    // is really drawn before badging anything. `None` (query failed) trusts
+    // the ECS rather than hiding every badge.
+    let drawn = pinned
+        .iter()
+        .any(|(_, _, _, auto_pinned, _)| indicator.shows(auto_pinned))
+        .then(|| window_manager.and_then(|wm| wm.windows_on_screen()))
+        .flatten();
+    let focused_pin = pinned
+        .iter()
+        .find(|(_, _, focused, _, _)| *focused)
+        .map(|(window, _, _, _, _)| content_rect(window));
     let targets = pinned
         .iter()
         .map(|(window, _, focused, auto_pinned, unmanaged)| {
+            let window_id = window.id();
+            let frame = content_rect(window);
             let on_screen = !mission_control
                 && !matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden));
             PinTarget {
-                window_id: window.id(),
-                frame: content_rect(window),
-                visible: on_screen && !focused,
+                window_id,
+                frame,
+                visible: on_screen && mirror_wanted(focused, frame, focused_pin),
                 badge: on_screen && indicator.shows(auto_pinned),
+                drawn: drawn.as_ref().is_none_or(|ids| ids.contains(&window_id)),
             }
         })
         .collect::<Vec<_>>();
@@ -290,10 +324,43 @@ fn sync_pin_mirrors(
     }
 }
 
+/// Whether a pinned window at `frame` should be covered by its mirror.
+///
+/// The focused window is the real one, so it gets no mirror. Mirrors sit at
+/// floating level, above every real window, so one that overlaps a focused
+/// pinned window (`focused_pin`) would bury the window the user is working
+/// in; it hides and leaves the real windows to stack normally. Mirrors still
+/// cover a focused window that is not pinned, which is the point of pinning.
+fn mirror_wanted(focused: bool, frame: IRect, focused_pin: Option<IRect>) -> bool {
+    !focused && focused_pin.is_none_or(|focused_pin| focused_pin.intersect(frame).is_empty())
+}
+
 /// `Window::frame()` includes Paneru's padding; the mirror must match the
 /// real window's own rect or it drifts off it.
 fn content_rect(window: &Window) -> IRect {
     let frame = window.frame();
     let pad = Origin::new(window.horizontal_padding(), window.vertical_padding());
     IRect::from_corners(frame.min + pad, frame.max - pad)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Two pinned windows: the unfocused one's mirror hides only while it
+    /// overlaps the focused pinned window, and the focused one never mirrors.
+    #[test]
+    fn mirror_yields_to_an_overlapping_focused_pin() {
+        let focused_pin = IRect::new(100, 100, 500, 400);
+        let overlapping = IRect::new(400, 300, 800, 600);
+        let apart = IRect::new(600, 100, 900, 400);
+
+        assert!(!mirror_wanted(true, focused_pin, Some(focused_pin)));
+        assert!(!mirror_wanted(false, overlapping, Some(focused_pin)));
+        assert!(mirror_wanted(false, apart, Some(focused_pin)));
+        assert!(
+            mirror_wanted(false, overlapping, None),
+            "a focused window that is not pinned gets covered"
+        );
+    }
 }

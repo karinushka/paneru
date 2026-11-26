@@ -630,6 +630,150 @@ fn test_layout_op_place_rejects_a_fullscreen_strip() {
     assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
 }
 
+#[test]
+fn test_layout_op_place_batch_round_trip_preserves_width() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(600));
+    let entity = find_window_entity(1, harness.world());
+    let width = harness
+        .world()
+        .get::<Window>(entity)
+        .unwrap()
+        .frame()
+        .width();
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 1,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: TEST_WORKSPACE_ID,
+                workspace: 1,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_eq!(world.get::<Window>(entity).unwrap().frame().width(), width);
+}
+
+#[test]
+fn test_layout_op_place_batch_does_not_focus_an_offscreen_neighbour() {
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new().with_config(config).with_windows(2);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 0);
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: TEST_WORKSPACE_ID,
+                workspace: 2,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: TEST_WORKSPACE_ID,
+                workspace: 2,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let focused = world
+        .query_filtered::<&Window, With<FocusedMarker>>()
+        .iter(world)
+        .map(|w| w.id())
+        .collect::<Vec<_>>();
+    assert!(
+        focused.is_empty(),
+        "parked windows holding focus: {focused:?}"
+    );
+}
+
+#[test]
+fn test_layout_op_place_batch_saves_startup_workspace_origin_once() {
+    use crate::ecs::Position;
+    use crate::ecs::workspace::PreviousStripPosition;
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(
+                TEST_DISPLAY_WIDTH,
+                0,
+                TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+                EXT_DISPLAY_HEIGHT,
+            ),
+            vec![EXT_WORKSPACE_ID],
+        );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(2)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 2);
+    let world = harness.world();
+    let target = world
+        .query::<(Entity, &LayoutStrip)>()
+        .iter(world)
+        .find(|(_, strip)| strip.id() == EXT_WORKSPACE_ID && strip.virtual_index == 1)
+        .unwrap()
+        .0;
+    assert!(world.get::<PreviousStripPosition>(target).is_none());
+    let original = world.get::<Position>(target).unwrap().0;
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: EXT_WORKSPACE_ID,
+                workspace: 2,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: EXT_WORKSPACE_ID,
+                workspace: 2,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let saved = harness
+        .world()
+        .get::<PreviousStripPosition>(target)
+        .unwrap();
+    assert_eq!(saved.origin, original);
+}
+
 /// A window macOS filled covers its display and ignores the edge padding, so
 /// it is wider than the tiled viewport. Moved to another display, it fits
 /// that display's viewport instead of keeping the extra width past its edge.

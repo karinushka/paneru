@@ -6,7 +6,7 @@ use bevy::time::TimeUpdateStrategy;
 use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
-use crate::ecs::{DockPosition, Timeout};
+use crate::ecs::{ActiveWorkspaceMarker, DockPosition, FocusedMarker, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WinID;
@@ -388,30 +388,60 @@ fn test_layout_op_unstack_then_place_moves_only_one_window() {
     assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
     assert_on_workspace!(world, 2, EXT_WORKSPACE_ID);
     assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
+    let frame = world.get::<Window>(second).unwrap().frame();
+    assert!(frame.min.y < 0);
+    assert_eq!(
+        frame.width(),
+        TEST_WINDOW_WIDTH * EXT_DISPLAY_WIDTH / TEST_DISPLAY_WIDTH
+    );
 }
 
 #[test]
 fn test_layout_op_place_leaves_the_column_when_native_space_is_inactive() {
     use crate::types::windowset::LayoutOp;
 
-    let inactive_space = EXT_WORKSPACE_ID + 1;
-    let mut harness = TestHarness::new().with_windows(1).with_display(
-        EXT_DISPLAY_ID,
-        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
-        vec![EXT_WORKSPACE_ID, inactive_space],
-    );
+    let mut harness = TestHarness::new()
+        .with_windows(1)
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+        )
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID, EXT_WORKSPACE_ID + 1],
+        );
     harness.advance(Duration::from_millis(500));
-    let world = harness.world();
-    assert!(
-        world
-            .query::<&LayoutStrip>()
-            .iter(world)
-            .any(|strip| strip.id() == inactive_space)
-    );
-    world.write_message(Event::Command {
+    for inactive_space in [TEST_WORKSPACE_ID + 1, EXT_WORKSPACE_ID + 1] {
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .any(|strip| strip.id() == inactive_space)
+        );
+        world.write_message(Event::Command {
+            command: Command::Layout(vec![LayoutOp::Place {
+                window: 0,
+                space: inactive_space,
+                workspace: 1,
+                index: 0,
+            }]),
+        });
+        harness.advance(Duration::from_millis(900));
+        let world = harness.world();
+        assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+        assert_not_on_workspace!(world, 0, inactive_space);
+    }
+    harness
+        .mock_state
+        .activate_workspace(TEST_DISPLAY_ID, TEST_WORKSPACE_ID + 1, false);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
         command: Command::Layout(vec![LayoutOp::Place {
             window: 0,
-            space: inactive_space,
+            space: EXT_WORKSPACE_ID,
             workspace: 1,
             index: 0,
         }]),
@@ -419,7 +449,185 @@ fn test_layout_op_place_leaves_the_column_when_native_space_is_inactive() {
     harness.advance(Duration::from_millis(900));
     let world = harness.world();
     assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
-    assert_not_on_workspace!(world, 0, inactive_space);
+    assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+}
+
+#[test]
+fn test_layout_op_place_parks_an_unselected_workspace_on_either_display() {
+    use crate::types::windowset::LayoutOp;
+
+    for (space, parked_x) in [
+        (TEST_WORKSPACE_ID, TEST_DISPLAY_WIDTH),
+        (EXT_WORKSPACE_ID, TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH),
+    ] {
+        let config = Config::try_from("default_workspaces = 2\n").unwrap();
+        let mut harness = TestHarness::new()
+            .with_config(config)
+            .with_windows(2)
+            .with_display(
+                EXT_DISPLAY_ID,
+                IRect::new(
+                    TEST_DISPLAY_WIDTH,
+                    0,
+                    TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+                    EXT_DISPLAY_HEIGHT,
+                ),
+                vec![EXT_WORKSPACE_ID],
+            );
+        harness.advance(Duration::from_millis(500));
+        for (window, index) in [(0, 0), (1, 1)] {
+            let world = harness.world();
+            world.write_message(Event::Command {
+                command: Command::Layout(vec![LayoutOp::Focus(window)]),
+            });
+            harness.advance(Duration::from_millis(250));
+            assert_focused!(harness.world(), window);
+            harness.world().write_message(Event::Command {
+                command: Command::Layout(vec![LayoutOp::Place {
+                    window,
+                    space,
+                    workspace: 2,
+                    index,
+                }]),
+            });
+            harness.advance(Duration::from_millis(900));
+            let world = harness.world();
+            let entity = find_window_entity(window, world);
+            let mut strips = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            assert!(strips.iter(world).any(|(strip, active)| active
+                && strip.id() == TEST_WORKSPACE_ID
+                && strip.virtual_index == 0));
+            assert!(strips.iter(world).any(|(strip, active)| !active
+                && strip.id() == space
+                && strip.virtual_index == 1
+                && strip.contains(entity)));
+            let frame = world.get::<Window>(entity).unwrap().frame();
+            assert!(
+                frame.min.x >= parked_x - PARKED_STRIP_SLIVER,
+                "hidden window frame: {frame:?}"
+            );
+            if index == 0 {
+                assert_focused!(world, 1);
+            } else {
+                assert!(
+                    world
+                        .query_filtered::<Entity, With<FocusedMarker>>()
+                        .iter(world)
+                        .next()
+                        .is_none()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_layout_op_place_left_of_focus_keeps_the_focused_window_stationary() {
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new().with_config(config).with_windows(5);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::Last)),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 4);
+    let focused = find_window_entity(4, world);
+    let left = find_window_entity(3, world);
+    let strip = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .unwrap();
+    assert!(strip.index_of(left).unwrap() < strip.index_of(focused).unwrap());
+    let x = world.get::<Window>(focused).unwrap().frame().min.x;
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 3,
+            space: TEST_WORKSPACE_ID,
+            workspace: 2,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 4);
+    assert_eq!(world.get::<Window>(focused).unwrap().frame().min.x, x);
+    assert!(
+        world
+            .query::<&LayoutStrip>()
+            .iter(world)
+            .any(|strip| strip.virtual_index == 1 && strip.contains(left))
+    );
+}
+
+#[test]
+fn test_layout_op_place_keeps_a_reordered_focused_column_visible() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(6);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 0);
+    let focused = find_window_entity(0, world);
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: TEST_WORKSPACE_ID,
+            workspace: 1,
+            index: 5,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let strip = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .unwrap();
+    assert_eq!(strip.index_of(focused).unwrap(), 5);
+    assert_focused!(world, 0);
+    let frame = world.get::<Window>(focused).unwrap().frame();
+    assert!(
+        frame.min.x >= 0 && frame.max.x <= TEST_DISPLAY_WIDTH,
+        "{frame:?}"
+    );
+}
+
+#[test]
+fn test_layout_op_place_rejects_a_fullscreen_strip() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(1).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let window = find_window_entity(0, world);
+    let mut strips = world.query::<&mut LayoutStrip>();
+    let mut source = strips
+        .iter_mut(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap();
+    *source = LayoutStrip::fullscreen(TEST_WORKSPACE_ID, window);
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: EXT_WORKSPACE_ID,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.app.update();
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
 }
 
 /// A window macOS filled covers its display and ignores the edge padding, so

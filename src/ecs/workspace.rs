@@ -1005,6 +1005,35 @@ fn find_orphaned_workspaces(
     }
 }
 
+/// Resolves each display's active native `SkyLight` Space ID from ECS state
+/// without making OS calls. Returns `(active_space_ids, all_displays_covered)`.
+fn resolve_active_native_spaces(
+    displays: &Query<&Display>,
+    workspaces: &Query<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    census: Option<&crate::ecs::desktop::DesktopCensus>,
+) -> (Vec<WorkspaceId>, bool) {
+    let mut ids: Vec<WorkspaceId> = Vec::new();
+    let mut covered = !displays.is_empty();
+    for display in displays {
+        if let Some(space_id) = census.and_then(|c| c.active_space(display.id())) {
+            if !ids.contains(&space_id) {
+                ids.push(space_id);
+            }
+        } else {
+            covered = false;
+        }
+    }
+    for (strip, active) in workspaces {
+        if active && !ids.contains(&strip.id()) {
+            ids.push(strip.id());
+        }
+    }
+    if !covered && displays.iter().len() == 1 && !ids.is_empty() {
+        covered = true;
+    }
+    (ids, covered)
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn cleanup_unordered_windows(
     mut windows: Query<(
@@ -1013,7 +1042,10 @@ pub(crate) fn cleanup_unordered_windows(
         Option<&Unmanaged>,
         Option<&mut PendingDestroyCheck>,
     )>,
-    workspaces: Query<&LayoutStrip>,
+    workspaces: Query<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    displays: Query<&Display>,
+    census: Option<Res<crate::ecs::desktop::DesktopCensus>>,
+    bridge: Option<NonSend<crate::manager::spaces::DesktopBridge>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -1021,9 +1053,13 @@ pub(crate) fn cleanup_unordered_windows(
         return;
     }
 
-    // Lazily query display/space topology only if a window actually needs a
-    // liveness probe — avoiding a 1 Hz `present_displays()` (`SLSCopyManagedDisplaySpaces`
-    // + menubar height) round-trip in steady state when every window is ordered in.
+    // Lazily resolve active native Space IDs from ECS (zero OS calls) and
+    // display/space topology only if a window actually needs a liveness probe.
+    // On macOS, `SLSWindowIsOrderedIn` returns false for live windows on
+    // inactive native Spaces (other Desktops or inactive native fullscreen
+    // Spaces); skipping those avoids a 1 Hz `present_displays()` round-trip and
+    // synchronous cross-process `is_alive()` AX IPC stalls on background apps.
+    let mut active_spaces: Option<(Vec<WorkspaceId>, bool)> = None;
     let mut displays_unsettled: Option<bool> = None;
 
     for (entity, window, unmanaged, pending_destroy) in &mut windows {
@@ -1063,10 +1099,29 @@ pub(crate) fn cleanup_unordered_windows(
             continue;
         }
 
-        let eligible = matches!(unmanaged, Some(Unmanaged::Floating))
-            || workspaces
-                .iter()
-                .any(|strip| strip.contains(entity) && !strip.tabbed(entity));
+        let (known_active_spaces, all_displays_covered) = active_spaces.get_or_insert_with(|| {
+            resolve_active_native_spaces(&displays, &workspaces, census.as_deref())
+        });
+
+        let eligible = if matches!(unmanaged, Some(Unmanaged::Floating)) {
+            if *all_displays_covered
+                && let Some(bridge) = bridge.as_deref()
+                && let Ok(win_spaces) = bridge.spaces_for_window(window_id)
+                && !win_spaces.is_empty()
+            {
+                win_spaces
+                    .iter()
+                    .any(|space| known_active_spaces.contains(&space.get()))
+            } else {
+                true
+            }
+        } else {
+            workspaces.iter().any(|(strip, _)| {
+                (!*all_displays_covered || known_active_spaces.contains(&strip.id()))
+                    && strip.contains(entity)
+                    && !strip.tabbed(entity)
+            })
+        };
         if eligible {
             if *displays_unsettled.get_or_insert_with(|| window_manager.displays_unsettled()) {
                 return;

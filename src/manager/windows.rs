@@ -14,6 +14,7 @@ use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
     kCFBooleanFalse, kCFBooleanTrue,
 };
+use objc2_core_graphics::CGError;
 use std::collections::HashMap;
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -27,7 +28,7 @@ use tracing::{Level, debug, instrument, trace, warn};
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementIsAttributeSettable, AXUIElementPerformAction, AXUIElementSetAttributeValue,
-    SLPSPostEventRecordTo, SLSWindowIteratorAdvance,
+    SLPSPostEventRecordTo, SLSGetWindowBounds, SLSMainConnectionID, SLSWindowIteratorAdvance,
 };
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -883,6 +884,74 @@ impl WindowOS {
         event_bytes[0x08] = 0x02;
         unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
     }
+
+    fn apply_frame(&mut self, frame: CGRect) -> IRect {
+        self.frame = irect_from(frame);
+
+        self.frame.min.x -= self.horizontal_padding;
+        self.frame.min.y -= self.vertical_padding;
+        self.frame.max.x += self.horizontal_padding;
+        self.frame.max.y += self.vertical_padding;
+
+        self.frame
+    }
+
+    fn sls_window_bounds(&self) -> Option<CGRect> {
+        let mut rect = CGRect::default();
+        let err = unsafe { SLSGetWindowBounds(SLSMainConnectionID(), self.id, &mut rect) };
+        valid_sls_bounds(err, rect)
+    }
+
+    fn update_frame_ax(&mut self) -> Result<IRect> {
+        let window_ref = self.ax_element.as_ptr();
+
+        let position = unsafe {
+            let mut position_ref: *mut CFType = null_mut();
+            AXUIElementCopyAttributeValue(
+                window_ref,
+                CFString::from_static_str(kAXPositionAttribute).as_ref(),
+                &mut position_ref,
+            )
+            .to_result(function_name!())?;
+            AXUIWrapper::from_retained(position_ref)?
+        };
+        let size = unsafe {
+            let mut size_ref: *mut CFType = null_mut();
+            AXUIElementCopyAttributeValue(
+                window_ref,
+                CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                &mut size_ref,
+            )
+            .to_result(function_name!())?;
+            AXUIWrapper::from_retained(size_ref)?
+        };
+
+        let mut frame = CGRect::default();
+        unsafe {
+            AXValueGetValue(
+                position.as_ptr(),
+                kAXValueTypeCGPoint,
+                NonNull::from(&mut frame.origin).as_ptr().cast(),
+            );
+            AXValueGetValue(
+                size.as_ptr(),
+                kAXValueTypeCGSize,
+                NonNull::from(&mut frame.size).as_ptr().cast(),
+            );
+        }
+        Ok(self.apply_frame(frame))
+    }
+}
+
+fn valid_sls_bounds(err: CGError, rect: CGRect) -> Option<CGRect> {
+    (err == CGError::Success
+        && rect.origin.x.is_finite()
+        && rect.origin.y.is_finite()
+        && rect.size.width.is_finite()
+        && rect.size.height.is_finite()
+        && rect.size.width > 0.0
+        && rect.size.height > 0.0)
+        .then_some(rect)
 }
 
 impl WindowApi for WindowOS {
@@ -1045,7 +1114,10 @@ impl WindowApi for WindowOS {
         let mut previous_observed_frame = previous_frame;
         let mut staged = false;
         for attempt in 1..=3 {
-            let Ok(actual_frame) = self.update_frame() else {
+            // Read directly from AX right after `set_ax_size`: WindowServer
+            // bounds (`SLSGetWindowBounds`) can lag behind the app's own
+            // synchronous AX clamp before the resized frame is committed.
+            let Ok(actual_frame) = self.update_frame_ax() else {
                 break;
             };
             if let Some(staging_origin) =
@@ -1084,7 +1156,7 @@ impl WindowApi for WindowOS {
         }
 
         if staged {
-            if let Ok(final_frame) = self.update_frame() {
+            if let Ok(final_frame) = self.update_frame_ax() {
                 debug!(
                     requested_width = size.x,
                     actual_width = final_frame.width(),
@@ -1095,64 +1167,24 @@ impl WindowApi for WindowOS {
         }
     }
 
-    /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.
-    /// It also updates the `width_ratio`.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_bounds` - An optional `CGRect` representing the bounds of the display the window is on.
+    /// Updates the internal `frame` of the window by reading its current bounds
+    /// from `WindowServer` via `SLSGetWindowBounds` (fast compositor read with no
+    /// cross-process AX IPC), falling back to Accessibility
+    /// (`kAXPositionAttribute` + `kAXSizeAttribute`) if `WindowServer` does not
+    /// return a valid positive rectangle.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
+    /// `Ok(IRect)` with the updated padded frame if successful, otherwise `Err(Error)`.
     fn update_frame(&mut self) -> Result<IRect> {
-        let window_ref = self.ax_element.as_ptr();
-
-        let position = unsafe {
-            let mut position_ref: *mut CFType = null_mut();
-            AXUIElementCopyAttributeValue(
-                window_ref,
-                CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                &mut position_ref,
-            )
-            .to_result(function_name!())?;
-            AXUIWrapper::from_retained(position_ref)?
-        };
-        let size = unsafe {
-            let mut size_ref: *mut CFType = null_mut();
-            AXUIElementCopyAttributeValue(
-                window_ref,
-                CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                &mut size_ref,
-            )
-            .to_result(function_name!())?;
-            AXUIWrapper::from_retained(size_ref)?
-        };
-
-        let mut frame = CGRect::default();
-        unsafe {
-            AXValueGetValue(
-                position.as_ptr(),
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut frame.origin).as_ptr().cast(),
-            );
-            AXValueGetValue(
-                size.as_ptr(),
-                kAXValueTypeCGSize,
-                NonNull::from(&mut frame.size).as_ptr().cast(),
-            );
+        if let Some(frame) = self.sls_window_bounds() {
+            return Ok(self.apply_frame(frame));
         }
-        // if (CGRectEqualToRect(new_frame, window->frame)) {
-        //     debug("%s:DEBOUNCED %s %d\n", __FUNCTION__, window->application->name, window->id);
-        // }
-        self.frame = irect_from(frame);
-
-        self.frame.min.x -= self.horizontal_padding;
-        self.frame.min.y -= self.vertical_padding;
-        self.frame.max.x += self.horizontal_padding;
-        self.frame.max.y += self.vertical_padding;
-
-        Ok(self.frame)
+        trace!(
+            window_id = self.id,
+            "SLSGetWindowBounds unavailable; falling back to AX frame read"
+        );
+        self.update_frame_ax()
     }
 
     /// Focuses the window without raising it. This involves sending specific events to the process.
@@ -1951,5 +1983,32 @@ mod tests {
         let previous = IRect::new(0, 40, 800, 640);
         let completed = IRect::new(0, 40, 4112, 640);
         assert_eq!(resize_staging_origin(previous, completed, 4112), None);
+    }
+
+    #[test]
+    fn valid_sls_bounds_accepts_positive_finite_rects_and_rejects_invalid() {
+        let negative_origin_display =
+            CGRect::new(CGPoint::new(-1920.0, -400.0), CGSize::new(800.0, 600.0));
+        assert_eq!(
+            valid_sls_bounds(CGError::Success, negative_origin_display),
+            Some(negative_origin_display)
+        );
+
+        assert_eq!(
+            valid_sls_bounds(CGError::Failure, negative_origin_display),
+            None
+        );
+
+        let zero_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, zero_size), None);
+
+        let negative_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, -10.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, negative_size), None);
+
+        let nan_origin = CGRect::new(CGPoint::new(f64::NAN, 0.0), CGSize::new(800.0, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, nan_origin), None);
+
+        let inf_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f64::INFINITY, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, inf_size), None);
     }
 }

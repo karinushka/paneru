@@ -1006,16 +1006,21 @@ pub(crate) fn pump_events(
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn window_resized_update_frame(
+pub(crate) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
     drag: Res<crate::ecs::drag::WindowDrag>,
     mut windows: ResizableWindows,
     mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
+    let mut seen: Vec<WinID> = Vec::new();
     for event in messages.read() {
         let Event::WindowResized { window_id } = event else {
             continue;
         };
+        if seen.contains(window_id) {
+            continue;
+        }
+        seen.push(*window_id);
 
         let Some((mut window, entity, position, mut bounds, unmanaged, resizing)) = windows
             .iter_mut()
@@ -1093,10 +1098,16 @@ pub(crate) fn window_moved_update_frame(
     mut messages: MessageReader<Event>,
     mut windows: MovableWindows,
 ) {
+    let mut seen: Vec<WinID> = Vec::new();
     for event in messages.read() {
         let Event::WindowMoved { window_id } = event else {
             continue;
         };
+        if seen.contains(window_id) {
+            continue;
+        }
+        seen.push(*window_id);
+        trace!("window {window_id} moved");
 
         let Some((mut window, mut position, bounds, unmanaged, repositioning)) = windows
             .iter_mut()

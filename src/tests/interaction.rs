@@ -4121,6 +4121,121 @@ fn test_own_window_move_echo_is_ignored() {
     );
 }
 
+/// Duplicate `WindowMoved` and `WindowResized` events for the same window in
+/// one tick must deduplicate so `update_frame()` runs at most once per window
+/// per frame and top-edge stacked resize adjustments are not applied twice.
+#[test]
+fn test_window_moved_and_resized_dedup_per_frame() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    use crate::ecs::Bounds;
+    use crate::manager::{MockWindowApi, Window};
+
+    // Case 1: burst of `WindowMoved` events for window 0 calls `update_frame()` once.
+    {
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(200));
+
+        let world = harness.world();
+        let entity = find_window_entity(0, world);
+        assert!(
+            world.get::<RepositionMarker>(entity).is_none(),
+            "test setup: window 0 must have finished initial positioning"
+        );
+        let moved_frame = IRect::new(123, 456, 123 + TEST_WINDOW_WIDTH, 456 + TEST_WINDOW_HEIGHT);
+
+        let mut mock_win = MockWindowApi::new();
+        mock_win.expect_id().return_const(0);
+        mock_win
+            .expect_update_frame()
+            .times(1)
+            .returning(move || Ok(moved_frame));
+        world
+            .entity_mut(entity)
+            .insert(Window::new(Box::new(mock_win)));
+
+        for _ in 0..4 {
+            world.write_message(Event::WindowMoved { window_id: 0 });
+        }
+        world
+            .run_system_once(crate::ecs::systems::window_moved_update_frame)
+            .expect("running window_moved_update_frame");
+
+        assert_eq!(
+            world.get::<Position>(entity).expect("window position").0,
+            moved_frame.min
+        );
+    }
+
+    // Case 2: burst of `WindowResized` events on the bottom window of a stack
+    // calls `update_frame()` once and shrinks the window above by `diff` once.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::Window(Operation::Focus(Direction::East)),
+            },
+            Event::Command {
+                command: Command::Window(Operation::Stack(true)),
+            },
+        ]);
+        harness.advance(Duration::from_millis(500));
+
+        let world = harness.world();
+        let top_entity = find_window_entity(0, world);
+        let bottom_entity = find_window_entity(1, world);
+        assert!(
+            world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .any(|strip| strip.above(bottom_entity) == Some(top_entity)),
+            "test setup: window 1 must be stacked below window 0"
+        );
+        let top_height_before = world.get::<Bounds>(top_entity).expect("top bounds").0.y;
+        let bottom_pos = world.get::<Position>(bottom_entity).expect("bottom pos").0;
+        let bottom_bounds = world.get::<Bounds>(bottom_entity).expect("bottom bounds").0;
+
+        // Simulate dragging the bottom window's top edge up by 20 px.
+        let diff = 20;
+        let resized_frame = IRect::from_corners(
+            Origin::new(bottom_pos.x, bottom_pos.y - diff),
+            Origin::new(
+                bottom_pos.x + bottom_bounds.x,
+                bottom_pos.y + bottom_bounds.y,
+            ),
+        );
+
+        let mut mock_win = MockWindowApi::new();
+        mock_win.expect_id().return_const(1);
+        mock_win
+            .expect_update_frame()
+            .times(1)
+            .returning(move || Ok(resized_frame));
+        world
+            .entity_mut(bottom_entity)
+            .insert(Window::new(Box::new(mock_win)));
+
+        for _ in 0..4 {
+            world.write_message(Event::WindowResized { window_id: 1 });
+        }
+        world
+            .run_system_once(crate::ecs::systems::window_resized_update_frame)
+            .expect("running window_resized_update_frame");
+
+        assert_eq!(
+            world.get::<Bounds>(bottom_entity).expect("bottom bounds").0,
+            resized_frame.size()
+        );
+        assert_eq!(
+            world.get::<Bounds>(top_entity).expect("top bounds").0.y,
+            top_height_before - diff,
+            "duplicate WindowResized events in one tick must adjust the above window only once"
+        );
+    }
+}
+
 #[test]
 fn test_virtual_directions_first_last_east_west() {
     use crate::config::{Config, MainOptions};

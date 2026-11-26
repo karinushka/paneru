@@ -26,12 +26,13 @@ use objc2::{
     AllocAnyThread, DefinedClass, MainThreadMarker, MainThreadOnly, define_class, msg_send,
 };
 use objc2_app_kit::{
-    NSBackingStoreType, NSColor, NSEvent, NSFloatingWindowLevel, NSScreen, NSView, NSWindow,
-    NSWindowCollectionBehavior, NSWindowStyleMask,
+    NSBackingStoreType, NSColor, NSEvent, NSFloatingWindowLevel, NSImage, NSImageScaling,
+    NSImageView, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowStyleMask,
 };
+use objc2_core_graphics::CGColor;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::CVPixelBufferGetIOSurface;
-use objc2_foundation::{NSError, NSPoint, NSRect, NSSize};
+use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString};
 use objc2_quartz_core::{CALayer, kCAGravityResize};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
@@ -60,6 +61,9 @@ pub struct PinTarget {
     pub frame: IRect,
     /// Whether the mirror should cover the real window right now.
     pub visible: bool,
+    /// Whether the pin badge should show on the window's corner right now.
+    /// Independent of `visible`: the badge stays while the window has focus.
+    pub badge: bool,
 }
 
 // ── Stream output: receives frames, owns the running stream ─────────────
@@ -365,12 +369,17 @@ struct PinMirror {
     output: Retained<PinStreamOutput>,
     pixel_size: (usize, usize),
     shown: bool,
+    /// Small click-through panel carrying the pin glyph. Separate from
+    /// `panel` because that one hides while the pinned window has focus.
+    badge: Retained<NSWindow>,
+    badge_shown: bool,
 }
 
 impl Drop for PinMirror {
     fn drop(&mut self) {
         self.output.stop();
         self.panel.orderOut(None::<&AnyObject>);
+        self.badge.orderOut(None::<&AnyObject>);
     }
 }
 
@@ -440,6 +449,16 @@ impl PinMirrorManager {
                 mirror.panel.orderOut(None::<&AnyObject>);
             }
             mirror.shown = show;
+
+            if target.badge {
+                mirror.badge.setFrame_display(badge_frame(frame), false);
+                if !mirror.badge_shown {
+                    mirror.badge.orderFront(None::<&AnyObject>);
+                }
+            } else if mirror.badge_shown {
+                mirror.badge.orderOut(None::<&AnyObject>);
+            }
+            mirror.badge_shown = target.badge;
         }
         failed
     }
@@ -485,8 +504,84 @@ impl PinMirrorManager {
             output,
             pixel_size,
             shown: false,
+            badge: make_badge_panel(self.mtm, badge_frame(frame)),
+            badge_shown: false,
         }
     }
+}
+
+/// Side of the square pin badge, in points.
+const BADGE_SIZE: f64 = 20.0;
+/// How far the badge hangs outside the window's top-right corner, so it
+/// covers as little of the app's own toolbar as possible.
+const BADGE_OVERHANG: f64 = 6.0;
+/// Padding between the badge's edge and its glyph.
+const BADGE_GLYPH_INSET: f64 = 4.0;
+
+/// The badge's Cocoa frame for a window at `window` (Cocoa, y-up): pinned to
+/// the top-right corner, overhanging it by `BADGE_OVERHANG`.
+fn badge_frame(window: NSRect) -> NSRect {
+    NSRect::new(
+        NSPoint::new(
+            window.origin.x + window.size.width - BADGE_SIZE + BADGE_OVERHANG,
+            window.origin.y + window.size.height - BADGE_SIZE + BADGE_OVERHANG,
+        ),
+        NSSize::new(BADGE_SIZE, BADGE_SIZE),
+    )
+}
+
+/// A round, click-through badge with a pin glyph. It sits one level above the
+/// mirror panels so a mirror never covers its own badge.
+fn make_badge_panel(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<NSWindow> {
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            cocoa_frame,
+            NSWindowStyleMask::Borderless,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    window.setOpaque(false);
+    window.setBackgroundColor(Some(&NSColor::clearColor()));
+    window.setIgnoresMouseEvents(true);
+    window.setHasShadow(false);
+    window.setLevel(NSFloatingWindowLevel + 1);
+    window.setCollectionBehavior(
+        NSWindowCollectionBehavior::Transient
+            | NSWindowCollectionBehavior::IgnoresCycle
+            | NSWindowCollectionBehavior::CanJoinAllSpaces
+            | NSWindowCollectionBehavior::FullScreenAuxiliary,
+    );
+
+    let bounds = NSRect::new(NSPoint::new(0.0, 0.0), cocoa_frame.size);
+    let view = NSView::initWithFrame(NSView::alloc(mtm), bounds);
+    view.setWantsLayer(true);
+    if let Some(layer) = view.layer() {
+        layer.setBackgroundColor(Some(&CGColor::new_srgb(0.0, 0.0, 0.0, 0.65)));
+        layer.setCornerRadius(BADGE_SIZE / 2.0);
+    }
+
+    // SF Symbols need macOS 11; without the glyph the dark dot still marks it.
+    if let Some(image) = NSImage::imageWithSystemSymbolName_accessibilityDescription(
+        &NSString::from_str("pin.fill"),
+        None,
+    ) {
+        image.setTemplate(true);
+        let glyph = NSImageView::new(mtm);
+        glyph.setImage(Some(&image));
+        glyph.setImageScaling(NSImageScaling::ScaleProportionallyUpOrDown);
+        glyph.setContentTintColor(Some(&*NSColor::whiteColor()));
+        let side = BADGE_SIZE - 2.0 * BADGE_GLYPH_INSET;
+        glyph.setFrame(NSRect::new(
+            NSPoint::new(BADGE_GLYPH_INSET, BADGE_GLYPH_INSET),
+            NSSize::new(side, side),
+        ));
+        view.addSubview(&glyph);
+    }
+    window.setContentView(Some(&view));
+    window
 }
 
 fn make_mirror_panel(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<NSWindow> {
@@ -581,6 +676,18 @@ mod tests {
         assert!(!output.has_frame());
         output.stop();
         let _ = <MirrorView as objc2::ClassType>::class();
+    }
+
+    /// The badge hugs the top-right corner (Cocoa is y-up, so "top" is the
+    /// max-y edge) and overhangs it by `BADGE_OVERHANG` on both axes.
+    #[test]
+    fn badge_sits_on_the_top_right_corner() {
+        let window = NSRect::new(NSPoint::new(100.0, 200.0), NSSize::new(400.0, 300.0));
+        let badge = badge_frame(window);
+        assert_eq!(badge.size.width, BADGE_SIZE);
+        assert_eq!(badge.size.height, BADGE_SIZE);
+        assert_eq!(badge.origin.x + BADGE_SIZE, 500.0 + BADGE_OVERHANG);
+        assert_eq!(badge.origin.y + BADGE_SIZE, 500.0 + BADGE_OVERHANG);
     }
 
     #[test]

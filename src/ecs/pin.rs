@@ -206,6 +206,7 @@ type PinnedWindows<'w, 's> = Query<
         &'static Window,
         Entity,
         Has<FocusedMarker>,
+        Has<AutoPinned>,
         Option<&'static Unmanaged>,
     ),
     With<Pinned>,
@@ -221,6 +222,7 @@ fn pin_mirrors_dirty(
     focus_gained: Query<(), (With<Pinned>, Added<FocusedMarker>)>,
     mut focus_lost: RemovedComponents<FocusedMarker>,
     mission_control: Option<Res<MissionControlActive>>,
+    config: Option<Res<Config>>,
 ) -> bool {
     // Drain both readers every run so stale removals never trigger later.
     let unpinned = pinned_removed.read().count() > 0;
@@ -236,6 +238,8 @@ fn pin_mirrors_dirty(
         || !pinned_unmanaged.is_empty()
         || !focus_gained.is_empty()
         || mission_control.is_some_and(|mc| mc.is_changed())
+        // `pin_indicator` may have changed which windows carry a badge.
+        || config.is_some_and(|config| config.is_changed())
 }
 
 /// Pushes every pinned window's frame and visibility to the mirror manager.
@@ -244,20 +248,27 @@ fn sync_pin_mirrors(
     pinned: PinnedWindows,
     manager: Option<NonSendMut<PinMirrorManager>>,
     mission_control: Option<Res<MissionControlActive>>,
+    config: Option<Res<Config>>,
     mut commands: Commands,
 ) {
     let Some(mut manager) = manager else {
         return;
     };
     let mission_control = mission_control.is_some_and(|mc| mc.0);
+    let indicator = config
+        .map(|config| config.pin_indicator())
+        .unwrap_or_default();
     let targets = pinned
         .iter()
-        .map(|(window, _, focused, unmanaged)| PinTarget {
-            window_id: window.id(),
-            frame: content_rect(window),
-            visible: !focused
-                && !mission_control
-                && !matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)),
+        .map(|(window, _, focused, auto_pinned, unmanaged)| {
+            let on_screen = !mission_control
+                && !matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden));
+            PinTarget {
+                window_id: window.id(),
+                frame: content_rect(window),
+                visible: on_screen && !focused,
+                badge: on_screen && indicator.shows(auto_pinned),
+            }
         })
         .collect::<Vec<_>>();
 
@@ -268,9 +279,9 @@ fn sync_pin_mirrors(
     // Fail closed: drop the pin rather than retrying capture every tick.
     commands.flash_message("Pinning needs Screen Recording permission".to_string(), 2.0);
     for window_id in failed {
-        if let Some((_, entity, _, _)) = pinned
+        if let Some((_, entity, _, _, _)) = pinned
             .iter()
-            .find(|(window, _, _, _)| window.id() == window_id)
+            .find(|(window, _, _, _, _)| window.id() == window_id)
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
             entity_commands.try_remove::<(Pinned, AutoPinned)>();

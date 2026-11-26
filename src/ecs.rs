@@ -995,6 +995,27 @@ fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
     }
 }
 
+/// Strips unused Bevy schedules (`RunFixedMainLoop`, `SpawnScene`) from
+/// `MainScheduleOrder` and restores per-frame `MessageRegistry` flushing.
+///
+/// `TimePlugin` registers `signal_message_update_system` in `FixedPostUpdate`
+/// and sets `MessageRegistry::should_update = Waiting`, causing Bevy to run
+/// `FixedMain` -> `FixedPostUpdate` (on its default multi-threaded executor) at
+/// 64 Hz — catching up in bursts after slow frames even though Paneru registers
+/// no `FixedUpdate` systems. Setting `ShouldUpdateMessages::Always` keeps
+/// 2-frame message lifetimes without the empty fixed-timestep loop.
+pub(crate) fn strip_unused_schedules(app: &mut BevyApp) {
+    let run_fixed = bevy::app::RunFixedMainLoop.intern();
+    let spawn_scene = bevy::app::SpawnScene.intern();
+    app.world_mut()
+        .resource_mut::<bevy::app::MainScheduleOrder>()
+        .labels
+        .retain(|label| *label != run_fixed && *label != spawn_scene);
+    app.world_mut()
+        .resource_mut::<bevy::ecs::message::MessageRegistry>()
+        .should_update = bevy::ecs::message::ShouldUpdateMessages::Always;
+}
+
 #[allow(clippy::too_many_lines)]
 pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<BevyApp> {
     crate::manager::app::bound_ax_messaging_timeout()?;
@@ -1067,14 +1088,15 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
             overview::register_overview,
         ));
 
+    strip_unused_schedules(&mut app);
+
     // Run every schedule inline rather than fanning systems out across the task
     // pool: the task-pool handoff measured ~45% of main-thread time against
     // ~16% actually spent on accessibility calls, dropping to ~10% once
-    // inlined. The expensive systems here all take `&mut Window` and are
-    // already mutually exclusive, so the fan-out bought little; genuine
-    // parallelism (`par_iter_mut`) still goes through `ComputeTaskPool`
-    // directly. `First` is included even though unused because an empty
-    // schedule still costs a task-pool scope per frame.
+    // inlined. The expensive systems here all take `&mut Window` or `NonSend`
+    // AppKit state and are already mutually exclusive, so the fan-out bought
+    // little; genuine parallelism (`par_iter_mut`) still goes through
+    // `ComputeTaskPool` directly.
     for label in [
         First.intern(),
         PreUpdate.intern(),

@@ -4012,3 +4012,42 @@ fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordere
     // Advance past two 1-second CLOSED_WINDOW_CHECK_FREQ ticks.
     harness.advance(Duration::from_secs(2));
 }
+
+/// Stripping `RunFixedMainLoop` and `SpawnScene` from `MainScheduleOrder` must
+/// keep `Messages<Event>` double-buffering active on every frame (via
+/// `ShouldUpdateMessages::Always`) so events do not accumulate unboundedly.
+#[test]
+fn test_strip_unused_schedules_preserves_message_double_buffering() {
+    use bevy::app::{MainScheduleOrder, RunFixedMainLoop, SpawnScene};
+    use bevy::ecs::message::{MessageRegistry, Messages, ShouldUpdateMessages};
+    use bevy::ecs::schedule::ScheduleLabel as _;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    {
+        let world = harness.world();
+        let order = world.resource::<MainScheduleOrder>();
+        assert!(!order.labels.contains(&RunFixedMainLoop.intern()));
+        assert!(!order.labels.contains(&SpawnScene.intern()));
+        assert_eq!(
+            world.resource::<MessageRegistry>().should_update,
+            ShouldUpdateMessages::Always
+        );
+    }
+
+    harness
+        .world()
+        .write_message(Event::MenuOpened { window_id: 0 });
+    assert_eq!(harness.world().resource::<Messages<Event>>().len(), 1);
+
+    // Double-buffered messages live two frames and are dropped by frame 3.
+    harness.app.update();
+    harness.app.update();
+    harness.app.update();
+    assert_eq!(
+        harness.world().resource::<Messages<Event>>().len(),
+        0,
+        "Messages<Event> must flush each frame without RunFixedMainLoop"
+    );
+}

@@ -11,8 +11,10 @@
 //! `PlatformCallbacks::pump_cocoa_event_loop` services while it waits, so a
 //! running stream does not wake the Bevy loop once per frame.
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::ptr::NonNull;
+use std::rc::Rc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -33,7 +35,7 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGColor;
 use objc2_core_media::{CMSampleBuffer, CMTime};
 use objc2_core_video::CVPixelBufferGetIOSurface;
-use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSError, NSPoint, NSRect, NSSize, NSString, NSTimer};
 use objc2_quartz_core::{CALayer, kCAGravityResize};
 use objc2_screen_capture_kit::{
     SCContentFilter, SCShareableContent, SCStream, SCStreamConfiguration, SCStreamDelegate,
@@ -378,6 +380,9 @@ struct PinMirror {
     shown: bool,
     /// The window the panel was last stacked beneath (see `PinTarget::under`).
     under: Option<WinID>,
+    /// Bumped whenever the panel is restacked or hidden, so settling timers
+    /// scheduled before that do nothing.
+    stack_epoch: Rc<Cell<u64>>,
     /// Small click-through panel carrying the pin glyph. Separate from
     /// `panel` because that one hides while the pinned window has focus.
     badge: Retained<NSWindow>,
@@ -429,24 +434,70 @@ impl PinMirror {
     /// pinned window, so it neither buries that window nor drops behind the
     /// tiled ones. The badge is detached first and re-attached by
     /// `sync_badge`, so it follows the mirror to its new level.
-    fn restack(&mut self, under: Option<WinID>) {
+    ///
+    /// `settle` is set when the mirror's place changed (as opposed to being
+    /// re-asserted): a tucked mirror then also re-asserts itself a few times
+    /// over the next half second, see `schedule_settling`.
+    fn restack(&mut self, under: Option<WinID>, settle: bool) {
         self.detach_badge();
+        if settle {
+            self.cancel_settling();
+        }
         if let Some(window_number) = under.and_then(|window_id| isize::try_from(window_id).ok()) {
             self.panel.setLevel(NSNormalWindowLevel);
             self.panel
                 .orderWindow_relativeTo(NSWindowOrderingMode::Below, window_number);
+            if settle {
+                self.schedule_settling(window_number);
+            }
         } else {
             self.panel.setLevel(NSFloatingWindowLevel);
             self.panel.orderFront(None::<&AnyObject>);
         }
     }
+
+    fn hide(&mut self) {
+        self.cancel_settling();
+        self.panel.orderOut(None::<&AnyObject>);
+    }
+
+    /// Makes every pending settling timer a no-op.
+    fn cancel_settling(&self) {
+        self.stack_epoch.set(self.stack_epoch.get().wrapping_add(1));
+    }
+
+    /// Re-asserts "directly beneath `window_number`" at `SETTLE_DELAYS`.
+    ///
+    /// Focusing a window can bring its app's other windows forward a moment
+    /// later (observed: a tiled window of the same app rising above the
+    /// tucked mirror), and nothing reports that to Paneru. The retries are
+    /// bounded and one-shot, and each is a no-op once the mirror has been
+    /// restacked or hidden since (`stack_epoch`).
+    fn schedule_settling(&self, window_number: isize) {
+        let epoch = self.stack_epoch.get();
+        for delay in SETTLE_DELAYS {
+            let panel = self.panel.clone();
+            let current = Rc::clone(&self.stack_epoch);
+            let block = RcBlock::new(move |_timer: NonNull<NSTimer>| {
+                if current.get() == epoch {
+                    panel.orderWindow_relativeTo(NSWindowOrderingMode::Below, window_number);
+                }
+            });
+            unsafe {
+                NSTimer::scheduledTimerWithTimeInterval_repeats_block(delay, false, &block);
+            }
+        }
+    }
 }
+
+/// When a freshly tucked mirror re-asserts its stacking, in seconds.
+const SETTLE_DELAYS: [f64; 3] = [0.06, 0.2, 0.5];
 
 impl Drop for PinMirror {
     fn drop(&mut self) {
         self.output.stop();
         self.detach_badge();
-        self.panel.orderOut(None::<&AnyObject>);
+        self.hide();
         self.badge.orderOut(None::<&AnyObject>);
     }
 }
@@ -513,11 +564,12 @@ impl PinMirrorManager {
                 // A tucked mirror is re-stacked on every sync: its place is
                 // relative to another app's window, which may have been
                 // raised since the last one.
-                if !mirror.shown || mirror.under != target.under || target.under.is_some() {
-                    mirror.restack(target.under);
+                let moved = !mirror.shown || mirror.under != target.under;
+                if moved || target.under.is_some() {
+                    mirror.restack(target.under, moved);
                 }
             } else if mirror.shown {
-                mirror.panel.orderOut(None::<&AnyObject>);
+                mirror.hide();
             }
             mirror.shown = show;
             mirror.under = target.under;
@@ -574,6 +626,7 @@ impl PinMirrorManager {
             pixel_size,
             shown: false,
             under: None,
+            stack_epoch: Rc::new(Cell::new(0)),
             badge: make_badge_panel(self.mtm, badge_frame(frame)),
             badge_attached: false,
         }

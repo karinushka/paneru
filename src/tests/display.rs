@@ -3941,16 +3941,16 @@ fn test_window_destroyed_ignored_when_display_has_no_spaces() {
     );
 }
 
-/// `window_destroyed_trigger` must short-circuit `present_displays()` when
-/// locked and evaluate the locked/unsettled guard at most once per tick across
-/// a burst of destroy events.
+/// `window_destroyed_trigger` must short-circuit `displays_unsettled()` when
+/// locked, never call `present_displays()`, and evaluate the locked/unsettled
+/// guard at most once per tick across a burst of destroy events.
 #[test]
 fn test_window_destroyed_short_circuits_and_caches_display_check() {
     use crate::events::DestroySource;
     use crate::manager::{MockWindowManagerApi, WindowManager};
 
-    // Case 1: locked — `present_displays()` is never called, and `screen_locked()`
-    // is checked once for the whole burst.
+    // Case 1: locked — neither `displays_unsettled()` nor `present_displays()`
+    // is called, and `screen_locked()` is checked once for the whole burst.
     {
         let mut harness = TestHarness::new().with_windows(2);
         harness.run(vec![Event::MenuOpened { window_id: 0 }]);
@@ -3958,6 +3958,7 @@ fn test_window_destroyed_short_circuits_and_caches_display_check() {
 
         let mut wm = MockWindowManagerApi::new();
         wm.expect_screen_locked().times(1).returning(|| true);
+        wm.expect_displays_unsettled().never();
         wm.expect_present_displays().never();
         harness.world().insert_resource(WindowManager(Box::new(wm)));
 
@@ -3971,7 +3972,8 @@ fn test_window_destroyed_short_circuits_and_caches_display_check() {
     }
 
     // Case 2: unlocked with unsettled displays — both `screen_locked()` and
-    // `present_displays()` are called once for the whole burst.
+    // `displays_unsettled()` are called once for the whole burst, and
+    // `present_displays()` (which queries menubar height) is never called.
     {
         let mut harness = TestHarness::new().with_windows(2);
         harness.run(vec![Event::MenuOpened { window_id: 0 }]);
@@ -3979,7 +3981,8 @@ fn test_window_destroyed_short_circuits_and_caches_display_check() {
 
         let mut wm = MockWindowManagerApi::new();
         wm.expect_screen_locked().times(1).returning(|| false);
-        wm.expect_present_displays().times(1).returning(Vec::new);
+        wm.expect_displays_unsettled().times(1).returning(|| true);
+        wm.expect_present_displays().never();
         harness.world().insert_resource(WindowManager(Box::new(wm)));
 
         for window_id in [0, 1] {
@@ -3993,8 +3996,8 @@ fn test_window_destroyed_short_circuits_and_caches_display_check() {
 }
 
 /// In steady state (unlocked, all windows ordered in, no deferred destroys),
-/// the 1 Hz `cleanup_unordered_windows` timer must not query `present_displays()`
-/// (`SLSCopyManagedDisplaySpaces` + menubar height).
+/// the periodic `cleanup_unordered_windows` sweep must not query
+/// `displays_unsettled()` or `present_displays()`.
 #[test]
 fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordered() {
     use crate::manager::{MockWindowManagerApi, WindowManager};
@@ -4006,19 +4009,19 @@ fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordere
     let mut wm = MockWindowManagerApi::new();
     wm.expect_screen_locked().returning(|| false);
     wm.expect_window_is_unordered().returning(|_| false);
+    wm.expect_displays_unsettled().never();
     wm.expect_present_displays().never();
     harness.world().insert_resource(WindowManager(Box::new(wm)));
 
-    // Advance past two 1-second CLOSED_WINDOW_CHECK_FREQ ticks.
-    harness.advance(Duration::from_secs(2));
+    // Advance past two 5-second UNORDERED_WINDOW_SWEEP_FREQ ticks.
+    harness.advance(Duration::from_secs(11));
 }
 
 /// Live windows on an inactive native macOS Space (both managed strip windows
-/// and floating windows) report `SLSWindowIsOrderedIn == 0`. The 1 Hz
+/// and floating windows) report `SLSWindowIsOrderedIn == 0`. The periodic
 /// `cleanup_unordered_windows` sweep must skip them without calling
-/// `present_displays()` or probing AX `is_alive()`, while still sweeping dead
-/// unordered windows on the active native Space (including parked virtual
-/// workspaces) and dead floating windows that have left all Spaces.
+/// `displays_unsettled()`, `present_displays()`, or probing AX `is_alive()`,
+/// while still sweeping dead floating windows that have left all Spaces.
 #[test]
 fn test_cleanup_unordered_windows_skips_inactive_native_space_windows() {
     use crate::ecs::Unmanaged;
@@ -4052,16 +4055,17 @@ fn test_cleanup_unordered_windows_skips_inactive_native_space_windows() {
     }
 
     // Both windows on the inactive native Space report unordered while alive.
-    // Neither `present_displays()` nor a destroy event may be triggered.
+    // Neither `displays_unsettled()` nor `present_displays()` may be called.
     {
         let mut wm = MockWindowManagerApi::new();
         wm.expect_screen_locked().returning(|| false);
         wm.expect_window_is_unordered()
             .returning(|id| id == 20 || id == 30);
+        wm.expect_displays_unsettled().never();
         wm.expect_present_displays().never();
         harness.world().insert_resource(WindowManager(Box::new(wm)));
     }
-    harness.advance(Duration::from_secs(2));
+    harness.advance(Duration::from_secs(6));
 
     {
         let world = harness.world();
@@ -4075,13 +4079,13 @@ fn test_cleanup_unordered_windows_skips_inactive_native_space_windows() {
 
     // Restore default mock WindowManager, then close floating window 30 silently
     // (removing it from WindowServer without emitting WindowDestroyed). Because
-    // `spaces_for_window(30)` is now empty, the sweep must reap it.
+    // `spaces_for_window(30)` is now empty, the 5-second sweep must reap it.
     let restored_wm = harness.mock_state.create_window_manager();
     harness
         .world()
         .insert_resource(WindowManager(Box::new(restored_wm)));
     harness.mock_state.os_vanish_window(30);
-    harness.advance(Duration::from_secs(2));
+    harness.advance(Duration::from_secs(6));
 
     assert!(
         !harness

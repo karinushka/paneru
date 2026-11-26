@@ -1034,14 +1034,42 @@ fn resolve_active_native_spaces(
     (ids, covered)
 }
 
+/// Re-checks windows whose `Event::WindowDestroyed` arrived while the screen
+/// was locked or displays were unsettled. Gated on [`Populated`] so it does not
+/// even schedule when no deferred destroys are pending.
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn verify_pending_destroys(
+    mut pending_windows: Populated<(Entity, &Window, &mut PendingDestroyCheck)>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    if window_manager.screen_locked_or_displays_unsettled() {
+        return;
+    }
+
+    for (entity, window, mut pending) in &mut pending_windows {
+        let window_id = window.id();
+        if !window.is_alive() {
+            debug!("Deferred destroy confirmed dead for window {window_id}; removing it.");
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingDestroyCheck>();
+            }
+            commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            }));
+        } else if pending.consume_attempt() {
+            debug!("Deferred destroy cleared for live window {window_id}.");
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingDestroyCheck>();
+            }
+        }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn cleanup_unordered_windows(
-    mut windows: Query<(
-        Entity,
-        &Window,
-        Option<&Unmanaged>,
-        Option<&mut PendingDestroyCheck>,
-    )>,
+    windows: Query<(Entity, &Window, Option<&Unmanaged>), Without<PendingDestroyCheck>>,
     workspaces: Query<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>,
     displays: Query<&Display>,
     census: Option<Res<crate::ecs::desktop::DesktopCensus>>,
@@ -1057,41 +1085,19 @@ pub(crate) fn cleanup_unordered_windows(
     // display/space topology only if a window actually needs a liveness probe.
     // On macOS, `SLSWindowIsOrderedIn` returns false for live windows on
     // inactive native Spaces (other Desktops or inactive native fullscreen
-    // Spaces); skipping those avoids a 1 Hz `present_displays()` round-trip and
-    // synchronous cross-process `is_alive()` AX IPC stalls on background apps.
+    // Spaces); skipping those avoids display-space queries and synchronous
+    // cross-process `is_alive()` AX IPC stalls on background apps.
     let mut active_spaces: Option<(Vec<WorkspaceId>, bool)> = None;
     let mut displays_unsettled: Option<bool> = None;
 
-    for (entity, window, unmanaged, pending_destroy) in &mut windows {
+    for (entity, window, unmanaged) in &windows {
         let window_id = window.id();
-
-        if let Some(mut pending) = pending_destroy {
-            if *displays_unsettled.get_or_insert_with(|| window_manager.displays_unsettled()) {
-                return;
-            }
-            if !window.is_alive() {
-                debug!("Deferred destroy confirmed dead for window {window_id}; removing it.");
-                if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                    entity_commands.try_remove::<PendingDestroyCheck>();
-                }
-                commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
-                    window_id,
-                    source: DestroySource::Accessibility,
-                }));
-            } else if pending.consume_attempt() {
-                debug!("Deferred destroy cleared for live window {window_id}.");
-                if let Ok(mut entity_commands) = commands.get_entity(entity) {
-                    entity_commands.try_remove::<PendingDestroyCheck>();
-                }
-            }
-            continue;
-        }
 
         // Skip minimized/hidden windows and native-tabbed windows in the steady-state
         // sweep: macOS orders them out while alive, so probing `is_alive()` on a timer
         // would fan out AX IPC across live background windows. Any such window whose
-        // destroy event was deferred while locked/unsettled is verified above via
-        // `PendingDestroyCheck`.
+        // destroy event was deferred while locked/unsettled is verified separately by
+        // `verify_pending_destroys`.
         if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
             continue;
         }

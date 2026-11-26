@@ -1,11 +1,14 @@
 use bevy::ecs::change_detection::DetectChangesMut;
-use bevy::ecs::entity::Entity;
+use bevy::ecs::entity::{Entity, EntityHashMap};
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Insert, Remove, RemovedComponents};
 use bevy::ecs::message::{MessageReader, MessageWriter};
 use bevy::ecs::observer::On;
 use bevy::ecs::query::{Added, Has, With, Without};
-use bevy::ecs::system::{Commands, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single};
+use bevy::ecs::resource::Resource;
+use bevy::ecs::system::{
+    Commands, NonSendMut, ParamSet, Populated, Query, Res, ResMut, Single, SystemParam,
+};
 use bevy::ecs::world::EntityWorldMut;
 use bevy::math::IRect;
 use bevy::time::{Time, Timer, TimerMode};
@@ -30,7 +33,8 @@ use crate::ecs::workspace::RestoreFocusMarker;
 use crate::ecs::{
     ActiveWorkspaceMarker, AwaitResize, Bounds, DockPosition, Initializing, LayoutPosition,
     Position, RepositionMarker, ResizeAnchor, ResizeMarker, RestoreWindowState, Scrolling,
-    SendMessageTrigger, SpawnCommandsExt, VerifyWindowPosition, WidthRatio, WindowProperties,
+    SendMessageTrigger, SpawnCommandsExt, VerifyFocus, VerifyWindowPosition, WidthRatio,
+    WindowProperties,
 };
 use crate::events::{DestroySource, Event};
 use crate::manager::{
@@ -39,6 +43,28 @@ use crate::manager::{
 };
 use crate::platform::WinID;
 use crate::util::{round_px, symlink_target};
+
+/// Per-frame cache of `app.focused_window_id()` results already read in
+/// `UpdateSet::Events` (`front_switched_trigger`, `retry_front_switch`),
+/// drained by `window_focused_trigger` in `UpdateSet::Focus` of the same frame
+/// so app switches do not issue a second synchronous AX round-trip.
+#[derive(Resource, Default)]
+pub(crate) struct ConfirmedAppFocus(EntityHashMap<WinID>);
+
+impl ConfirmedAppFocus {
+    pub(crate) fn record(&mut self, app_entity: Entity, window_id: WinID) {
+        self.0.insert(app_entity, window_id);
+    }
+}
+
+#[derive(SystemParam)]
+pub(super) struct FocusTriggerState<'w, 's> {
+    restore_guards: Query<'w, 's, (Entity, &'static RestoreFocusMarker)>,
+    verifying_focus: Query<'w, 's, (), With<VerifyFocus>>,
+    focus_history: ResMut<'w, FocusHistory>,
+    confirmed_focus: Option<ResMut<'w, ConfirmedAppFocus>>,
+    global_state: GlobalState<'w>,
+}
 
 /// The display currently in front, paired with the Dock's edge — together they
 /// give the usable viewport a window has to be fitted into.
@@ -167,6 +193,7 @@ pub(super) fn front_switched_trigger(
     processes: Query<(&BProcess, &Children)>,
     applications: Query<&Application>,
     window_manager: Res<WindowManager>,
+    mut confirmed_focus: Option<ResMut<ConfirmedAppFocus>>,
     mut config: GlobalState,
     mut commands: Commands,
 ) {
@@ -200,6 +227,9 @@ pub(super) fn front_switched_trigger(
         if let Ok(focused_id) = app.focused_window_id().inspect_err(|err| {
             warn!("can not get current focus: {err}");
         }) {
+            if let Some(confirmed) = confirmed_focus.as_mut() {
+                confirmed.record(app_entity, focused_id);
+            }
             if let Some(point) = window_manager.cursor_position()
                 && window_manager
                     .find_window_at_point(&point)
@@ -288,12 +318,18 @@ pub(super) fn window_focused_trigger(
     mut messages: MessageReader<Event>,
     applications: Query<&Application>,
     mut workspaces: Query<(Entity, &mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
-    restore_guards: Query<(Entity, &RestoreFocusMarker)>,
-    mut focus_history: ResMut<FocusHistory>,
-    global_state: GlobalState,
+    mut focus_state: FocusTriggerState,
     mut ctx: WindowCtx,
 ) {
     const STRAY_FOCUS_RETRY_SEC: u64 = 2;
+
+    // Drain any same-frame `app.focused_window_id()` results recorded in
+    // `UpdateSet::Events` unconditionally so entries never leak across frames.
+    let mut frame_app_focus: EntityHashMap<Option<WinID>> = focus_state
+        .confirmed_focus
+        .as_mut()
+        .map(|confirmed| confirmed.0.drain().map(|(k, v)| (k, Some(v))).collect())
+        .unwrap_or_default();
 
     let initial_focused = ctx
         .windows
@@ -334,23 +370,39 @@ pub(super) fn window_focused_trigger(
         // decided to show. Follow it to that window rather than dropping the
         // event: dropping it leaves the strip parked where it was, so Cmd-Tab
         // into a tabbed terminal looks like nothing happened.
-        let (window, entity, window_id) = match app.focused_window_id() {
-            Ok(current) if current != window_id => {
-                match ctx.windows.find_parent(current) {
-                    Some((current_window, current_entity, current_parent))
-                        if current_parent == parent =>
-                    {
-                        debug!(
-                            "app {} reports window {current} focused, not {window_id}; following it",
-                            app.name()
-                        );
-                        (current_window, current_entity, current)
-                    }
-                    // Nothing we track answers to that id, so the event really
-                    // is stale.
-                    _ => continue,
+        //
+        // Avoid redundant synchronous AX IPC in two cases:
+        // 1. An echo for the non-tabbed window we just asked macOS to focus
+        //    (`VerifyFocus` still checks on timeout if the app actually refused).
+        // 2. Same-frame hits already read by `front_switched_trigger`,
+        //    `retry_front_switch`, or an earlier `WindowFocused` in this batch.
+        let skip_ax_recheck = current_focused.is_some_and(|(_, id)| id == window_id)
+            && focus_state.verifying_focus.contains(entity)
+            && !workspaces.iter().any(|(_, strip, _)| strip.tabbed(entity));
+
+        let app_focused_id = if skip_ax_recheck {
+            Some(window_id)
+        } else {
+            *frame_app_focus
+                .entry(parent)
+                .or_insert_with(|| app.focused_window_id().ok())
+        };
+
+        let (window, entity, window_id) = match app_focused_id {
+            Some(current) if current != window_id => match ctx.windows.find_parent(current) {
+                Some((current_window, current_entity, current_parent))
+                    if current_parent == parent =>
+                {
+                    debug!(
+                        "app {} reports window {current} focused, not {window_id}; following it",
+                        app.name()
+                    );
+                    (current_window, current_entity, current)
                 }
-            }
+                // Nothing we track answers to that id, so the event really
+                // is stale.
+                _ => continue,
+            },
             _ => (window, entity, window_id),
         };
 
@@ -415,7 +467,9 @@ pub(super) fn window_focused_trigger(
         // same entity would otherwise skip the write.
         if let Some(workspace_id) = owning_workspace_id.or(active_workspace_id) {
             let unmanaged = ctx.windows.get_managed(entity).and_then(|(_, _, u)| u);
-            focus_history.record(workspace_id, entity, unmanaged);
+            focus_state
+                .focus_history
+                .record(workspace_id, entity, unmanaged);
         }
 
         // The restore guard absorbs the OS focus acknowledgment from a restore;
@@ -423,7 +477,7 @@ pub(super) fn window_focused_trigger(
         // placed it. It may fire twice (front_switched_trigger synthesizes a
         // duplicate), so a match keeps the guard; focus moving elsewhere despawns it.
         let mut restored_focus = false;
-        for (guard_entity, guard) in &restore_guards {
+        for (guard_entity, guard) in &focus_state.restore_guards {
             if guard.entity == entity {
                 restored_focus = true;
             } else if let Ok(mut entity_commands) = ctx.commands.get_entity(guard_entity) {
@@ -440,7 +494,9 @@ pub(super) fn window_focused_trigger(
             // information, so it must not re-derive the strip offset — that
             // threw away a manual centering. Expose the window if it has been
             // scrolled off an edge, and otherwise leave the strip alone.
-            if !global_state.skip_reshuffle() && !global_state.initializing() {
+            if !focus_state.global_state.skip_reshuffle()
+                && !focus_state.global_state.initializing()
+            {
                 ctx.commands.ensure_visible(entity);
             }
             continue;

@@ -166,6 +166,7 @@ type TabIndicatorWindowMoved<'w, 's> = Query<
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const CLOSED_WINDOW_CHECK_FREQ: Duration = Duration::from_secs(1);
+    const UNORDERED_WINDOW_SWEEP_FREQ: Duration = Duration::from_secs(5);
     const LOW_POWER_MODE_CHECK: Duration = Duration::from_mins(1);
     const APP_OBSERVABILITY_CHECK_FREQ: Duration = Duration::from_millis(200);
 
@@ -309,9 +310,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(not_swiping),
-            workspace::cleanup_unordered_windows
+            workspace::verify_pending_destroys
                 .run_if(not(resource_exists::<Initializing>))
                 .run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
+            workspace::cleanup_unordered_windows
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_timer(UNORDERED_WINDOW_SWEEP_FREQ)),
             systems::regroup_stray_native_tabs
                 .run_if(native_tabs_enabled)
                 .run_if(not(resource_exists::<Initializing>))
@@ -413,6 +417,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
+    app.init_resource::<triggers::ConfirmedAppFocus>();
     app.add_systems(
         Update,
         (

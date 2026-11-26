@@ -32,8 +32,8 @@ use crate::ecs::layout::{
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
-    NativeFullscreenMarker, Position, RaiseWindow, RepositionMarker, Scrolling,
-    SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
+    NativeFullscreenMarker, PendingDestroyCheck, Position, RaiseWindow, RepositionMarker,
+    Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::{DestroySource, Event};
@@ -1007,29 +1007,77 @@ fn find_orphaned_workspaces(
 
 #[allow(clippy::needless_pass_by_value)]
 pub(crate) fn cleanup_unordered_windows(
-    windows: Query<&Window>,
+    mut windows: Query<(
+        Entity,
+        &Window,
+        Option<&Unmanaged>,
+        Option<&mut PendingDestroyCheck>,
+    )>,
     workspaces: Query<&LayoutStrip>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let windows = workspaces
-        .iter()
-        .flat_map(|strip| {
-            strip
-                .all_windows()
-                .into_iter()
-                .filter(|entity| !strip.tabbed(*entity))
-        })
-        .filter_map(|entity| windows.get(entity).ok());
+    if window_manager.screen_locked() {
+        return;
+    }
 
-    for window in windows {
+    // Lazily query display/space topology only if a window actually needs a
+    // liveness probe — avoiding a 1 Hz `present_displays()` (`SLSCopyManagedDisplaySpaces`
+    // + menubar height) round-trip in steady state when every window is ordered in.
+    let mut displays_unsettled: Option<bool> = None;
+
+    for (entity, window, unmanaged, pending_destroy) in &mut windows {
         let window_id = window.id();
-        if window_manager.window_is_unordered(window_id) && !window.is_alive() {
-            debug!("Window {window_id} is unordered; removing it.");
-            commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
-                window_id,
-                source: DestroySource::Accessibility,
-            }));
+
+        if let Some(mut pending) = pending_destroy {
+            if *displays_unsettled.get_or_insert_with(|| window_manager.displays_unsettled()) {
+                return;
+            }
+            if !window.is_alive() {
+                debug!("Deferred destroy confirmed dead for window {window_id}; removing it.");
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<PendingDestroyCheck>();
+                }
+                commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
+                    window_id,
+                    source: DestroySource::Accessibility,
+                }));
+            } else if pending.consume_attempt() {
+                debug!("Deferred destroy cleared for live window {window_id}.");
+                if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                    entity_commands.try_remove::<PendingDestroyCheck>();
+                }
+            }
+            continue;
+        }
+
+        // Skip minimized/hidden windows and native-tabbed windows in the steady-state
+        // sweep: macOS orders them out while alive, so probing `is_alive()` on a timer
+        // would fan out AX IPC across live background windows. Any such window whose
+        // destroy event was deferred while locked/unsettled is verified above via
+        // `PendingDestroyCheck`.
+        if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
+        if !window_manager.window_is_unordered(window_id) {
+            continue;
+        }
+
+        let eligible = matches!(unmanaged, Some(Unmanaged::Floating))
+            || workspaces
+                .iter()
+                .any(|strip| strip.contains(entity) && !strip.tabbed(entity));
+        if eligible {
+            if *displays_unsettled.get_or_insert_with(|| window_manager.displays_unsettled()) {
+                return;
+            }
+            if !window.is_alive() {
+                debug!("Window {window_id} is unordered; removing it.");
+                commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
+                    window_id,
+                    source: DestroySource::Accessibility,
+                }));
+            }
         }
     }
 }

@@ -1959,6 +1959,7 @@ fn test_regroup_stray_native_tabs_skips_os_queries_without_overlapping_columns()
     // `windows_on_screen` is called when no columns share a frame.
     let mut wm = MockWindowManagerApi::new();
     wm.expect_windows_on_screen().never();
+    wm.expect_screen_locked().returning(|| false);
     wm.expect_window_is_unordered().returning(|_| false);
     wm.expect_present_displays().returning(Vec::new);
     harness

@@ -9,7 +9,7 @@
 
 use crate::types::windowset::LayoutOp;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::message::MessageReader;
+use bevy::ecs::message::{Message, MessageReader, MessageWriter};
 use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res, SystemParam};
 use bevy::platform::collections::{HashMap, HashSet};
@@ -49,6 +49,7 @@ struct LayoutBatch {
     focus_change: Option<FocusChange>,
     ensure_visible: Option<Entity>,
     has_placement: bool,
+    notify_subscribers: bool,
 }
 
 struct FocusChange {
@@ -126,8 +127,9 @@ impl LayoutBatch {
     }
 }
 
-/// A nonempty batch needs a state check after the layout systems run.
-#[derive(bevy::ecs::message::Message)]
+/// A layout batch changed window membership, layout, or geometry and needs a
+/// subscriber check in `PostUpdate` after the layout systems run.
+#[derive(Message)]
 pub(crate) struct LayoutOpsProcessed;
 
 /// Applies the layout operations a Lua handler returned.
@@ -138,7 +140,7 @@ pub(crate) fn apply_layout_ops(
     displays: LayoutDisplays,
     config: Res<Config>,
     mut commands: Commands,
-    mut processed: bevy::ecs::message::MessageWriter<LayoutOpsProcessed>,
+    mut processed: MessageWriter<LayoutOpsProcessed>,
 ) {
     let batches: Vec<Vec<LayoutOp>> = messages
         .read()
@@ -152,8 +154,6 @@ pub(crate) fn apply_layout_ops(
     if batches.is_empty() {
         return;
     }
-    // The consumer runs in PostUpdate, after this batch and layout have run.
-    processed.write(LayoutOpsProcessed);
 
     let has_placement = batches
         .iter()
@@ -170,6 +170,7 @@ pub(crate) fn apply_layout_ops(
         focus_change: None,
         ensure_visible: None,
         has_placement,
+        notify_subscribers: false,
     };
     for ops in batches {
         // Unmanaged inserts are deferred. Keep the existing per-request
@@ -187,7 +188,12 @@ pub(crate) fn apply_layout_ops(
             );
         }
     }
+    let notify_subscribers = batch.notify_subscribers;
     batch.finish(original_focus, &workspaces, &mut commands);
+    if notify_subscribers {
+        // The consumer runs in PostUpdate, after this batch and layout have run.
+        processed.write(LayoutOpsProcessed);
+    }
 }
 
 /// Applies one op, or explains why it could not be.
@@ -245,6 +251,7 @@ fn apply(
             };
             strip.swap(left, right);
             commands.reshuffle_around(entity);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::MoveToWorkspace {
@@ -266,6 +273,7 @@ fn apply(
                         MoveFocus::Stay
                     },
                 });
+                batch.notify_subscribers = true;
             }
         }
 
@@ -290,8 +298,9 @@ fn apply(
                     commands,
                 )
             };
-            if let Err(reason) = result {
-                debug!(target: "paneru::lua", "skipping {op:?}: {reason}");
+            match result {
+                Ok(changed) => batch.notify_subscribers |= changed,
+                Err(reason) => debug!(target: "paneru::lua", "skipping {op:?}: {reason}"),
             }
         }
 
@@ -313,6 +322,7 @@ fn apply(
                 batch.floated.remove(&entity);
             }
             set_floating(entity, floating, workspaces, commands);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::SetManaged { managed, .. } => {
@@ -323,6 +333,7 @@ fn apply(
                 batch.floated.insert(entity);
             }
             set_floating(entity, !managed, workspaces, commands);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::SetWidth { ratio, .. } => {
@@ -400,6 +411,7 @@ fn apply(
                 entity_commands.try_remove::<FullWidthMarker>();
             }
             commands.reshuffle_around(entity);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::SetFrame { frame, .. } => {
@@ -420,6 +432,7 @@ fn apply(
             let size = Size::new(frame.width.max(1), frame.height.max(1));
             commands.reposition_entity(entity, origin);
             commands.resize_entity(entity, size);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::Stack { onto, tabs, .. } => {
@@ -456,6 +469,7 @@ fn apply(
                         .unwrap_or(onto_entity);
                     strip.toggle_tabbed_display(active);
                     commands.reshuffle_around(active);
+                    batch.notify_subscribers = true;
                 }
                 return;
             }
@@ -488,6 +502,7 @@ fn apply(
                 entity_commands.try_remove::<FullWidthMarker>();
             }
             commands.reshuffle_around(entity);
+            batch.notify_subscribers = true;
         }
 
         LayoutOp::Unstack(_) => {
@@ -504,11 +519,14 @@ fn apply(
                 return;
             }
             commands.reshuffle_around(entity);
+            batch.notify_subscribers = true;
         }
     }
 }
 
 /// Place a whole tiled column without switching displays or workspaces.
+/// Returns `Ok(true)` if the column moved or changed slots, `Ok(false)` if it
+/// was already at the requested slot.
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn place_column(
     entity: Entity,
@@ -519,7 +537,7 @@ fn place_column(
     config: &Config,
     batch: &mut LayoutBatch,
     commands: &mut Commands,
-) -> Result<(), &'static str> {
+) -> Result<bool, &'static str> {
     let workspace = workspace
         .checked_sub(1)
         .ok_or("workspaces are numbered from 1")?;
@@ -591,8 +609,9 @@ fn place_column(
             if moved_focus.is_some() {
                 batch.ensure_visible = moved_focus;
             }
+            return Ok(true);
         }
-        return Ok(());
+        return Ok(false);
     }
 
     let neighbour = moved_focus.and_then(|focused| {
@@ -663,7 +682,7 @@ fn place_column(
                 });
         }
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Takes a window out of the tiling layout or puts it back. Mirrors

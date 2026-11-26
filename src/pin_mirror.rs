@@ -27,8 +27,8 @@ use objc2::{
 };
 use objc2_app_kit::{
     NSBackingStoreType, NSColor, NSEvent, NSFloatingWindowLevel, NSImage, NSImageScaling,
-    NSImageView, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior, NSWindowOrderingMode,
-    NSWindowStyleMask,
+    NSImageView, NSNormalWindowLevel, NSScreen, NSView, NSWindow, NSWindowCollectionBehavior,
+    NSWindowOrderingMode, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGColor;
 use objc2_core_media::{CMSampleBuffer, CMTime};
@@ -62,6 +62,9 @@ pub struct PinTarget {
     pub frame: IRect,
     /// Whether the mirror should cover the real window right now.
     pub visible: bool,
+    /// The focused pinned window this mirror overlaps, if any: the mirror is
+    /// stacked directly beneath it instead of floating above everything.
+    pub under: Option<WinID>,
     /// Whether the pin badge should show on the window's corner right now.
     /// Independent of `visible`: the badge stays while the window has focus.
     pub badge: bool,
@@ -373,6 +376,8 @@ struct PinMirror {
     output: Retained<PinStreamOutput>,
     pixel_size: (usize, usize),
     shown: bool,
+    /// The window the panel was last stacked beneath (see `PinTarget::under`).
+    under: Option<WinID>,
     /// Small click-through panel carrying the pin glyph. Separate from
     /// `panel` because that one hides while the pinned window has focus.
     badge: Retained<NSWindow>,
@@ -389,9 +394,8 @@ impl PinMirror {
     /// what is on screen) the badge stands alone, one level above the mirrors.
     fn sync_badge(&mut self, visible: bool, frame: NSRect) {
         let attach = visible && self.shown;
-        if self.badge_attached && !attach {
-            self.panel.removeChildWindow(&self.badge);
-            self.badge_attached = false;
+        if !attach {
+            self.detach_badge();
         }
         if !visible {
             self.badge.orderOut(None::<&AnyObject>);
@@ -402,7 +406,7 @@ impl PinMirror {
             self.badge.setLevel(NSFloatingWindowLevel + 1);
             self.badge.orderFront(None::<&AnyObject>);
         } else if !self.badge_attached {
-            self.badge.setLevel(NSFloatingWindowLevel);
+            self.badge.setLevel(self.panel.level());
             // Both windows are ours and outlive the relationship: `Drop`
             // detaches the badge before either goes away.
             unsafe {
@@ -412,14 +416,36 @@ impl PinMirror {
             self.badge_attached = true;
         }
     }
+
+    fn detach_badge(&mut self) {
+        if self.badge_attached {
+            self.panel.removeChildWindow(&self.badge);
+            self.badge_attached = false;
+        }
+    }
+
+    /// Puts the mirror on screen at the right depth: floating above every
+    /// real window, or (`under`) at normal level directly beneath the focused
+    /// pinned window, so it neither buries that window nor drops behind the
+    /// tiled ones. The badge is detached first and re-attached by
+    /// `sync_badge`, so it follows the mirror to its new level.
+    fn restack(&mut self, under: Option<WinID>) {
+        self.detach_badge();
+        if let Some(window_number) = under.and_then(|window_id| isize::try_from(window_id).ok()) {
+            self.panel.setLevel(NSNormalWindowLevel);
+            self.panel
+                .orderWindow_relativeTo(NSWindowOrderingMode::Below, window_number);
+        } else {
+            self.panel.setLevel(NSFloatingWindowLevel);
+            self.panel.orderFront(None::<&AnyObject>);
+        }
+    }
 }
 
 impl Drop for PinMirror {
     fn drop(&mut self) {
         self.output.stop();
-        if self.badge_attached {
-            self.panel.removeChildWindow(&self.badge);
-        }
+        self.detach_badge();
         self.panel.orderOut(None::<&AnyObject>);
         self.badge.orderOut(None::<&AnyObject>);
     }
@@ -484,13 +510,14 @@ impl PinMirrorManager {
             let show = target.visible && mirror.output.has_frame();
             if show {
                 mirror.panel.setFrame_display(frame, false);
-                if !mirror.shown {
-                    mirror.panel.orderFront(None::<&AnyObject>);
+                if !mirror.shown || mirror.under != target.under {
+                    mirror.restack(target.under);
                 }
             } else if mirror.shown {
                 mirror.panel.orderOut(None::<&AnyObject>);
             }
             mirror.shown = show;
+            mirror.under = target.under;
 
             mirror.sync_badge(badge_visible(target, show), badge_frame(frame));
         }
@@ -543,6 +570,7 @@ impl PinMirrorManager {
             output,
             pixel_size,
             shown: false,
+            under: None,
             badge: make_badge_panel(self.mtm, badge_frame(frame)),
             badge_attached: false,
         }
@@ -744,6 +772,7 @@ mod tests {
             window_id: 1,
             frame: IRect::new(0, 0, 10, 10),
             visible: false,
+            under: None,
             badge,
             drawn,
         };

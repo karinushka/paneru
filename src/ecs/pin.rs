@@ -28,6 +28,7 @@ use crate::config::Config;
 use crate::events::Event;
 use crate::manager::{Origin, Window, WindowManager};
 use crate::pin_mirror::{PinMirrorManager, PinTarget};
+use crate::platform::WinID;
 use crate::types::commands::Operation;
 
 /// Marks a window the user pinned above all others.
@@ -288,7 +289,8 @@ fn sync_pin_mirrors(
     let focused_pin = pinned
         .iter()
         .find(|(_, _, focused, _, _)| *focused)
-        .map(|(window, _, _, _, _)| content_rect(window));
+        .map(|(window, _, _, _, _)| (window.id(), content_rect(window)));
+    let focused_frame = focused_pin.map(|(_, frame)| frame);
     let targets = pinned
         .iter()
         .map(|(window, _, focused, auto_pinned, unmanaged)| {
@@ -299,10 +301,11 @@ fn sync_pin_mirrors(
             PinTarget {
                 window_id,
                 frame,
-                visible: on_screen && mirror_wanted(focused, frame, focused_pin),
+                visible: on_screen && !focused,
+                under: tuck_under(focused, frame, focused_pin),
                 badge: on_screen
                     && indicator.shows(auto_pinned)
-                    && !badge_buried(focused, frame, focused_pin),
+                    && !badge_buried(focused, frame, focused_frame),
                 drawn: drawn.as_ref().is_none_or(|ids| ids.contains(&window_id)),
             }
         })
@@ -326,15 +329,22 @@ fn sync_pin_mirrors(
     }
 }
 
-/// Whether a pinned window at `frame` should be covered by its mirror.
+/// The window an unfocused pin's mirror must be stacked directly beneath, if
+/// any.
 ///
-/// The focused window is the real one, so it gets no mirror. Mirrors sit at
-/// floating level, above every real window, so one that overlaps a focused
-/// pinned window (`focused_pin`) would bury the window the user is working
-/// in; it hides and leaves the real windows to stack normally. Mirrors still
-/// cover a focused window that is not pinned, which is the point of pinning.
-fn mirror_wanted(focused: bool, frame: IRect, focused_pin: Option<IRect>) -> bool {
-    !focused && focused_pin.is_none_or(|focused_pin| focused_pin.intersect(frame).is_empty())
+/// Mirrors sit at floating level, above every real window, so one that
+/// overlaps a focused pinned window (`focused_pin`: its id and frame) would
+/// bury the window the user is working in. Hiding that mirror instead would
+/// drop its window behind the tiled ones, so it is slotted just under the
+/// focused pin: below it, still above everything else. Mirrors keep covering
+/// a focused window that is not pinned, which is the point of pinning.
+fn tuck_under(focused: bool, frame: IRect, focused_pin: Option<(WinID, IRect)>) -> Option<WinID> {
+    if focused {
+        return None;
+    }
+    focused_pin
+        .filter(|(_, focused_frame)| !focused_frame.intersect(frame).is_empty())
+        .map(|(window_id, _)| window_id)
 }
 
 /// Whether an unfocused pinned window's badge corner (top-right; `frame` is
@@ -365,11 +375,13 @@ mod tests {
         let overlapping = IRect::new(400, 300, 800, 600);
         let apart = IRect::new(600, 100, 900, 400);
 
-        assert!(!mirror_wanted(true, focused_pin, Some(focused_pin)));
-        assert!(!mirror_wanted(false, overlapping, Some(focused_pin)));
-        assert!(mirror_wanted(false, apart, Some(focused_pin)));
-        assert!(
-            mirror_wanted(false, overlapping, None),
+        let pin = Some((7, focused_pin));
+        assert_eq!(tuck_under(true, focused_pin, pin), None);
+        assert_eq!(tuck_under(false, overlapping, pin), Some(7));
+        assert_eq!(tuck_under(false, apart, pin), None);
+        assert_eq!(
+            tuck_under(false, overlapping, None),
+            None,
             "a focused window that is not pinned gets covered"
         );
     }

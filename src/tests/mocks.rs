@@ -881,6 +881,12 @@ impl MockState {
             .returning(move || s.inner.force_read().screen_locked);
 
         let s = self.clone();
+        wm.expect_displays_unsettled().returning(move || {
+            let inner = s.inner.force_read();
+            inner.displays.is_empty() || inner.displays.values().any(|d| d.workspaces.is_empty())
+        });
+
+        let s = self.clone();
         wm.expect_active_display_id()
             .returning(move || Ok(s.inner.force_read().active_display_id));
 

@@ -191,6 +191,9 @@ pub trait WindowManagerApi: Send + Sync {
     fn window_is_unordered(&self, window_id: WinID) -> bool;
     /// Returns `true` when the macOS login session is locked.
     fn screen_locked(&self) -> bool;
+    /// Returns `true` when macOS reports no active displays or any display with
+    /// no spaces yet (e.g. mid-reconfiguration or lid-closed transition).
+    fn displays_unsettled(&self) -> bool;
 
     /// Sends an `Event::Exit` to the event loop, signaling the application to quit.
     ///
@@ -220,21 +223,13 @@ pub trait WindowManagerApi: Send + Sync {
 pub struct WindowManager(pub Box<dyn WindowManagerApi>);
 
 impl WindowManager {
-    /// Returns `true` when macOS reports no active displays or any display with
-    /// no spaces yet (e.g. mid-reconfiguration or lid-closed transition).
-    #[must_use]
-    pub fn displays_unsettled(&self) -> bool {
-        let present = self.0.present_displays();
-        present.is_empty() || present.iter().any(|(_, spaces)| spaces.is_empty())
-    }
-
     /// Returns `true` while the macOS session is locked or display/space
     /// topology has not settled (no active displays, or a display with no
     /// spaces yet). Checks the cheap session lock flag before querying display
     /// spaces.
     #[must_use]
     pub fn screen_locked_or_displays_unsettled(&self) -> bool {
-        self.0.screen_locked() || self.displays_unsettled()
+        self.0.screen_locked() || self.0.displays_unsettled()
     }
 }
 
@@ -521,6 +516,22 @@ impl WindowManagerApi for WindowManagerOS {
 
     fn screen_locked(&self) -> bool {
         screen_is_locked()
+    }
+
+    fn displays_unsettled(&self) -> bool {
+        let displays = spaces::bridge::active_display_ids();
+        if displays.is_empty() {
+            return true;
+        }
+        let Ok(census) =
+            spaces::bridge::read_managed_display_spaces_for_displays(self.main_cid, &displays)
+                .inspect_err(|err| warn!("unable to read managed display spaces: {err}"))
+        else {
+            return true;
+        };
+        displays
+            .into_iter()
+            .any(|id| census.display(id).is_none_or(|d| d.spaces.is_empty()))
     }
 
     fn quit(&self) -> Result<()> {

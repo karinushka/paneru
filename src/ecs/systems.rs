@@ -691,6 +691,7 @@ pub(super) fn timeout_ticker(
 pub(super) fn retry_front_switch(
     retries: Populated<(Entity, &RetryFrontSwitch)>,
     applications: Query<&Application>,
+    mut confirmed_focus: Option<ResMut<crate::ecs::triggers::ConfirmedAppFocus>>,
     mut commands: Commands,
 ) {
     for (entity, retry) in retries.iter() {
@@ -711,6 +712,9 @@ pub(super) fn retry_front_switch(
         }
         if let Ok(focused_id) = app.focused_window_id() {
             debug!("Front switch retry succeeded for window {focused_id}.");
+            if let Some(confirmed) = confirmed_focus.as_mut() {
+                confirmed.record(retry.0, focused_id);
+            }
             commands.trigger(SendMessageTrigger(Event::WindowFocused {
                 window_id: focused_id,
             }));

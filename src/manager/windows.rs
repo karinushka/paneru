@@ -15,10 +15,10 @@ use objc2_core_foundation::{
     kCFBooleanFalse, kCFBooleanTrue,
 };
 use objc2_core_graphics::CGError;
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use stdext::function_name;
@@ -39,6 +39,146 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 /// The registry lock only looks up per-app locks; AX calls never hold it.
 static ENHANCED_UI_STATES: LazyLock<Mutex<HashMap<Pid, Arc<Mutex<EnhancedUiState>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Dedicated background worker for `kAXRaiseAction` IPCs so raising windows
+/// never blocks the main thread or `CGEventTap` behind a slow target app.
+static AX_RAISE_WORKER: LazyLock<AxRaiseWorker> = LazyLock::new(AxRaiseWorker::spawn);
+
+/// Maximum number of pending ordered raises (`raise_without_focus`) retained
+/// if a target application hangs while the user switches workspaces repeatedly.
+const MAX_ORDERED_RAISES: usize = 32;
+
+enum RaiseItem<T> {
+    Ordered(T),
+    Focus(T),
+}
+
+/// Queue feeding [`AxRaiseWorker`]:
+/// - Ordered raises (`raise_without_focus`) preserve FIFO z-order (bounded by
+///   [`MAX_ORDERED_RAISES`], dropping oldest ordered entries if saturated).
+/// - Focus raises (`focus_with_raise`) are latest-wins: a newer focus raise
+///   replaces any unstarted focus raise and appends at the back so it finishes
+///   above any preceding ordered raises.
+struct RaiseQueue<T> {
+    items: VecDeque<RaiseItem<T>>,
+}
+
+impl<T> Default for RaiseQueue<T> {
+    fn default() -> Self {
+        Self {
+            items: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> RaiseQueue<T> {
+    fn push_ordered(&mut self, item: T) {
+        let ordered_count = self
+            .items
+            .iter()
+            .filter(|existing| matches!(existing, RaiseItem::Ordered(_)))
+            .count();
+        if ordered_count >= MAX_ORDERED_RAISES
+            && let Some(oldest) = self
+                .items
+                .iter()
+                .position(|existing| matches!(existing, RaiseItem::Ordered(_)))
+        {
+            self.items.remove(oldest);
+        }
+        self.items.push_back(RaiseItem::Ordered(item));
+    }
+
+    fn push_focus(&mut self, item: T) {
+        self.items
+            .retain(|existing| !matches!(existing, RaiseItem::Focus(_)));
+        self.items.push_back(RaiseItem::Focus(item));
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.items.pop_front().map(|item| match item {
+            RaiseItem::Ordered(value) | RaiseItem::Focus(value) => value,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+type RaiseWorkerState = (Mutex<RaiseQueue<CFRetained<AXUIWrapper>>>, Condvar);
+
+struct AxRaiseWorker {
+    state: Option<Arc<RaiseWorkerState>>,
+}
+
+impl AxRaiseWorker {
+    fn spawn() -> Self {
+        let state = Arc::new((Mutex::new(RaiseQueue::default()), Condvar::new()));
+        let worker_state = Arc::clone(&state);
+        match thread::Builder::new()
+            .name("paneru-ax-raise".to_string())
+            .spawn(move || Self::run(&worker_state))
+        {
+            Ok(_) => Self { state: Some(state) },
+            Err(err) => {
+                warn!("failed to spawn paneru-ax-raise worker; raising synchronously: {err}");
+                Self { state: None }
+            }
+        }
+    }
+
+    fn run(state: &RaiseWorkerState) {
+        let (lock, condvar) = state;
+        loop {
+            let element = {
+                let mut queue = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while queue.is_empty() {
+                    queue = condvar
+                        .wait(queue)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                queue.pop()
+            };
+            if let Some(element) = element {
+                objc2::rc::autoreleasepool(|_| perform_ax_raise(&element));
+            }
+        }
+    }
+
+    fn enqueue_focus(&self, element: CFRetained<AXUIWrapper>) {
+        let Some(state) = self.state.as_ref() else {
+            perform_ax_raise(&element);
+            return;
+        };
+        let (lock, condvar) = &**state;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.push_focus(element);
+        condvar.notify_one();
+    }
+
+    fn enqueue_ordered(&self, element: CFRetained<AXUIWrapper>) {
+        let Some(state) = self.state.as_ref() else {
+            perform_ax_raise(&element);
+            return;
+        };
+        let (lock, condvar) = &**state;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.push_ordered(element);
+        condvar.notify_one();
+    }
+}
+
+fn perform_ax_raise(element: &AXUIWrapper) {
+    let action = CFString::from_static_str(kAXRaiseAction);
+    unsafe { AXUIElementPerformAction(element.as_ptr(), &action) };
+}
 
 /// How long `AXEnhancedUserInterface` stays disabled after an app's last window
 /// operation. An animation writes every frame; restoring the flag between
@@ -1230,6 +1370,11 @@ impl WindowApi for WindowOS {
     }
 
     /// Focuses the window and raises it to the front.
+    ///
+    /// `SkyLight` front/key activation stays synchronous on the main thread so
+    /// keyboard routing switches immediately; the cross-process `kAXRaiseAction`
+    /// IPC is dispatched to [`AX_RAISE_WORKER`] (latest-wins) so slow target
+    /// apps cannot stall the main loop or `CGEventTap`.
     #[instrument(level = Level::DEBUG)]
     fn focus_with_raise(&self, psn: ProcessSerialNumber) {
         let window_id = self.id();
@@ -1237,16 +1382,12 @@ impl WindowApi for WindowOS {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
         }
         self.make_key_window(&psn);
-        let element_ref = self.ax_element.as_ptr();
-        let action = CFString::from_static_str(kAXRaiseAction);
-        unsafe { AXUIElementPerformAction(element_ref, &action) };
+        AX_RAISE_WORKER.enqueue_focus(self.ax_element.clone());
     }
 
     #[instrument(level = Level::DEBUG)]
     fn raise_without_focus(&self) {
-        let element_ref = self.ax_element.as_ptr();
-        let action = CFString::from_static_str(kAXRaiseAction);
-        unsafe { AXUIElementPerformAction(element_ref, &action) };
+        AX_RAISE_WORKER.enqueue_ordered(self.ax_element.clone());
     }
 
     fn pid(&self) -> Result<Pid> {
@@ -2010,5 +2151,43 @@ mod tests {
 
         let inf_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f64::INFINITY, 600.0));
         assert_eq!(valid_sls_bounds(CGError::Success, inf_size), None);
+    }
+
+    #[test]
+    fn raise_queue_focus_supersedes_earlier_focus_and_preserves_ordered_z_order() {
+        let mut queue = RaiseQueue::default();
+
+        // Rapid focus raises coalesce to the latest target.
+        queue.push_focus(10);
+        queue.push_focus(20);
+        queue.push_focus(30);
+        assert_eq!(queue.pop(), Some(30));
+        assert_eq!(queue.pop(), None);
+
+        // Ordered raises stay FIFO, and a trailing focus raise finishes on top
+        // while superseding any earlier queued focus raise.
+        queue.push_ordered(1);
+        queue.push_focus(10);
+        queue.push_ordered(2);
+        queue.push_focus(20);
+        assert_eq!(queue.pop(), Some(1));
+        assert_eq!(queue.pop(), Some(2));
+        assert_eq!(queue.pop(), Some(20));
+        assert_eq!(queue.pop(), None);
+
+        // Saturated ordered raises drop oldest ordered entries without dropping
+        // the pending focus raise.
+        queue.push_focus(999);
+        for id in 0..(MAX_ORDERED_RAISES + 5) {
+            queue.push_ordered(id);
+        }
+        let mut drained = Vec::new();
+        while let Some(item) = queue.pop() {
+            drained.push(item);
+        }
+        assert_eq!(drained.len(), MAX_ORDERED_RAISES + 1);
+        assert_eq!(drained[0], 999);
+        assert_eq!(drained[1], 5);
+        assert_eq!(*drained.last().unwrap(), MAX_ORDERED_RAISES + 4);
     }
 }

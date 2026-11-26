@@ -1420,13 +1420,13 @@ pub(super) fn apply_window_defaults(
             let new_width = round_px(display_width * width);
             let height = window.frame().height();
             window.resize(Size::new(new_width, height));
-            // Re-read the actual OS size: the app may enforce a minimum width
-            // that differs from our request.
-            if let Ok(frame) = window.update_frame().inspect_err(|err| error!("{err}")) {
-                position.0 = frame.min;
-                bounds.bypass_change_detection().0 = frame.size();
-                width_ratio.0 = f64::from(frame.width()) / display_width;
-            }
+            // `WindowOS::resize` already reads back the post-clamp AX frame
+            // (including any app-enforced minimum width), so reuse `window.frame()`
+            // instead of issuing another IPC or racing WindowServer bounds.
+            let frame = window.frame();
+            position.0 = frame.min;
+            bounds.bypass_change_detection().0 = frame.size();
+            width_ratio.0 = f64::from(frame.width()) / display_width;
         }
     }
 }

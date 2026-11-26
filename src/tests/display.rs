@@ -4013,6 +4013,87 @@ fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordere
     harness.advance(Duration::from_secs(2));
 }
 
+/// Live windows on an inactive native macOS Space (both managed strip windows
+/// and floating windows) report `SLSWindowIsOrderedIn == 0`. The 1 Hz
+/// `cleanup_unordered_windows` sweep must skip them without calling
+/// `present_displays()` or probing AX `is_alive()`, while still sweeping dead
+/// unordered windows on the active native Space (including parked virtual
+/// workspaces) and dead floating windows that have left all Spaces.
+#[test]
+fn test_cleanup_unordered_windows_skips_inactive_native_space_windows() {
+    use crate::ecs::Unmanaged;
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    let inactive_space = TEST_WORKSPACE_ID + 1;
+    let mut harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, inactive_space, |_| {})
+        .with_workspace_window(30, inactive_space, |_| {});
+    harness
+        .mock_state
+        .add_space_on_display(TEST_DISPLAY_ID, inactive_space, false);
+    harness.run(vec![
+        Event::MenuOpened { window_id: 10 },
+        Event::DisplayChanged,
+    ]);
+    harness.advance(Duration::from_millis(100));
+
+    // Mark window 30 (on the inactive native Space) as floating (`Unmanaged::Floating`).
+    {
+        let world = harness.world();
+        let floating_entity = find_window_entity(30, world);
+        world
+            .entity_mut(floating_entity)
+            .insert(Unmanaged::Floating);
+        let mut strips = world.query::<&mut LayoutStrip>();
+        for mut strip in strips.iter_mut(world) {
+            strip.remove(floating_entity);
+        }
+    }
+
+    // Both windows on the inactive native Space report unordered while alive.
+    // Neither `present_displays()` nor a destroy event may be triggered.
+    {
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().returning(|| false);
+        wm.expect_window_is_unordered()
+            .returning(|id| id == 20 || id == 30);
+        wm.expect_present_displays().never();
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+    }
+    harness.advance(Duration::from_secs(2));
+
+    {
+        let world = harness.world();
+        assert_on_workspace!(world, 10, TEST_WORKSPACE_ID);
+        assert_on_workspace!(world, 20, inactive_space);
+        assert!(
+            world.query::<&Window>().iter(world).any(|w| w.id() == 30),
+            "live floating window on inactive Space must survive"
+        );
+    }
+
+    // Restore default mock WindowManager, then close floating window 30 silently
+    // (removing it from WindowServer without emitting WindowDestroyed). Because
+    // `spaces_for_window(30)` is now empty, the sweep must reap it.
+    let restored_wm = harness.mock_state.create_window_manager();
+    harness
+        .world()
+        .insert_resource(WindowManager(Box::new(restored_wm)));
+    harness.mock_state.os_vanish_window(30);
+    harness.advance(Duration::from_secs(2));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 30),
+        "dead floating window no longer on any Space must be reaped"
+    );
+    assert_on_workspace!(harness.world(), 20, inactive_space);
+}
+
 /// Stripping `RunFixedMainLoop` and `SpawnScene` from `MainScheduleOrder` must
 /// keep `Messages<Event>` double-buffering active on every frame (via
 /// `ShouldUpdateMessages::Always`) so events do not accumulate unboundedly.

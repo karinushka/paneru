@@ -41,6 +41,10 @@ type Strips<'w, 's> = Query<
     Without<Window>,
 >;
 
+/// A nonempty batch needs a state check after the layout systems run.
+#[derive(bevy::ecs::message::Message)]
+pub(crate) struct LayoutOpsProcessed;
+
 /// Applies the layout operations a Lua handler returned.
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
@@ -49,16 +53,22 @@ pub(crate) fn apply_layout_ops(
     displays: Query<(&Display, Option<&DockPosition>)>,
     config: Res<Config>,
     mut commands: Commands,
+    mut processed: bevy::ecs::message::MessageWriter<LayoutOpsProcessed>,
 ) {
     let batches: Vec<Vec<LayoutOp>> = messages
         .read()
         .filter_map(|message| match message {
             Event::Command {
                 command: Command::Layout(ops),
-            } => Some(ops.clone()),
+            } if !ops.is_empty() => Some(ops.clone()),
             _ => None,
         })
         .collect();
+    if batches.is_empty() {
+        return;
+    }
+    // The consumer runs in PostUpdate, after this batch and layout have run.
+    processed.write(LayoutOpsProcessed);
 
     for ops in batches {
         // `Unmanaged` inserts don't take effect until commands flush, so track

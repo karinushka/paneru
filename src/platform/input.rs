@@ -124,9 +124,13 @@ fn drag_input(
     }
 }
 
-/// How long to suppress scroll wheel events after a vertical swipe gesture,
+/// How long to suppress scroll wheel events after a swipe gesture,
 /// covering macOS momentum scroll that continues after finger lift.
 const VERTICAL_GESTURE_SCROLL_SUPPRESS: Duration = Duration::from_millis(1200);
+
+/// Hard upper bound for carrying an already-active momentum coast past
+/// `VERTICAL_GESTURE_SCROLL_SUPPRESS` in case macOS never sends `End`.
+const GESTURE_MOMENTUM_MAX_SUPPRESS: Duration = Duration::from_millis(2500);
 
 /// Fingers of a 4-finger touch land a few tens of milliseconds apart, so a
 /// touch passes through three fingers first. Strip and row swipes from this
@@ -136,6 +140,37 @@ const LANDING_GRACE_SECS: f64 = 0.08;
 
 /// `kCGScrollPhaseBegan`: the first event of a trackpad scroll.
 const SCROLL_PHASE_BEGAN: i64 = 1;
+
+/// `kCGMomentumScrollPhaseEnd`: the final event of a macOS momentum coast.
+const MOMENTUM_PHASE_END: i64 = 3;
+
+/// Whether a `ScrollWheel` event belongs to a recent swipe gesture (or its
+/// continuing momentum tail) and should be dropped.
+fn should_suppress_swipe_scroll(
+    last_swipe_time: Option<Instant>,
+    suppressing_momentum: &mut bool,
+    scroll_phase: i64,
+    momentum: i64,
+    now: Instant,
+) -> bool {
+    let elapsed = last_swipe_time.map(|t| now.saturating_duration_since(t));
+    if elapsed.is_some_and(|e| e < VERTICAL_GESTURE_SCROLL_SUPPRESS) {
+        *suppressing_momentum = momentum != 0 && momentum != MOMENTUM_PHASE_END;
+        return true;
+    }
+    if *suppressing_momentum {
+        let within_tail = elapsed.is_some_and(|e| e < GESTURE_MOMENTUM_MAX_SUPPRESS);
+        if within_tail && scroll_phase == 0 && momentum != 0 {
+            if momentum == MOMENTUM_PHASE_END {
+                *suppressing_momentum = false;
+            }
+            return true;
+        }
+        // A fresh user scroll, non-momentum wheel tick, or tail cap ended it.
+        *suppressing_momentum = false;
+    }
+    false
+}
 
 /// Limit repeated wheel inputs while the next window moves into view.
 const WINDOW_SCROLL_INTERVAL: Duration = Duration::from_millis(180);
@@ -325,6 +360,9 @@ pub(super) struct InputHandler {
     /// are suppressed for a short window after this to prevent the OS from
     /// scrolling windows underneath (including momentum scroll after finger lift).
     last_swipe_time: Option<Instant>,
+    /// Whether a macOS momentum coast started inside `VERTICAL_GESTURE_SCROLL_SUPPRESS`
+    /// and should keep being dropped until `MOMENTUM_PHASE_END` or a fresh scroll.
+    suppressing_momentum: bool,
     /// Whether the overview may take the current trackpad scroll stream:
     /// only one that began after the overview's touch was over. Scrolls
     /// from the overview's own fingers lifting, and their momentum, are
@@ -370,6 +408,7 @@ impl InputHandler {
             tap_port: None,
             run_loop_source: None,
             last_swipe_time: None,
+            suppressing_momentum: false,
             overview_scroll_live: false,
             finger_landed_at: None,
             held_swipes: Vec::new(),
@@ -660,12 +699,13 @@ impl InputHandler {
 
     /// Use the configured modifier to scroll the strip or select an adjacent window.
     fn handle_scroll_wheel(&mut self, event: &CGEvent) -> bool {
+        let int = |f| CGEvent::integer_value_field(Some(event), f);
+        let scroll_phase = int(CGEventField::ScrollWheelEventScrollPhase);
+        let momentum = int(CGEventField::ScrollWheelEventMomentumPhase);
+
         // The open overview owns every scroll: it pans and scrolls its
         // strips, and nothing should reach the windows behind it.
         if crate::overview::OVERVIEW_OPEN.load(std::sync::atomic::Ordering::Relaxed) {
-            let int = |f| CGEvent::integer_value_field(Some(event), f);
-            let scroll_phase = int(CGEventField::ScrollWheelEventScrollPhase);
-            let momentum = int(CGEventField::ScrollWheelEventMomentumPhase);
             if self.overview_tracking {
                 // The overview's fingers are (partly) still down.
                 self.overview_scroll_live = false;
@@ -681,10 +721,7 @@ impl InputHandler {
             }
             if let Some(events) = &self.events {
                 let field = |f| CGEvent::double_value_field(Some(event), f);
-                let precise = CGEvent::integer_value_field(
-                    Some(event),
-                    CGEventField::ScrollWheelEventIsContinuous,
-                ) != 0;
+                let precise = int(CGEventField::ScrollWheelEventIsContinuous) != 0;
                 // Trackpads report points; wheels report lines.
                 let (dx, dy) = if precise {
                     (
@@ -707,11 +744,14 @@ impl InputHandler {
         }
         // Suppress scroll events shortly after a swipe gesture to prevent
         // the OS from scrolling windows underneath, including momentum scroll events
-        // that arrive after finger lift.
-        if self
-            .last_swipe_time
-            .is_some_and(|t| t.elapsed() < VERTICAL_GESTURE_SCROLL_SUPPRESS)
-        {
+        // that arrive after finger lift (and tails that outlive the fixed window).
+        if should_suppress_swipe_scroll(
+            self.last_swipe_time,
+            &mut self.suppressing_momentum,
+            scroll_phase,
+            momentum,
+            Instant::now(),
+        ) {
             return true;
         }
 
@@ -761,10 +801,6 @@ impl InputHandler {
             if delta.abs() > 0.001 {
                 if self.config.swipe_scroll_window_step() {
                     let direction = scroll_step_direction(&self.config, delta);
-                    let momentum = CGEvent::integer_value_field(
-                        Some(event),
-                        CGEventField::ScrollWheelEventMomentumPhase,
-                    );
                     if accept_window_scroll(
                         &mut self.last_window_scroll,
                         &direction,
@@ -788,6 +824,11 @@ impl InputHandler {
     /// just landed and an overview gesture with more fingers may still be
     /// arriving (see [`LANDING_GRACE_SECS`]).
     fn send_swipe(&mut self, event: Event, configured_fingers: usize, timestamp: f64) {
+        // Arm scroll suppression even while holding swipes in the landing
+        // grace: macOS synthesizes horizontal `ScrollWheel` events alongside
+        // 3-finger motion immediately, and leaving `last_swipe_time` unset
+        // during the 80 ms grace lets a full swipe leak to the browser.
+        self.last_swipe_time = Some(Instant::now());
         let may_escalate_to_overview = self
             .config
             .overview_gesture_fingers()
@@ -799,7 +840,6 @@ impl InputHandler {
         self.flush_held_swipes();
         if let Some(events) = &self.events {
             _ = events.send(event);
-            self.last_swipe_time = Some(Instant::now());
         }
     }
 
@@ -928,6 +968,9 @@ impl InputHandler {
             if self.overview_tracking
                 && let Some(intercept) = self.overview_sample(&fingers, overview_fingers, timestamp)
             {
+                if intercept && !fingers.is_empty() {
+                    self.last_swipe_time = Some(Instant::now());
+                }
                 return intercept;
             }
             let overview = overview_fingers == Some(fingers.len())
@@ -941,6 +984,7 @@ impl InputHandler {
                 self.overview_touches = fingers.iter().map(|f| f.identity.clone()).collect();
                 self.previous_touches = fingers;
                 self.last_swipe_sample_timestamp = Some(timestamp);
+                self.last_swipe_time = Some(Instant::now());
                 // Swipes from the first fingers to land were the overview's.
                 self.held_swipes.clear();
                 self.overview_scroll_live = false;
@@ -951,14 +995,23 @@ impl InputHandler {
             }
             if !overview && !gesture_should_intercept(configured_fingers, fingers.len()) {
                 // AppKit interleaves phase events with an empty touch set
-                // between usable samples. They do not mean the fingers lifted.
-                // That's why empty finger counts don't trigger a reset.
+                // between usable samples. They do not mean the fingers lifted;
+                // swallow them while a swipe is active so macOS does not see
+                // stray gesture phases mid-swipe.
+                if should_intercept_empty_gesture(fingers.len(), self.previous_touches.len()) {
+                    return true;
+                }
                 if should_reset_swipe_samples(fingers.len(), self.previous_touches.len()) {
                     self.previous_touches.clear();
                     self.last_swipe_sample_timestamp = None;
                 }
                 return false;
             }
+            // Arm scroll suppression immediately on configured multi-finger
+            // contact (including `TouchpadDown` and sub-threshold frames) so
+            // macOS-synthesized `ScrollWheel` events cannot sneak through
+            // before the first dispatched swipe sample.
+            self.last_swipe_time = Some(Instant::now());
             if fingers.iter().any(|finger| finger.began) {
                 self.finger_landed_at = Some(timestamp);
                 self.invalid_device_size_warned = false;
@@ -1101,6 +1154,10 @@ fn gesture_should_intercept(configured_fingers: Option<usize>, actual_fingers: u
 
 fn should_reset_swipe_samples(actual_fingers: usize, previous_fingers: usize) -> bool {
     actual_fingers != 0 && actual_fingers != previous_fingers
+}
+
+fn should_intercept_empty_gesture(actual_fingers: usize, previous_fingers: usize) -> bool {
+    actual_fingers == 0 && previous_fingers > 0
 }
 
 // Remote mouse tools can send group flags without left or right flags.
@@ -1852,6 +1909,10 @@ mod tests {
         );
         assert_eq!(handler.held_swipes.len(), 1);
         assert!(receiver.try_recv().is_err());
+        assert!(
+            handler.last_swipe_time.is_some(),
+            "swipes held during overview landing grace must still arm scroll suppression"
+        );
 
         handler.dispatch_swipe_movement(
             Some(SwipeMovement::Horizontal {
@@ -1871,6 +1932,97 @@ mod tests {
             receiver.try_recv(),
             Ok(Event::Swipe { delta, .. }) if (delta - 0.02).abs() < 1e-12
         ));
+    }
+
+    #[test]
+    fn scroll_suppression_carries_momentum_tail_past_fixed_window() {
+        let swipe_at = Instant::now();
+        let mut suppressing_momentum = false;
+
+        // During the swipe itself: Began/Changed/Ended are suppressed, no momentum yet.
+        assert!(should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            SCROLL_PHASE_BEGAN,
+            0,
+            swipe_at + Duration::from_millis(50),
+        ));
+        assert!(!suppressing_momentum);
+
+        // Momentum starts inside the fixed window -> tail flag arms.
+        assert!(should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            0,
+            1,
+            swipe_at + Duration::from_millis(200),
+        ));
+        assert!(suppressing_momentum);
+
+        // Momentum still coasting past 1200ms -> stays suppressed.
+        assert!(should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            0,
+            2,
+            swipe_at + Duration::from_millis(1250),
+        ));
+        assert!(suppressing_momentum);
+
+        // Momentum End is suppressed and clears the tail flag.
+        assert!(should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            0,
+            MOMENTUM_PHASE_END,
+            swipe_at + Duration::from_millis(1265),
+        ));
+        assert!(!suppressing_momentum);
+
+        // Next scroll passes straight through.
+        assert!(!should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            SCROLL_PHASE_BEGAN,
+            0,
+            swipe_at + Duration::from_millis(1300),
+        ));
+    }
+
+    #[test]
+    fn deliberate_scroll_interrupts_momentum_tail_and_cap_bounds_stale_flag() {
+        let swipe_at = Instant::now();
+        let mut suppressing_momentum = true;
+
+        // A fresh user trackpad scroll (scroll_phase != 0) past 1200ms passes
+        // immediately and clears the momentum tail flag.
+        assert!(!should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            SCROLL_PHASE_BEGAN,
+            0,
+            swipe_at + Duration::from_millis(1250),
+        ));
+        assert!(!suppressing_momentum);
+
+        // Even if macOS never delivers MomentumPhase::End, the hard upper bound
+        // stops suppressing momentum past GESTURE_MOMENTUM_MAX_SUPPRESS.
+        suppressing_momentum = true;
+        assert!(!should_suppress_swipe_scroll(
+            Some(swipe_at),
+            &mut suppressing_momentum,
+            0,
+            2,
+            swipe_at + GESTURE_MOMENTUM_MAX_SUPPRESS,
+        ));
+        assert!(!suppressing_momentum);
+    }
+
+    #[test]
+    fn empty_gesture_event_intercepted_only_during_active_swipe() {
+        assert!(should_intercept_empty_gesture(0, 3));
+        assert!(!should_intercept_empty_gesture(0, 0));
+        assert!(!should_intercept_empty_gesture(2, 3));
     }
 
     #[test]

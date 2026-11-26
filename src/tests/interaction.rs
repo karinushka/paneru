@@ -5895,8 +5895,6 @@ fn test_center_mid_switch_keeps_strip_height() {
     // Switch to it, and center a couple of frames into the slide.
     send(&mut h, Operation::VirtualNumber(1));
     settle(&mut h, 2);
-    send(&mut h, Operation::Center);
-    settle(&mut h, 300);
 
     let shown: Vec<WinID> = {
         let world = h.app.world_mut();
@@ -5917,10 +5915,138 @@ fn test_center_mid_switch_keeps_strip_height() {
     );
     for (id, y) in heights(&mut h) {
         if shown.contains(&id) {
+            assert!(
+                y > top,
+                "test setup: window {id} must still be mid-slide before Center (y={y}, top={top})"
+            );
+        }
+    }
+
+    send(&mut h, Operation::Center);
+    settle(&mut h, 300);
+
+    for (id, y) in heights(&mut h) {
+        if shown.contains(&id) {
             assert_eq!(
                 y, top,
                 "window {id} must end at the top of the display, not at {y}"
             );
         }
     }
+
+    let focused_frame = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Window, With<FocusedMarker>>();
+        q.single(world)
+            .expect("focused window should exist after centering")
+            .frame()
+    };
+    let expected_x = TEST_DISPLAY_WIDTH / 2 - focused_frame.width() / 2;
+    assert_eq!(
+        focused_frame.min.x, expected_x,
+        "focused window must end horizontally centered (got x={}, expected {expected_x})",
+        focused_frame.min.x
+    );
+}
+
+/// `window snap` must only move the strip sideways. If a stacked window is
+/// vertically displaced (e.g. nudged by macOS/the app), clamping its shorter
+/// frame into the viewport keeps that displaced y and drags the whole strip
+/// down unless `snap_strip_position` preserves the strip's target y.
+#[test]
+fn test_snap_keeps_strip_height_for_shorter_window() {
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(true),
+            auto_center: Some(false),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    let settle = |h: &mut TestHarness, frames: usize| {
+        for _ in 0..frames {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let send_op = |h: &mut TestHarness, op: Operation| {
+        h.app.world_mut().write_message::<Event>(Event::Command {
+            command: Command::Window(op),
+        });
+    };
+    let window_frame = |h: &mut TestHarness, id: WinID| {
+        let world = h.app.world_mut();
+        let mut q = world.query::<&Window>();
+        q.iter(world)
+            .find(|w| w.id() == id)
+            .expect("window should exist")
+            .frame()
+    };
+
+    settle(&mut h, 8);
+    let top = window_frame(&mut h, 0).min.y;
+
+    // Stack windows 0 and 1, then focus the top window (id 0).
+    send_op(&mut h, Operation::Focus(Direction::East));
+    settle(&mut h, 8);
+    send_op(&mut h, Operation::Stack(true));
+    settle(&mut h, 8);
+    send_op(&mut h, Operation::Focus(Direction::North));
+    settle(&mut h, 8);
+
+    // Swipe partially left so the stacked column overhangs the left edge.
+    let world = h.app.world_mut();
+    world.write_message::<Event>(Event::TouchpadDown);
+    world.write_message::<Event>(Event::Swipe {
+        delta: 0.1,
+        fingers: 3,
+        distance_cm: 0.0,
+        elapsed_secs: None,
+    });
+    settle(&mut h, 4);
+    h.app.world_mut().write_message::<Event>(Event::TouchpadUp);
+    settle(&mut h, 8);
+
+    let clipped = window_frame(&mut h, 0);
+    assert!(
+        clipped.min.x < 0,
+        "test setup: window 0 must overhang the left edge before Snap (x={})",
+        clipped.min.x
+    );
+
+    // Simulate the OS/app nudging the shorter stacked window downward.
+    h.mock_state
+        .os_move_window(0, Origin::new(clipped.min.x, top + 100));
+    settle(&mut h, 4);
+
+    // Snap must pull the strip back horizontally without lowering its y.
+    send_op(&mut h, Operation::Snap);
+    settle(&mut h, 10);
+
+    let strip_y = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
+        q.single(world).expect("active strip").0.y
+    };
+    assert_eq!(
+        strip_y, top,
+        "strip must keep y={top} after Snap, not drop to {strip_y}"
+    );
+    assert_eq!(
+        window_frame(&mut h, 0).min.x,
+        0,
+        "snapped window 0 must align with the left viewport edge"
+    );
+    assert_eq!(
+        window_frame(&mut h, 2).min.y,
+        top,
+        "sibling column must remain aligned at top={top}"
+    );
 }

@@ -107,6 +107,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     // Registered here (not with the Lua systems) and in every build: an IPC
     // client's `Request::WindowSetApply` needs no embedded interpreter, and the
     // mock harness exercises it without one.
+    app.add_message::<crate::ecs::layout_ops::LayoutOpsProcessed>();
     app.add_systems(
         PreUpdate,
         crate::ecs::layout_ops::apply_layout_ops.in_set(crate::ecs::PreUpdateSet::Dispatch),
@@ -1054,6 +1055,7 @@ fn resize_window(
     active_display: ActiveDisplay,
     config: Res<Config>,
     mut commands: Commands,
+    mut layout_ops_processed: MessageWriter<crate::ecs::layout_ops::LayoutOpsProcessed>,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
         matches!(
@@ -1138,6 +1140,9 @@ fn resize_window(
 
     commands.resize_entity(entity, size);
     commands.reshuffle_around(entity);
+    if matches!(operation, Operation::SetWidth(_)) {
+        layout_ops_processed.write(crate::ecs::layout_ops::LayoutOpsProcessed);
+    }
 }
 
 /// One step from `ratio` in `direction`, kept between `min_ratio` and the full

@@ -606,6 +606,34 @@ pub enum Unmanaged {
 #[derive(Component, Debug)]
 pub struct FloatsWhenRestored;
 
+/// Attached to a window whose `Event::WindowDestroyed` was deferred while the
+/// screen was locked or displays were unsettled. Once unlocked and settled,
+/// `cleanup_unordered_windows` verifies liveness with a bounded attempt budget
+/// so floating, minimized/hidden, and native-tabbed windows that genuinely
+/// closed during the transition are still reaped without continuous AX polling.
+#[derive(Component, Debug)]
+pub struct PendingDestroyCheck {
+    remaining_checks: u8,
+}
+
+impl PendingDestroyCheck {
+    const MAX_CHECKS: u8 = 3;
+
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            remaining_checks: Self::MAX_CHECKS,
+        }
+    }
+
+    /// Consumes one post-settle liveness check and returns `true` when the
+    /// budget is exhausted and the marker should be removed.
+    pub fn consume_attempt(&mut self) -> bool {
+        self.remaining_checks = self.remaining_checks.saturating_sub(1);
+        self.remaining_checks == 0
+    }
+}
+
 /// The window a window was opened from, as the column to its right. Closing
 /// it before focus moves to another column hands focus back there.
 #[derive(Clone, Component, Copy, Debug)]

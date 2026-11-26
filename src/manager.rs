@@ -219,6 +219,25 @@ pub trait WindowManagerApi: Send + Sync {
 #[derive(Deref, DerefMut, Resource)]
 pub struct WindowManager(pub Box<dyn WindowManagerApi>);
 
+impl WindowManager {
+    /// Returns `true` when macOS reports no active displays or any display with
+    /// no spaces yet (e.g. mid-reconfiguration or lid-closed transition).
+    #[must_use]
+    pub fn displays_unsettled(&self) -> bool {
+        let present = self.0.present_displays();
+        present.is_empty() || present.iter().any(|(_, spaces)| spaces.is_empty())
+    }
+
+    /// Returns `true` while the macOS session is locked or display/space
+    /// topology has not settled (no active displays, or a display with no
+    /// spaces yet). Checks the cheap session lock flag before querying display
+    /// spaces.
+    #[must_use]
+    pub fn screen_locked_or_displays_unsettled(&self) -> bool {
+        self.0.screen_locked() || self.displays_unsettled()
+    }
+}
+
 /// `WindowManagerOS` is the macOS-specific implementation of the `WindowManagerApi` trait.
 /// It directly interacts with the macOS `SkyLight` and Accessibility APIs to manage windows.
 pub struct WindowManagerOS {

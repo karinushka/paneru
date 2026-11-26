@@ -3738,3 +3738,277 @@ fn test_window_closed_while_screen_locked_is_swept_after_unlock() {
         "window 1 should be despawned after unlock"
     );
 }
+
+/// A floating window (`Unmanaged::Floating`, not in any `LayoutStrip`) that
+/// closes while the screen is locked must still be reaped once unlocked.
+#[test]
+fn test_floating_window_closed_while_screen_locked_is_swept_after_unlock() {
+    use crate::ecs::Unmanaged;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+    ]);
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            matches!(world.get::<Unmanaged>(entity), Some(Unmanaged::Floating)),
+            "test setup: window 1 must be floating"
+        );
+    }
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "floating window 1 stays while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "floating window 1 should be despawned after unlock"
+    );
+}
+
+/// A minimized window (excluded from the steady-state unordered sweep) whose
+/// destroy event is deferred while locked must still be reaped once unlocked.
+#[test]
+fn test_minimized_window_closed_while_screen_locked_is_swept_after_unlock() {
+    use crate::ecs::Unmanaged;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.os_minimize_window(1, true);
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            matches!(world.get::<Unmanaged>(entity), Some(Unmanaged::Minimized)),
+            "test setup: window 1 must be minimized"
+        );
+    }
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "minimized window 1 stays while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "minimized window 1 should be despawned after unlock"
+    );
+}
+
+/// While the screen is locked, `cleanup_unordered_windows` must stay idle rather
+/// than emitting a dropped `Event::WindowDestroyed` every second (which would
+/// spam Lua listeners and state broadcasts) or polling AX IPC.
+#[test]
+fn test_cleanup_unordered_windows_silent_while_screen_locked() {
+    #[derive(Resource, Default)]
+    struct DestroyCount(usize);
+
+    fn count_destroys(mut events: MessageReader<Event>, mut count: ResMut<DestroyCount>) {
+        for event in events.read() {
+            if matches!(event, Event::WindowDestroyed { .. }) {
+                count.0 += 1;
+            }
+        }
+    }
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.init_resource::<DestroyCount>();
+    harness.app.add_systems(PostUpdate, count_destroys);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    // Let the initial two OS close events flush through the bus.
+    harness.advance(Duration::from_millis(100));
+    harness.world().resource_mut::<DestroyCount>().0 = 0;
+
+    // Advance past several 1-second CLOSED_WINDOW_CHECK_FREQ ticks while locked.
+    harness.advance(Duration::from_secs(3));
+    assert_eq!(
+        harness.world().resource::<DestroyCount>().0,
+        0,
+        "cleanup_unordered_windows must not emit WindowDestroyed while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "window 1 should be despawned after unlock"
+    );
+}
+
+/// While any present display reports zero spaces (mid-reconfiguration), destroy
+/// notifications must be ignored so live windows survive, and the deferred
+/// liveness marker must expire cleanly once displays settle.
+#[test]
+fn test_window_destroyed_ignored_when_display_has_no_spaces() {
+    use crate::ecs::PendingDestroyCheck;
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![],
+    );
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            world.get::<PendingDestroyCheck>(entity).is_some(),
+            "suppressed destroy must attach PendingDestroyCheck while unsettled"
+        );
+    }
+
+    // Give the external display a space so topology settles.
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_secs(4));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    let entity = find_window_entity(1, world);
+    assert!(
+        world.get::<PendingDestroyCheck>(entity).is_none(),
+        "PendingDestroyCheck must expire cleanly on a live window once settled"
+    );
+}
+
+/// `window_destroyed_trigger` must short-circuit `present_displays()` when
+/// locked and evaluate the locked/unsettled guard at most once per tick across
+/// a burst of destroy events.
+#[test]
+fn test_window_destroyed_short_circuits_and_caches_display_check() {
+    use crate::events::DestroySource;
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    // Case 1: locked — `present_displays()` is never called, and `screen_locked()`
+    // is checked once for the whole burst.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(100));
+
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().times(1).returning(|| true);
+        wm.expect_present_displays().never();
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+        for window_id in [0, 1] {
+            harness.world().write_message(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            });
+        }
+        harness.app.update();
+    }
+
+    // Case 2: unlocked with unsettled displays — both `screen_locked()` and
+    // `present_displays()` are called once for the whole burst.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(100));
+
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().times(1).returning(|| false);
+        wm.expect_present_displays().times(1).returning(Vec::new);
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+        for window_id in [0, 1] {
+            harness.world().write_message(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            });
+        }
+        harness.app.update();
+    }
+}
+
+/// In steady state (unlocked, all windows ordered in, no deferred destroys),
+/// the 1 Hz `cleanup_unordered_windows` timer must not query `present_displays()`
+/// (`SLSCopyManagedDisplaySpaces` + menubar height).
+#[test]
+fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordered() {
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(100));
+
+    let mut wm = MockWindowManagerApi::new();
+    wm.expect_screen_locked().returning(|| false);
+    wm.expect_window_is_unordered().returning(|_| false);
+    wm.expect_present_displays().never();
+    harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+    // Advance past two 1-second CLOSED_WINDOW_CHECK_FREQ ticks.
+    harness.advance(Duration::from_secs(2));
+}

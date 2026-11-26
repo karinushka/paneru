@@ -18,8 +18,9 @@ use tracing::{Level, debug, error, info, instrument, trace, warn};
 
 use super::{
     ActiveDisplayMarker, BProcess, FloatsWhenRestored, FocusedMarker, FreshMarker,
-    MissionControlActive, OpenedFrom, PreviousManagedStrip, Rejoin, RetryFrontSwitch,
-    SelectedVirtualMarker, SpawnWindowTrigger, StrayFocusEvent, SystemTheme, Timeout, Unmanaged,
+    MissionControlActive, OpenedFrom, PendingDestroyCheck, PreviousManagedStrip, Rejoin,
+    RetryFrontSwitch, SelectedVirtualMarker, SpawnWindowTrigger, StrayFocusEvent, SystemTheme,
+    Timeout, Unmanaged,
 };
 use crate::config::Config;
 use crate::ecs::focus::FocusHistory;
@@ -1096,6 +1097,8 @@ pub(super) fn window_destroyed_trigger(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
+    let mut destroy_suppressed: Option<bool> = None;
+
     for event in messages.read() {
         let Event::WindowDestroyed { window_id, source } = &event else {
             continue;
@@ -1109,16 +1112,18 @@ pub(super) fn window_destroyed_trigger(
         // While the screen is locked, or while macOS reports no displays or a
         // display with no spaces yet, display reconfiguration moves windows across
         // spaces and emits destroy events for windows that are still alive. Keep
-        // them here; `cleanup_unordered_windows` removes any window that actually
-        // closed once it is unordered and Accessibility marks it invalid.
-        let present = window_manager.present_displays();
-        if window_manager.screen_locked()
-            || present.is_empty()
-            || present.iter().any(|(_, spaces)| spaces.is_empty())
+        // them here and tag them with `PendingDestroyCheck` so
+        // `cleanup_unordered_windows` verifies liveness once unlocked and settled
+        // (including floating, minimized/hidden, and native-tabbed windows).
+        if *destroy_suppressed
+            .get_or_insert_with(|| window_manager.screen_locked_or_displays_unsettled())
         {
             debug!(
-                "Window {window_id} destroy ({source:?}) ignored while the screen is locked or displays are unsettled."
+                "Window {window_id} destroy ({source:?}) deferred while the screen is locked or displays are unsettled."
             );
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_insert(PendingDestroyCheck::new());
+            }
             continue;
         }
 

@@ -9,51 +9,41 @@
 
 use crate::types::windowset::LayoutOp;
 use bevy::ecs::entity::Entity;
-use bevy::ecs::hierarchy::ChildOf;
 use bevy::ecs::message::MessageReader;
-use bevy::ecs::query::{Has, Without};
+use bevy::ecs::query::With;
 use bevy::ecs::system::{Commands, Query, Res, SystemParam};
 use bevy::platform::collections::HashSet;
 use tracing::debug;
 
-use crate::commands::{Command, MoveFocus, Operation};
+use crate::commands::{Command, MoveFocus, Operation, schedule_cross_display_resize};
 use crate::config::Config;
 use crate::ecs::drag::ColumnInTransit;
-use crate::ecs::layout::{Column, DisplayViewports, LayoutStrip};
+use crate::ecs::layout::{
+    Column, DisplayViewports, PARKED_STRIP_SLIVER, RemovableStrips, compensate_left_removal,
+};
 use crate::ecs::params::Windows;
-use crate::ecs::workspace::VirtualMoveMarker;
+use crate::ecs::workspace::{PreviousStripPosition, VirtualMoveMarker};
 use crate::ecs::{
-    ActiveWorkspaceMarker, FullWidthMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged, Window,
+    FocusedMarker, FullWidthMarker, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor,
+    Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
 };
 use crate::events::Event;
 use crate::manager::{Origin, Size, WindowManager};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
 
-/// Every strip, whether it is the one on screen, and the display it is on.
-type Strips<'w, 's> = Query<
-    'w,
-    's,
-    (
-        &'static mut LayoutStrip,
-        Has<ActiveWorkspaceMarker>,
-        Option<&'static ChildOf>,
-        Entity,
-    ),
-    Without<Window>,
->;
-
 #[derive(SystemParam)]
 pub(crate) struct LayoutDisplays<'w, 's> {
     viewports: DisplayViewports<'w, 's>,
     window_manager: Res<'w, WindowManager>,
+    selected: Query<'w, 's, (), With<SelectedVirtualMarker>>,
 }
 
 /// Applies the layout operations a Lua handler returned.
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
     windows: Windows,
-    mut workspaces: Strips,
+    mut workspaces: RemovableStrips,
     displays: LayoutDisplays,
     config: Res<Config>,
     mut commands: Commands,
@@ -92,7 +82,7 @@ pub(crate) fn apply_layout_ops(
 fn apply(
     op: LayoutOp,
     windows: &Windows,
-    workspaces: &mut Strips,
+    workspaces: &mut RemovableStrips,
     displays: &LayoutDisplays,
     config: &Config,
     floated: &mut HashSet<Entity>,
@@ -124,13 +114,14 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: window {other} is gone");
                 return;
             };
-            let Some((mut strip, _, _, _)) = workspaces
+            let Some(mut item) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _, _)| strip.contains(entity) && strip.contains(other_entity))
+                .find(|item| item.strip.contains(entity) && item.strip.contains(other_entity))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
             };
+            let strip = &mut item.strip;
             let (Ok(left), Ok(right)) = (strip.index_of(entity), strip.index_of(other_entity))
             else {
                 return;
@@ -168,7 +159,9 @@ fn apply(
             ..
         } => {
             let entity = entity.expect("Place names a window");
-            if !floated.contains(&entity) {
+            let result = if floated.contains(&entity) {
+                Err("window was floated in this batch")
+            } else {
                 place_column(
                     entity,
                     (space, workspace, index),
@@ -177,7 +170,10 @@ fn apply(
                     displays,
                     config,
                     commands,
-                );
+                )
+            };
+            if let Err(reason) = result {
+                debug!(target: "paneru::lua", "skipping {op:?}: {reason}");
             }
         }
 
@@ -233,14 +229,12 @@ fn apply(
             // the display its strip is on. Storing a `WidthRatio` would not
             // do: nothing reacts to it, and the next bounds sync recomputes it
             // from the live frame.
-            let Some((strip, _, parent, _)) = workspaces
-                .iter()
-                .find(|(strip, _, _, _)| strip.contains(entity))
-            else {
+            let Some(item) = workspaces.iter().find(|item| item.strip.contains(entity)) else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the window is in no strip");
                 return;
             };
-            let Some(viewport) = parent
+            let Some(viewport) = item
+                .child_of
                 .and_then(|parent| displays.viewports.get(parent.parent()).ok())
                 .map(|(display, dock)| display.actual_display_bounds(dock, config))
             else {
@@ -249,6 +243,7 @@ fn apply(
             };
             let width = round_px(ratio * f64::from(viewport.width()));
             // Stacked siblings share a column, and so its width.
+            let strip = item.strip;
             let members: Vec<Entity> = strip
                 .index_of(entity)
                 .ok()
@@ -293,13 +288,14 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: window {onto} is gone");
                 return;
             };
-            let Some((mut strip, _, _, _)) = workspaces
+            let Some(mut item) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _, _)| strip.contains(entity) && strip.contains(onto_entity))
+                .find(|item| item.strip.contains(entity) && item.strip.contains(onto_entity))
             else {
                 debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
                 return;
             };
+            let strip = &mut item.strip;
             let (Ok(entity_index), Ok(onto_index)) =
                 (strip.index_of(entity), strip.index_of(onto_entity))
             else {
@@ -356,12 +352,13 @@ fn apply(
 
         LayoutOp::Unstack(_) => {
             let entity = entity.expect("Unstack names a window");
-            let Some((mut strip, _, _, _)) = workspaces
+            let Some(mut item) = workspaces
                 .iter_mut()
-                .find(|(strip, _, _, _)| strip.contains(entity))
+                .find(|item| item.strip.contains(entity))
             else {
                 return;
             };
+            let strip = &mut item.strip;
             if strip.unstack(entity).is_err() {
                 debug!(target: "paneru::lua", "skipping {op:?}: the window is not in a stack");
                 return;
@@ -372,120 +369,179 @@ fn apply(
 }
 
 /// Place a whole tiled column without switching displays or workspaces.
+#[allow(clippy::too_many_lines)]
 fn place_column(
     entity: Entity,
     (space, workspace, index): (WorkspaceId, u32, usize),
     windows: &Windows,
-    workspaces: &mut Strips,
+    workspaces: &mut RemovableStrips,
     displays: &LayoutDisplays,
     config: &Config,
     commands: &mut Commands,
-) {
-    let Some(workspace) = workspace.checked_sub(1) else {
-        return;
-    };
-    let Some((source, source_active, Some(source_display), source_id)) =
-        workspaces.iter().find(|(strip, ..)| strip.contains(entity))
-    else {
-        return;
-    };
-    let Some((target, _, Some(target_display), target_id)) = workspaces
+) -> Result<(), &'static str> {
+    let workspace = workspace
+        .checked_sub(1)
+        .ok_or("workspaces are numbered from 1")?;
+    let source = workspaces
         .iter()
-        .find(|(strip, ..)| strip.id() == space && strip.virtual_index == workspace)
-    else {
-        return;
-    };
-    if source.is_fullscreen() || target.is_fullscreen() {
-        return;
+        .find(|item| item.strip.contains(entity))
+        .ok_or("window is not tiled")?;
+    let target = workspaces
+        .iter()
+        .find(|item| item.strip.id() == space && item.strip.virtual_index == workspace)
+        .ok_or("destination workspace is gone")?;
+    if source.strip.is_fullscreen() || target.strip.is_fullscreen() {
+        return Err("cannot place a column in or out of a fullscreen strip");
     }
-    let target_display = target_display.parent();
-    let Ok((target_viewport, target_dock)) = displays.viewports.get(target_display) else {
-        return;
-    };
-    let display_id = target_viewport.id();
-    // Read the active native Space at dispatch time. The Space may have
-    // changed since the client queried its destination.
-    if !displays
-        .window_manager
-        .active_display_space(display_id)
-        .is_ok_and(|shown_space| shown_space == space)
-    {
-        debug!(
-            space,
-            display_id, "skipping Place: target native Space is not shown"
-        );
-        return;
-    }
-    let Ok(from) = source.index_of(entity) else {
-        return;
-    };
 
-    if source_id == target_id {
-        if index < source.len()
-            && from != index
-            && let Ok((mut strip, ..)) = workspaces.get_mut(source_id)
-        {
-            strip.move_column(from, index);
+    let source_display = source.child_of.ok_or("source has no display")?.parent();
+    let target_display = target
+        .child_of
+        .ok_or("destination has no display")?
+        .parent();
+    let cross_display = source_display != target_display;
+    if !cross_display && source.strip.id() != space {
+        return Err("cannot change native Spaces on the same display");
+    }
+    let (source_viewport, source_dock) = displays
+        .viewports
+        .get(source_display)
+        .map_err(|_| "source display is gone")?;
+    let (target_viewport, _) = displays
+        .viewports
+        .get(target_display)
+        .map_err(|_| "destination display is gone")?;
+    // Check the current native Spaces before changing the layout. A snapshot
+    // may predate a Space switch, and moving coordinates cannot restore that Space.
+    let shown = |display_id, space| {
+        displays
+            .window_manager
+            .active_display_space(display_id)
+            .is_ok_and(|shown| shown == space)
+    };
+    if !shown(source_viewport.id(), source.strip.id()) {
+        return Err("source native Space is not shown");
+    }
+    if cross_display && !shown(target_viewport.id(), space) {
+        return Err("destination native Space is not shown");
+    }
+
+    let from = source
+        .strip
+        .index_of(entity)
+        .map_err(|_| "source column is gone")?;
+    let column = source
+        .strip
+        .get(from)
+        .map_err(|_| "source column is gone")?;
+    let source_focus = source
+        .active
+        .then(|| windows.focused().map(|(_, focused)| focused))
+        .flatten();
+    let moved_focus =
+        source_focus.filter(|focused| column.window_iter().any(|member| member == *focused));
+    if source.entity == target.entity {
+        if index >= source.strip.len() {
+            return Err("column index is outside the destination");
         }
-        return;
+        if from != index {
+            let source_id = source.entity;
+            let mut item = workspaces
+                .get_mut(source_id)
+                .map_err(|_| "source workspace is gone")?;
+            item.strip.move_column(from, index);
+            if let Some(focused) = moved_focus {
+                commands.ensure_visible(focused);
+            }
+        }
+        return Ok(());
     }
 
-    let source_display = source_display.parent();
-    let Ok((source_viewport, source_dock)) = displays.viewports.get(source_display) else {
-        return;
-    };
-    let Ok(column) = source.get(from) else {
-        return;
-    };
-    let members: Vec<_> = column.window_iter().collect();
-    if index > target.len() || members.iter().any(|member| target.contains(*member)) {
-        return;
-    }
-    let source_focus = windows.focused().map(|(_, focused)| focused);
-    let neighbour = source_focus
-        .filter(|focused| source_active && members.contains(focused))
-        .and_then(|focused| {
+    let neighbour = moved_focus.and_then(|focused| {
+        source
+            .strip
+            .left_neighbour(focused)
+            .or_else(|| source.strip.right_neighbour(focused))
+    });
+    let column_width = column.width(&|member| windows.moving_frame(member));
+    let removed_left = !source.has_previous_position
+        && source_focus.is_some_and(|focused| {
             source
-                .left_neighbour(focused)
-                .or_else(|| source.right_neighbour(focused))
+                .strip
+                .index_of(focused)
+                .is_ok_and(|focused_index| from < focused_index)
         });
+    let source_bounds = source_viewport.actual_display_bounds(source_dock, config);
+    let park_target = !target.active
+        && !target.has_previous_position
+        && !displays.selected.contains(target.entity);
 
-    let Ok([(mut source, ..), (mut target, ..)]) = workspaces.get_many_mut([source_id, target_id])
-    else {
-        return;
-    };
-    if !source.transfer_column(&mut target, from, index) {
-        return;
+    let [mut source, mut target] = workspaces
+        .get_many_mut([source.entity, target.entity])
+        .map_err(|_| "source or destination workspace is gone")?;
+    if !source.strip.transfer_column(&mut target.strip, from, index) {
+        return Err("invalid destination column slot");
+    }
+    if removed_left && let Some(width) = column_width.filter(|width| *width > 0) {
+        compensate_left_removal(
+            width,
+            &mut source.position,
+            source.reposition.as_deref_mut(),
+            source.scrolling.as_deref_mut(),
+            source.has_manual_offset,
+            source_bounds.min.x,
+            config,
+        );
+    }
+    if park_target {
+        let previous = PreviousStripPosition {
+            origin: target.position.0,
+            focus: None,
+        };
+        target.position.0 = target_viewport.bounds().max - PARKED_STRIP_SLIVER;
+        commands
+            .entity(target.entity)
+            .insert(previous)
+            .try_remove::<(Scrolling, RepositionMarker)>();
     }
     if let Some(neighbour) = neighbour {
         commands.focus_entity(neighbour, false);
+    } else if let Some(focused) = moved_focus {
+        commands.entity(focused).try_remove::<FocusedMarker>();
     }
-    if source_display != target_display {
-        let source_width = source_viewport
-            .actual_display_bounds(source_dock, config)
-            .width();
-        let target_width = target_viewport
-            .actual_display_bounds(target_dock, config)
-            .width();
-        if source_width > 0 && target_width > 0 {
-            for &member in &members {
-                if let Some(size) = windows.moving_frame(member).map(|frame| frame.size()) {
-                    let ratio = f64::from(size.x) / f64::from(source_width);
-                    let width = round_px(ratio * f64::from(target_width)).clamp(1, target_width);
-                    commands.resize_entity(member, Size::new(width, size.y));
-                }
-            }
+    if cross_display {
+        let members: Vec<_> = column.window_iter().collect();
+        for &member in &members {
+            // Unstack may have queued a reshuffle anchored to the source display.
+            commands
+                .entity(member)
+                .try_remove::<(ReshuffleAroundMarker, ResizeAnchor)>();
         }
-    }
-    if source_display != target_display || source.id() != target.id() {
+        let ratio = column_width
+            .filter(|_| source_bounds.width() > 0)
+            .map(|width| f64::from(width) / f64::from(source_bounds.width()));
+        schedule_cross_display_resize(
+            entity,
+            members.clone(),
+            target_display,
+            ratio,
+            false,
+            commands,
+        );
         ColumnInTransit::spawn(members, commands);
     }
+    Ok(())
 }
 
 /// Takes a window out of the tiling layout or puts it back. Mirrors
 /// `manage_window`: floating→tiled has to re-append the window to a strip
 /// itself, since nothing downstream does it automatically.
-fn set_floating(entity: Entity, floating: bool, workspaces: &mut Strips, commands: &mut Commands) {
+fn set_floating(
+    entity: Entity,
+    floating: bool,
+    workspaces: &mut RemovableStrips,
+    commands: &mut Commands,
+) {
     if let Ok(mut entity_commands) = commands.get_entity(entity) {
         if floating {
             entity_commands.try_insert(Unmanaged::Floating);
@@ -495,12 +551,10 @@ fn set_floating(entity: Entity, floating: bool, workspaces: &mut Strips, command
     }
 
     if !floating
-        && !workspaces
-            .iter()
-            .any(|(strip, _, _, _)| strip.contains(entity))
-        && let Some((mut strip, _, _, _)) = workspaces.iter_mut().find(|(_, active, _, _)| *active)
+        && !workspaces.iter().any(|item| item.strip.contains(entity))
+        && let Some(mut item) = workspaces.iter_mut().find(|item| item.active)
     {
-        strip.append(entity);
+        item.strip.append(entity);
         commands.reshuffle_around(entity);
     }
 }

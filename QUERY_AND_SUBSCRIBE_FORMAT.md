@@ -280,6 +280,9 @@ The index is measured after lifting the column out of its source and may point j
 
 The destination virtual workspace must already exist on the native Space currently shown on its display.
 It can be an unselected virtual workspace within that Space.
+The source native Space must also be shown on its display.
+The operation uses window positioning and skips requests that would require changing native Spaces on one display.
+This operation is available through IPC.
 The whole column moves, including its stack or tabs, without switching to the destination workspace.
 Stale or invalid destinations are skipped, as with other layout operations.
 

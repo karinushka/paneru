@@ -52,6 +52,63 @@ fn test_native_tab_detection() {
 }
 
 #[test]
+fn test_layout_op_place_keeps_native_tabs_together() {
+    use crate::types::windowset::LayoutOp;
+    use crate::{assert_not_on_workspace, assert_on_workspace};
+
+    let harness = TestHarness::new().with_windows(1).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness
+        .on_iteration(0, |world, state| {
+            spawn_matching_native_tab(world, &state, 0);
+        })
+        .on_iteration(1, |world, _state| {
+            let tab = find_window_entity(1, world);
+            assert!(
+                world
+                    .query::<&LayoutStrip>()
+                    .iter(world)
+                    .any(|strip| strip.tabbed(tab))
+            );
+        })
+        .on_iteration(2, |world, _state| {
+            let tab = find_window_entity(1, world);
+            assert!(
+                world
+                    .query::<&LayoutStrip>()
+                    .iter(world)
+                    .any(|strip| strip.id() == EXT_WORKSPACE_ID && strip.tabbed(tab))
+            );
+            for window in [0, 1] {
+                assert_on_workspace!(world, window, EXT_WORKSPACE_ID);
+                assert_not_on_workspace!(world, window, TEST_WORKSPACE_ID);
+            }
+        })
+        .run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::PrintState,
+            },
+            Event::Command {
+                command: Command::Layout(vec![LayoutOp::Place {
+                    window: 1,
+                    space: EXT_WORKSPACE_ID,
+                    workspace: 1,
+                    index: 0,
+                }]),
+            },
+        ]);
+}
+
+#[test]
 fn test_native_tab_resize_syncs_sibling_size() {
     let commands = vec![
         Event::MenuOpened { window_id: 0 },

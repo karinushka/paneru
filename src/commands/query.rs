@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::{Command, DesktopOperation, Operation};
 
+use crate::ecs::layout_ops::LayoutOpsProcessed;
 use crate::ecs::state::{
     PaneruActiveState, PaneruDesktopState, PaneruQueryState, PaneruVirtualWorkspaceState,
     PaneruWindowState, QueryStateParams, StateEvent, StateQueryKind,
@@ -237,6 +238,7 @@ pub(super) fn register_query_commands(app: &mut App) {
 
     app.init_resource::<StateSubscribers>();
     app.init_resource::<StateBroadcastCache>();
+    app.add_message::<LayoutOpsProcessed>();
     app.add_systems(
         PreUpdate,
         (state_subscribe_handler, state_query_handler).in_set(crate::ecs::PreUpdateSet::Dispatch),
@@ -433,6 +435,7 @@ fn collect_state_broadcast_events_for_intent(
 
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
+    mut layout_ops: MessageReader<LayoutOpsProcessed>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
@@ -449,16 +452,17 @@ fn state_event_broadcast_handler(
     let signals = StateBroadcastSignals {
         virtual_workspace_changed: !active_workspace_changes.is_empty() || census_changed,
         desktops_changed: census_changed,
-        windows_changed: events.iter().any(|event| {
-            let Event::WindowMoved { window_id } = event else {
-                return false;
-            };
-            state
-                .windows()
-                .find(*window_id)
-                .and_then(|(_, entity)| state.windows().get_managed(entity))
-                .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
-        }),
+        windows_changed: layout_ops.read().count() != 0
+            || events.iter().any(|event| {
+                let Event::WindowMoved { window_id } = event else {
+                    return false;
+                };
+                state
+                    .windows()
+                    .find(*window_id)
+                    .and_then(|(_, entity)| state.windows().get_managed(entity))
+                    .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
+            }),
         window_focused: !focused_changes.is_empty(),
     };
     let intent = StateBroadcastIntent::from_events(events, signals);
@@ -832,6 +836,103 @@ mod tests {
             assert!(stack_intent.windows_changed);
             assert!(stack_intent.on_screen_changed);
         }
+    }
+
+    #[test]
+    fn test_layout_batches_notify_subscribers_of_hidden_reordering() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::SystemState;
+        use std::time::Duration;
+
+        use crate::config::Config;
+        use crate::tests::TestHarness;
+        use crate::types::windowset::LayoutOp;
+
+        let config = Config::try_from("default_workspaces = 2\n").unwrap();
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        let layout = |ops| Event::Command {
+            command: Command::Layout(ops),
+        };
+        harness.advance(Duration::from_millis(500));
+        harness.world().write_message(layout(vec![
+            LayoutOp::MoveToWorkspace {
+                window: 1,
+                workspace: 2,
+                follow: false,
+            },
+            LayoutOp::MoveToWorkspace {
+                window: 2,
+                workspace: 2,
+                follow: false,
+            },
+        ]));
+        harness.advance(Duration::from_millis(1100));
+
+        let mut query = SystemState::<QueryStateParams>::new(harness.world());
+        let before = query.get(harness.world()).unwrap().extract().unwrap();
+        let hidden_row = |state: &PaneruQueryState| {
+            state
+                .virtual_workspaces
+                .iter()
+                .find(|row| row.number == 2 && !row.shown)
+                .expect("hidden workspace")
+                .windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>()
+        };
+        let original_order = hidden_row(&before);
+        assert_eq!(original_order.len(), 2);
+        let mut cache = StateBroadcastCache {
+            virtual_workspaces: Some(before.virtual_workspaces.clone()),
+            on_screen: Some(before.on_screen().into_iter().cloned().collect()),
+            ..Default::default()
+        };
+
+        let mut cursor = harness
+            .world()
+            .resource::<Messages<LayoutOpsProcessed>>()
+            .get_cursor_current();
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Swap(1, 2)]));
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Swap(1, 99)]));
+        harness.app.update();
+        let processed = cursor
+            .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+            .count();
+        assert_eq!(processed, 1, "nonempty batches share one broadcast check");
+        let after = query.get(harness.world()).unwrap().extract().unwrap();
+        assert_eq!(
+            hidden_row(&after),
+            vec![original_order[1], original_order[0]]
+        );
+
+        let signals = StateBroadcastSignals {
+            windows_changed: processed != 0,
+            ..Default::default()
+        };
+        let outgoing = collect_state_broadcast_events(&[], &after, &mut cache, |_| None, signals);
+        assert_eq!(
+            outgoing
+                .iter()
+                .filter(|event| matches!(event, StateEvent::WindowsChanged { .. }))
+                .count(),
+            1
+        );
+        let repeated = collect_state_broadcast_events(&[], &after, &mut cache, |_| None, signals);
+        assert!(repeated.is_empty(), "an unchanged snapshot is deduplicated");
+
+        harness.world().write_message(layout(vec![]));
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            0
+        );
     }
 
     #[test]

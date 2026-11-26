@@ -212,10 +212,9 @@ changes.
 {"event":"windows_changed","virtual_workspace_number":3,"active":{"display_id":1,"native_workspace_id":4,"virtual_workspace_number":3,"focused_window_id":321,"focused_bundle_id":"com.apple.Terminal","focused_app_name":"Terminal","focused_window_title":"paneru"}}
 ```
 
-Emitted after managed window creation/destruction/minimize/deminimize events and
-after Paneru moves or sends a window between virtual workspaces. The event is
-emitted only when Paneru's virtual workspace/window state differs from the last
-emitted `windows_changed` event.
+Paneru checks for changes after managed windows are created, destroyed, minimised or restored, and after moving windows between virtual workspaces.
+It also checks after processing layout operations from an IPC client or a Lua handler, including edits to hidden workspaces.
+The event is emitted when the virtual workspace/window state differs from the last emitted `windows_changed` event.
 
 ```json
 {"event":"window_focused","window_id":321,"bundle_id":"com.apple.Terminal","title":"paneru","virtual_workspace_number":3}

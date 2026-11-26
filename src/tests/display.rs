@@ -774,6 +774,69 @@ fn test_layout_op_place_batch_saves_startup_workspace_origin_once() {
     assert_eq!(saved.origin, original);
 }
 
+#[test]
+fn test_layout_op_place_then_set_width_keeps_the_requested_width() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 0);
+    let neighbour_entity = find_window_entity(1, harness.world());
+    let neighbour_width = harness
+        .world()
+        .get::<Window>(neighbour_entity)
+        .unwrap()
+        .frame()
+        .width();
+
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+            LayoutOp::SetWidth {
+                window: 0,
+                ratio: 0.5,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+    assert_focused!(world, 1);
+    let placed_entity = find_window_entity(0, world);
+    assert_eq!(
+        world.get::<Window>(placed_entity).unwrap().frame().width(),
+        EXT_DISPLAY_WIDTH / 2,
+        "delayed cross-display resize must not overwrite SetWidth from the same batch"
+    );
+    assert_eq!(
+        world
+            .get::<Window>(neighbour_entity)
+            .unwrap()
+            .frame()
+            .width(),
+        neighbour_width,
+        "SetWidth after moving the focused window must not resize its remaining neighbour"
+    );
+}
+
 /// A window macOS filled covers its display and ignores the edge padding, so
 /// it is wider than the tiled viewport. Moved to another display, it fits
 /// that display's viewport instead of keeping the extra width past its edge.

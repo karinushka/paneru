@@ -1457,13 +1457,16 @@ pub(crate) fn schedule_cross_display_resize(
             return;
         };
         let viewport_bounds = display.actual_display_bounds(dock, &config);
+        if viewport_bounds.width() <= 0 || viewport_bounds.height() <= 0 {
+            return;
+        }
         if let Ok(Bounds(bounds)) = windows.get(moved_window) {
             debug!("Refreshing size of window {moved_window}");
             let width = width_ratio
                 .map_or(bounds.x, |ratio| {
                     round_px(ratio * f64::from(viewport_bounds.width()))
                 })
-                .min(viewport_bounds.width());
+                .clamp(1, viewport_bounds.width());
             let size = Size::new(width, viewport_bounds.height());
             for &member in &moving_entities {
                 if reshuffle {

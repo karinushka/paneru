@@ -76,8 +76,10 @@ impl LayoutBatch {
         if let Some(change) = self.focus_change {
             if let Some(window) = change.window {
                 commands.focus_entity(window, change.raise);
-            } else if let Some(window) = original_focus {
-                commands.entity(window).try_remove::<FocusedMarker>();
+            } else if let Some(window) = original_focus
+                && let Ok(mut entity_commands) = commands.get_entity(window)
+            {
+                entity_commands.try_remove::<FocusedMarker>();
             }
         }
         if let Some(window) = self
@@ -103,9 +105,9 @@ impl LayoutBatch {
                         members.push(window);
                         ratio = ratio.into_iter().chain(initial.ratio).reduce(f64::max);
                         // Unstack may have queued a reshuffle on the old display.
-                        commands
-                            .entity(window)
-                            .try_remove::<(ReshuffleAroundMarker, ResizeAnchor)>();
+                        if let Ok(mut entity_commands) = commands.get_entity(window) {
+                            entity_commands.try_remove::<(ReshuffleAroundMarker, ResizeAnchor)>();
+                        }
                     }
                 }
                 if let Some(&window) = members.first() {
@@ -319,13 +321,35 @@ fn apply(
                 debug!(target: "paneru::lua", "skipping {op:?}: a width ratio must be positive");
                 return;
             }
+            // If this window crossed displays earlier in the batch, carry the
+            // explicit width ratio forward so the delayed cross-display resize
+            // does not overwrite it with the pre-move ratio.
+            if !batch.cross_display.is_empty()
+                && let Some(item) = workspaces.iter().find(|item| item.strip.contains(entity))
+            {
+                let members: Vec<Entity> = item
+                    .strip
+                    .index_of(entity)
+                    .ok()
+                    .and_then(|index| item.strip.get(index).ok())
+                    .map_or_else(|| vec![entity], |column| column.window_iter().collect());
+                for member in members {
+                    if let Some(initial) = batch.cross_display.get_mut(&member) {
+                        initial.ratio = Some(ratio);
+                    }
+                }
+            }
+            let is_focused = if batch.has_placement {
+                batch.focused == Some(entity)
+            } else {
+                windows
+                    .focused()
+                    .is_some_and(|(_, focused)| focused == entity)
+            };
             // The interactive resize path (`resize_window`, used by the menubar
             // width picker) does the real work for the focused window: pixel
             // size, viewport clamping, stacked siblings, reshuffle.
-            if windows
-                .focused()
-                .is_some_and(|(_, focused)| focused == entity)
-            {
+            if is_focused {
                 commands.trigger(SendMessageTrigger(Event::Command {
                     command: Command::Window(Operation::SetWidth(ratio)),
                 }));
@@ -603,10 +627,11 @@ fn place_column(
             focus: None,
         };
         target.position.0 = target_viewport.bounds().max - PARKED_STRIP_SLIVER;
-        commands
-            .entity(target.entity)
-            .insert(previous)
-            .try_remove::<(Scrolling, RepositionMarker)>();
+        if let Ok(mut entity_commands) = commands.get_entity(target.entity) {
+            entity_commands
+                .try_insert(previous)
+                .try_remove::<(Scrolling, RepositionMarker)>();
+        }
     }
     if moved_focus.is_some() {
         batch.ensure_visible = None;

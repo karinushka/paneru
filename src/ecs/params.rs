@@ -213,6 +213,7 @@ pub struct FrameActivity<'w, 's> {
     scrolling: Query<'w, 's, (), With<Scrolling>>,
     flash_messages: Query<'w, 's, (), With<FlashMessage>>,
     overview: Option<bevy::ecs::system::NonSend<'w, crate::overview::view::OverviewManager>>,
+    drag: Option<Res<'w, crate::ecs::drag::WindowDrag>>,
     pending_desktop_ops: Option<Res<'w, crate::ecs::desktop::PendingDesktopOps>>,
 }
 
@@ -225,6 +226,7 @@ impl FrameActivity<'_, '_> {
     /// a flash message is on screen — i.e. while frames still need drawing.
     pub fn mid_frame(&self) -> bool {
         self.has_layout_motion()
+            || self.drag.as_ref().is_some_and(|drag| drag.edge_scrolling())
             || !self.flash_messages.is_empty()
             || self
                 .overview

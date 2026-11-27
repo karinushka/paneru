@@ -1,11 +1,13 @@
 use bevy::app::{App, Plugin, PreUpdate, Update};
 use bevy::ecs::entity::Entity;
+use bevy::ecs::lifecycle::Remove;
 use bevy::ecs::message::{Message, MessageReader, MessageWriter};
+use bevy::ecs::observer::On;
 use bevy::ecs::query::{With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::schedule::SystemCondition as _;
-use bevy::ecs::system::{Commands, Local, Populated, Res, ResMut, Single};
+use bevy::ecs::system::{Commands, Local, Populated, Query, Res, ResMut, Single};
 use bevy::math::IRect;
 use bevy::time::Time;
 use std::collections::VecDeque;
@@ -17,6 +19,7 @@ use crate::config::Config;
 use crate::config::swipe::{SwipeGestureDirection, focus_direction};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::{ActiveDisplay, Windows};
+use crate::ecs::workspace::PreviousStripPosition;
 use crate::ecs::{
     ActiveWorkspaceMarker, ManualStripOffset, MissionControlActive, Position, PreUpdateSet,
     Scrolling, SendMessageTrigger, UpdateSet,
@@ -35,6 +38,9 @@ const PAGE_GESTURE_TIMEOUT: Duration = Duration::from_millis(150);
 // event while reporting millimeters of older finger motion. Such an interval
 // is useful for position but cannot estimate a sustained release velocity.
 const MIN_VELOCITY_SAMPLE_SECS: f64 = 0.004;
+const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
+/// Bound recovery if a stretched gesture never receives its lift event.
+const STRETCHED_GESTURE_TIMEOUT: Duration = Duration::from_secs(2);
 
 fn swipe_direction_modifier(direction: SwipeGestureDirection) -> f64 {
     match direction {
@@ -236,6 +242,7 @@ type ScrollingStrip<'w, 's> = Single<
 impl Plugin for ScrollEventsPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<PageGestureState>();
+        app.add_observer(scroll_stopped);
         app.add_message::<PageFocusRequest>();
         // The overview owns the trackpad while it is up, like Mission Control.
         let mission_control_inactive =
@@ -465,6 +472,7 @@ fn swipe_gesture(
             };
             scrolling.is_user_swiping = true;
             scrolling.last_event = time.elapsed();
+            scrolling.rubber_band = has_gesture_event;
             scrolling.position +=
                 total_delta * viewport_width * direction_modifier * swipe_sensitivity;
         } else if let Ok(mut entity_commands) = commands.get_entity(*entity) {
@@ -474,11 +482,13 @@ fn swipe_gesture(
                     + total_delta * viewport_width * direction_modifier * swipe_sensitivity,
                 is_user_swiping: !touchpad_up,
                 last_event: time.elapsed(),
+                rubber_band: has_gesture_event,
+                ends: None,
             });
         }
     }
     if touchpad_up && let Some(scrolling) = scrolling.as_mut() {
-        scrolling.is_user_swiping = false;
+        scrolling.release(time.elapsed());
     }
 }
 
@@ -491,7 +501,6 @@ pub(super) fn swiping_timeout(
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    const FINGER_LIFT_THRESHOLD: Duration = Duration::from_millis(50);
     const MIN_VELOCITY_PX: f64 = 5.0;
     let viewport_width = f64::from(active_display.bounds().width());
 
@@ -499,6 +508,11 @@ pub(super) fn swiping_timeout(
         let since_last_event = time.elapsed().abs_diff(scroll.last_event);
         if since_last_event > FINGER_LIFT_THRESHOLD {
             if scroll.is_user_swiping {
+                // Stationary fingers may send no displacement. Keep the
+                // stretch until lift, with a fallback for a lost phase event.
+                if scroll.past_end().is_some() && since_last_event < STRETCHED_GESTURE_TIMEOUT {
+                    continue;
+                }
                 // Silence cannot prove the fingers lifted. Drop stale state
                 // without ever converting it into a coast.
                 if let Ok(mut entity_commands) = commands.get_entity(entity) {
@@ -510,7 +524,7 @@ pub(super) fn swiping_timeout(
             // Under exponential decay, velocity / decay_rate is the total
             // distance still to come. A short frame says nothing about that.
             let remaining_px = scroll.velocity.abs() * viewport_width / config.swipe_deceleration();
-            let remove = remaining_px < MIN_VELOCITY_PX;
+            let remove = scroll.past_end().is_none() && remaining_px < MIN_VELOCITY_PX;
             if remove {
                 if let Ok(mut entity_commands) = commands.get_entity(entity) {
                     entity_commands.try_remove::<Scrolling>();
@@ -534,7 +548,7 @@ fn apply_inertia(
 ) {
     let dt = time.delta_secs_f64();
     for (_, mut scroll) in &mut strips {
-        if scroll.is_user_swiping {
+        if scroll.is_user_swiping || scroll.past_end().is_some() {
             continue;
         }
 
@@ -570,7 +584,7 @@ fn apply_snap_force(
     let snap_threshold = SNAP_DISPLAY_RATIO * f64::from(viewport.width());
 
     let (strip, position, ref mut scroll) = *strip;
-    if scroll.is_user_swiping || scroll.velocity.abs() > 0.5 {
+    if scroll.is_user_swiping || scroll.past_end().is_some() || scroll.velocity.abs() > 0.5 {
         return;
     }
 
@@ -617,10 +631,20 @@ fn scrolling_integrator(
     let direction_modifier = swipe_direction_modifier(config.swipe_gesture_direction());
 
     let scroll = &mut *strip;
-    // Finger displacement is applied directly by swipe_gesture. Velocity is
-    // reserved for coasting after the gesture, or the same motion is counted twice.
-    if !scroll.is_user_swiping && scroll.velocity.abs() > 0.0001 {
-        scroll.position += scroll.velocity * dt * viewport_width * direction_modifier;
+    // Finger displacement is applied directly by swipe_gesture.
+    if scroll.is_user_swiping || viewport_width <= 0.0 {
+        return;
+    }
+    let scale = viewport_width * direction_modifier;
+    let speed = scroll.velocity * scale;
+    if scroll.rubber_band
+        && let Some(ends) = scroll.ends
+    {
+        let (position, speed) = coast(scroll.position, speed, dt, ends);
+        scroll.position = position;
+        scroll.velocity = speed / scale;
+    } else if scroll.velocity.abs() > 0.0001 {
+        scroll.position += speed * dt;
     }
 }
 
@@ -635,30 +659,145 @@ fn apply_scrolling_constraints(
     let (strip, ref mut position, ref mut scroll) = *strip;
 
     let get_window_frame = |entity| windows.moving_frame(entity);
-    if let Some(clamped_offset) = clamp_viewport_offset(
-        round_px(scroll.position),
-        strip,
-        &windows,
-        &get_window_frame,
-        &viewport,
-        &config,
-    ) {
-        position.x = clamped_offset;
-        scroll.position = f64::from(clamped_offset);
-    } else {
+    let Some((min, max)) = strip_ends(strip, &windows, &get_window_frame, &viewport, &config)
+    else {
         scroll.velocity = 0.0;
+        scroll.ends = None;
+        return;
+    };
+    let ends = (f64::from(min.min(max)), f64::from(max.max(min)));
+    scroll.ends = Some(ends);
+    if scroll.rubber_band {
+        let shown = scroll.past_end().map_or(scroll.position, |end| {
+            end + rubber_band(scroll.position - end, f64::from(viewport.width().max(1)))
+        });
+        position.x = round_px(shown);
+    } else {
+        scroll.position = scroll.position.clamp(ends.0, ends.1);
+        position.x = round_px(scroll.position);
+    }
+}
+
+type InterruptedScrolls<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static Scrolling,
+        &'static mut Position,
+        Option<&'static mut PreviousStripPosition>,
+    ),
+    With<LayoutStrip>,
+>;
+
+/// An interrupted scroll must leave the strip within its bounds, including
+/// when switching away saves the stretched position for later restoration.
+fn scroll_stopped(trigger: On<Remove<Scrolling>>, mut strips: InterruptedScrolls) {
+    let Ok((scroll, mut position, previous)) = strips.get_mut(trigger.entity) else {
+        return;
+    };
+    let Some(end) = scroll.past_end() else {
+        return;
+    };
+    let end = round_px(end);
+    if let Some(mut previous) = previous {
+        previous.origin.x = end;
+    } else {
+        position.x = end;
+    }
+}
+
+/// How far a pull of the strip shows past an end: half as far as the fingers
+/// pull it at first, and less the further they do, never as far as the
+/// display is `wide`, as macOS's rubber band.
+const RUBBER_BAND: f64 = 0.55;
+
+/// How fast a strip let go past its end springs back, critically damped, in
+/// radians a second: back from a pull in 0.3 s, settled in 0.6; a glide into
+/// the end goes on past it for 60 ms, as far as its speed over 44.
+const SPRING: f64 = 16.0;
+
+/// The speed a glide goes past an end at most, in pixels a second: past it
+/// 230 pixels, shown 120 on a 1800-pixel display. A quick flick reaches the end
+/// at 80,000, and went most of a display past it.
+const MAX_SPEED_PAST_END: f64 = 10_000.0;
+
+impl Scrolling {
+    fn release(&mut self, now: Duration) {
+        if self.past_end().is_some() && now.abs_diff(self.last_event) > FINGER_LIFT_THRESHOLD {
+            self.velocity = 0.0;
+        }
+        self.is_user_swiping = false;
+    }
+
+    /// The end the strip is past, if it is.
+    fn past_end(&self) -> Option<f64> {
+        self.ends
+            .filter(|_| self.rubber_band)
+            .and_then(|ends| end_past(self.position, ends))
+    }
+}
+
+fn end_past(position: f64, (min, max): (f64, f64)) -> Option<f64> {
+    if position < min {
+        Some(min)
+    } else if position > max {
+        Some(max)
+    } else {
+        None
+    }
+}
+
+/// How far the strip shows past an end, pulled `past` it on a display `wide`.
+fn rubber_band(past: f64, wide: f64) -> f64 {
+    let pulled = past.abs() * RUBBER_BAND / wide;
+    pulled / (pulled + 1.0) * wide * past.signum()
+}
+
+/// A frame, `dt` long, of a strip let go at `position` going at `speed`, in
+/// pixels and pixels a second: it goes on, and past one of its `ends` springs
+/// back to it, from the end if it reaches it in the frame.
+fn coast(position: f64, speed: f64, dt: f64, ends: (f64, f64)) -> (f64, f64) {
+    let (end, position, dt) = match (
+        end_past(position, ends),
+        end_past(position + speed * dt, ends),
+    ) {
+        (Some(end), _) => (end, position, dt),
+        (None, Some(end)) => (end, end, dt - (end - position) / speed),
+        (None, None) => return (position + speed * dt, speed),
+    };
+    let (past, speed) = spring(position - end, speed, dt);
+    (end + past, speed)
+}
+
+/// A frame, `dt` long, of a strip let go `past` its end at `speed`: it springs
+/// back, critically damped, and comes to rest on the end once nearly there.
+fn spring(past: f64, speed: f64, dt: f64) -> (f64, f64) {
+    const REST_PX: f64 = 0.5;
+    const REST_PX_PER_SEC: f64 = 20.0;
+    let speed = if past * speed >= 0.0 {
+        speed.clamp(-MAX_SPEED_PAST_END, MAX_SPEED_PAST_END)
+    } else {
+        speed
+    };
+    let carried = speed + SPRING * past;
+    let fading = (-SPRING * dt).exp();
+    let past = (past + carried * dt) * fading;
+    let speed = (speed - SPRING * carried * dt) * fading;
+    if past.abs() < REST_PX && speed.abs() < REST_PX_PER_SEC {
+        (0.0, 0.0)
+    } else {
+        (past, speed)
     }
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
-fn clamp_viewport_offset<W>(
-    current_offset: i32,
+fn strip_ends<W>(
     layout_strip: &LayoutStrip,
     windows: &Windows,
     get_window_frame: &W,
     viewport: &IRect,
     config: &Config,
-) -> Option<i32>
+) -> Option<(i32, i32)>
 where
     W: Fn(Entity) -> Option<IRect>,
 {
@@ -676,13 +815,13 @@ where
             && let Some((right_snap, _)) = layout_strip.columns().filter_map(live_column).nth(1)
         {
             // Allow to scroll away until the last or first window snaps.
-            current_offset.clamp(viewport.min.x - left_snap, viewport.max.x - right_snap)
+            (viewport.min.x - left_snap, viewport.max.x - right_snap)
         } else if viewport.width() < total_strip_width {
             // Snap the strip directly to the edges.
-            current_offset.clamp(viewport.max.x - total_strip_width, viewport.min.x)
+            (viewport.max.x - total_strip_width, viewport.min.x)
         } else {
             // Snap the strip directly to the edges.
-            current_offset.clamp(viewport.min.x, viewport.max.x - total_strip_width)
+            (viewport.min.x, viewport.max.x - total_strip_width)
         },
     )
 }
@@ -759,4 +898,106 @@ fn switch_virtual_workspace(delta: f64, config: &Config, commands: &mut Commands
     commands.trigger(SendMessageTrigger(Event::Command {
         command: Command::Window(Operation::Virtual(direction)),
     }));
+}
+
+#[cfg(test)]
+mod rubber_band_tests {
+    use super::*;
+
+    const FRAME: f64 = 1.0 / 120.0;
+
+    #[test]
+    fn a_pull_past_the_end_shows_less_the_further_it_goes() {
+        let wide = 1000.0;
+        assert!(rubber_band(0.0, wide).abs() < f64::EPSILON);
+        assert!((rubber_band(1.0, wide) - RUBBER_BAND).abs() < 0.01);
+        assert!((rubber_band(-300.0, wide) + rubber_band(300.0, wide)).abs() < f64::EPSILON);
+        let shown: Vec<f64> = (1..100)
+            .map(|pull| rubber_band(f64::from(pull) * 100.0, wide))
+            .collect();
+        let steps: Vec<f64> = shown.windows(2).map(|pair| pair[1] - pair[0]).collect();
+        assert!(steps.iter().all(|step| *step > 0.0));
+        assert!(steps.windows(2).all(|pair| pair[1] < pair[0]));
+        assert!(shown.last().is_some_and(|last| *last < wide));
+    }
+
+    #[test]
+    fn a_strip_let_go_past_its_end_springs_back_without_passing_it() {
+        let (mut past, mut speed) = (300.0, 0.0);
+        let mut took = 0.0;
+        while past != 0.0 || speed != 0.0 {
+            (past, speed) = spring(past, speed, FRAME);
+            took += FRAME;
+            assert!(past >= 0.0, "it passed the end: {past}");
+            assert!(took < 1.0, "it never came to rest: {past} at {speed}");
+        }
+        assert!((0.3..0.8).contains(&took), "back in {took} s");
+    }
+
+    #[test]
+    fn a_glide_into_the_end_goes_a_little_past_it_however_fast() {
+        let ends = (-1000.0, 0.0);
+        let most = MAX_SPEED_PAST_END / (SPRING * std::f64::consts::E);
+        for speed in [2_000.0, 10_000.0, 100_000.0] {
+            let (mut position, mut now) = (-1.0, speed);
+            let mut deepest: f64 = 0.0;
+            for _ in 0..120 {
+                (position, now) = coast(position, now, FRAME, ends);
+                deepest = deepest.max(position);
+            }
+            assert!(
+                deepest > 0.0 && deepest <= most + 1.0,
+                "{speed}: {deepest} past the end, at most {most}"
+            );
+            assert!(position.abs() < f64::EPSILON && now.abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn switching_away_restores_the_edge_without_moving_the_parked_strip() {
+        use crate::manager::Origin;
+
+        let mut app = App::new();
+        app.add_observer(scroll_stopped);
+        let parked = Origin::new(1000, 700);
+        let strip = app
+            .world_mut()
+            .spawn((
+                LayoutStrip::new(1, 0),
+                Position(parked),
+                PreviousStripPosition {
+                    origin: Origin::new(85, 20),
+                    focus: None,
+                },
+                Scrolling {
+                    position: 150.0,
+                    velocity: 0.0,
+                    is_user_swiping: true,
+                    last_event: Duration::ZERO,
+                    rubber_band: true,
+                    ends: Some((-400.0, 0.0)),
+                },
+            ))
+            .id();
+        app.world_mut().entity_mut(strip).remove::<Scrolling>();
+
+        let strip = app.world().entity(strip);
+        assert_eq!(strip.get::<Position>().expect("parked position").0, parked);
+        assert_eq!(
+            strip
+                .get::<PreviousStripPosition>()
+                .expect("saved position")
+                .origin,
+            Origin::new(0, 20)
+        );
+    }
+
+    #[test]
+    fn a_strip_thrown_back_from_past_its_end_glides_on_inside() {
+        let ends = (-1000.0, 0.0);
+        let (position, speed) = coast(20.0, -5_000.0, FRAME, ends);
+        assert!(position < 0.0 && speed < -1_000.0, "{position} at {speed}");
+        let (next, same) = coast(position, speed, FRAME, ends);
+        assert!((next - (position + speed * FRAME)).abs() < 1e-9 && (same - speed).abs() < 1e-9);
+    }
 }

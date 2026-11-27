@@ -728,7 +728,7 @@ fn test_window_can_resize_to_two_display_widths_and_scroll() {
             command: Command::Window(Operation::SetWidth(2.0)),
         },
         Event::Swipe {
-            delta: 0.3,
+            delta: 0.08,
             fingers: 3,
             distance_cm: 0.0,
             elapsed_secs: None,

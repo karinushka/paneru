@@ -283,6 +283,7 @@ fn setup_world() -> App {
         .add_plugins(WorkspaceEventsPlugin)
         .add_plugins(LayoutEventsPlugin)
         .add_plugins(FocusEventsPlugin)
+        .add_plugins(crate::ecs::pin::PinPlugin)
         .add_plugins(DisplayEventsPlugin)
         .add_plugins(DisplaySetupsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));

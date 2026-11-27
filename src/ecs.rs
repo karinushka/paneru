@@ -50,6 +50,7 @@ pub mod layout_ops;
 pub mod mouse;
 pub mod overview;
 pub mod params;
+pub mod pin;
 pub(crate) mod restore;
 pub mod script_state;
 pub mod scroll;
@@ -1110,6 +1111,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
         .add_plugins(workspace::WorkspaceEventsPlugin)
         .add_plugins(layout::LayoutEventsPlugin)
         .add_plugins(focus::FocusEventsPlugin)
+        .add_plugins(pin::PinPlugin)
         .add_plugins(display::DisplayEventsPlugin)
         .add_plugins(setups::DisplaySetupsPlugin)
         .add_plugins((
@@ -1146,6 +1148,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let menu_events = sender.clone();
     let tab_indicator_events = sender.clone();
     let overview_events = sender.clone();
+    let pin_mirror_events = sender.clone();
     let dragging = app.world().resource::<drag::WindowDrag>().tap_flag();
     let mut platform_callbacks = PlatformCallbacks::new(sender);
     let initial_config = platform_callbacks.setup_handlers(dragging)?;
@@ -1153,6 +1156,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
     let overlay_manager = OverlayManager::new(mtm);
     let flash_message_manager = FlashMessageManager::new(mtm);
     let tab_indicator_manager = TabIndicatorManager::new(mtm, tab_indicator_events);
+    let pin_mirror_manager = crate::pin_mirror::PinMirrorManager::new(mtm, pin_mirror_events);
     app.insert_non_send(platform_callbacks)
         .insert_non_send(overlay_manager)
         .insert_non_send(flash_message_manager)
@@ -1161,6 +1165,7 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
             mtm,
             overview_events,
         ))
+        .insert_non_send(pin_mirror_manager)
         .insert_non_send(receiver);
     if let Ok(desktop_bridge) = crate::manager::spaces::bridge::DesktopBridgeOS::new(mtm)
         .inspect_err(|err| warn!("native desktop bridge unavailable: {err}"))

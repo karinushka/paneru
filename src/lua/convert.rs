@@ -264,6 +264,9 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::Command { .. }
             | Event::TabIndicatorClicked { .. }
             | Event::CancelDrag
+            | Event::PinMirrorClicked { .. }
+            | Event::PinMirrorReady { .. }
+            | Event::PinMirrorStopped { .. }
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
             | Event::StateSubscribe { .. }

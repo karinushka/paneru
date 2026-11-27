@@ -24,6 +24,7 @@ mod menubar;
 mod overlay;
 mod overview;
 mod pasteboard;
+mod pin_mirror;
 mod platform;
 mod reader;
 mod screen_capture;

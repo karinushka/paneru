@@ -984,6 +984,16 @@ impl Config {
         self.options().auto_center.is_some_and(|center| center)
     }
 
+    /// Experimental: pin every floating window above all others by default.
+    pub fn pin_floating(&self) -> bool {
+        self.options().pin_floating.is_some_and(|pin| pin)
+    }
+
+    /// Experimental: which pinned windows show the pin badge.
+    pub fn pin_indicator(&self) -> PinIndicator {
+        self.options().pin_indicator.unwrap_or_default()
+    }
+
     pub fn horizontal_mouse_warp(&self) -> Option<i16> {
         self.options().horizontal_mouse_warp
     }
@@ -1404,6 +1414,39 @@ pub enum MissingWindowBehavior {
     Ignore,
 }
 
+/// Which pinned windows show the pin badge (`pin_indicator`).
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[cfg_attr(test, derive(serde::Serialize))]
+#[serde(rename_all = "snake_case")]
+pub enum PinIndicator {
+    /// Only windows pinned with `window_pin`; `pin_floating` pins stay bare,
+    /// since a badge on every floating window says nothing.
+    #[default]
+    Manual,
+    All,
+    Off,
+}
+
+impl PinIndicator {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Manual => "manual",
+            Self::All => "all",
+            Self::Off => "off",
+        }
+    }
+
+    /// Whether a pinned window gets a badge; `auto_pinned` is true when the
+    /// pin came from `pin_floating` rather than `window_pin`.
+    pub fn shows(self, auto_pinned: bool) -> bool {
+        match self {
+            Self::Manual => !auto_pinned,
+            Self::All => true,
+            Self::Off => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Default)]
 #[cfg_attr(test, derive(serde::Serialize))]
 pub struct RestoreOptions {
@@ -1442,6 +1485,13 @@ pub struct MainOptions {
     pub animation_speed: Option<f64>,
     /// Automatically center the window when switching focus with keyboard.
     pub auto_center: Option<bool>,
+    /// (Experimental) Pin every floating window above all others by default.
+    /// Needs Screen Recording permission. Default: false.
+    pub pin_floating: Option<bool>,
+    /// (Experimental) Which pinned windows show a pin badge on their corner:
+    /// `"manual"` (only `window_pin` pins), `"all"`, or `"off"`.
+    /// Default: `"manual"`.
+    pub pin_indicator: Option<PinIndicator>,
     /// Height of off-screen window slivers as a ratio (0.0–1.0) of the display height.
     /// Lower values hide the window's corner radius at screen edges.
     /// Default: 1.0 (full height).
@@ -3304,6 +3354,29 @@ missing_windows = "reserve"
     )
     .expect_err("unsupported restore missing-window policy should fail");
 
+    assert!(err.to_string().contains("unknown variant"));
+}
+
+/// `pin_indicator` defaults to badging manual pins only, parses its three
+/// values, and rejects anything else.
+#[test]
+fn test_pin_indicator_option() {
+    let parse = |value: &str| {
+        Config::try_from(format!("[options]\npin_indicator = \"{value}\"\n\n[bindings]\n").as_str())
+    };
+
+    let default = Config::try_from("[options]\n\n[bindings]\n").expect("config should parse");
+    assert_eq!(default.pin_indicator(), PinIndicator::Manual);
+    assert!(PinIndicator::Manual.shows(false));
+    assert!(!PinIndicator::Manual.shows(true), "auto pins stay bare");
+
+    let all = parse("all").expect("all should parse").pin_indicator();
+    assert!(all.shows(false) && all.shows(true));
+
+    let off = parse("off").expect("off should parse").pin_indicator();
+    assert!(!off.shows(false) && !off.shows(true));
+
+    let err = parse("border").expect_err("unknown indicator should fail");
     assert!(err.to_string().contains("unknown variant"));
 }
 

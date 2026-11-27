@@ -867,6 +867,16 @@ pub trait SpawnCommandsExt {
         display_entity: Entity,
         active: bool,
     ) -> EntityCommands<'_>;
+
+    /// Spawns a layout strip out of sight without selecting it as its space's
+    /// shown row; `parked` records where `show_active_workspace` restores it.
+    fn spawn_parked_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        parked: workspace::PreviousStripPosition,
+    ) -> EntityCommands<'_>;
 }
 
 impl SpawnCommandsExt for Commands<'_, '_> {
@@ -936,6 +946,22 @@ impl SpawnCommandsExt for Commands<'_, '_> {
             spawned.insert(SelectedVirtualMarker);
         }
         spawned
+    }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn spawn_parked_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        parked: workspace::PreviousStripPosition,
+    ) -> EntityCommands<'_> {
+        self.spawn((
+            layout_strip,
+            Position(origin),
+            ChildOf(display_entity),
+            parked,
+        ))
     }
 }
 

@@ -610,21 +610,21 @@ pub(super) fn restore_window_state(
             focus: strip.first(),
         };
 
-        let mut spawned =
-            ctx.commands
-                .spawn_layout_strip(strip, origin, display_entity, is_global_active);
+        if is_active {
+            let mut spawned =
+                ctx.commands
+                    .spawn_layout_strip(strip, origin, display_entity, is_global_active);
 
-        if is_global_active {
-            spawned.insert(RestoredActivation);
-        } else if is_shown {
-            spawned.insert(SelectedVirtualMarker);
-        } else {
-            if is_active {
+            if is_global_active {
+                spawned.insert(RestoredActivation);
+            } else if is_shown {
                 spawned.insert(SelectedVirtualMarker);
             } else {
-                spawned.remove::<SelectedVirtualMarker>();
+                spawned.insert((SelectedVirtualMarker, previous));
             }
-            spawned.insert(previous);
+        } else {
+            ctx.commands
+                .spawn_parked_strip(strip, origin, display_entity, previous);
         }
         restored_strips += 1;
     }

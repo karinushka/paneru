@@ -926,6 +926,143 @@ fn test_startup_restore_keeps_one_selected_row_and_hides_inactive_rows() {
     );
 }
 
+/// On a display that isn't the active one, the row its space showed is still
+/// the one it shows, even when a parked row 0 is restored after the shown row.
+#[test]
+fn test_startup_restore_keeps_the_shown_row_of_another_display() {
+    let mut harness = TestHarness::new();
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    let origin = Origin::new(0, 0);
+    let ext_origin = Origin::new(0, -TEST_WINDOW_HEIGHT);
+    harness.mock_state.spawn_window(
+        TEST_PROCESS_ID,
+        TEST_WORKSPACE_ID,
+        100,
+        IRect::from_corners(origin, origin + size),
+    );
+    for window in [300, 301] {
+        harness.mock_state.spawn_window(
+            TEST_PROCESS_ID,
+            EXT_WORKSPACE_ID,
+            window,
+            IRect::from_corners(ext_origin, ext_origin + size),
+        );
+    }
+    harness.world().insert_resource(PaneruState {
+        version: 2,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![
+            saved_display(TEST_DISPLAY_ID, true),
+            saved_display(EXT_DISPLAY_ID, false),
+        ],
+        workspaces: vec![
+            SavedWorkspace {
+                workspace_id: TEST_WORKSPACE_ID,
+                display_id: Some(TEST_DISPLAY_ID),
+                active_virtual_index: Some(0),
+                strips: vec![SavedStrip {
+                    virtual_index: 0,
+                    columns: vec![SavedColumn::Single(saved_window(100))],
+                }],
+            },
+            SavedWorkspace {
+                workspace_id: EXT_WORKSPACE_ID,
+                display_id: Some(EXT_DISPLAY_ID),
+                active_virtual_index: Some(1),
+                strips: vec![
+                    SavedStrip {
+                        virtual_index: 1,
+                        columns: vec![SavedColumn::Single(saved_window(301))],
+                    },
+                    SavedStrip {
+                        virtual_index: 0,
+                        columns: vec![SavedColumn::Single(saved_window(300))],
+                    },
+                ],
+            },
+        ],
+    });
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let mut selected = world
+        .query_filtered::<&LayoutStrip, With<crate::ecs::SelectedVirtualMarker>>()
+        .iter(world)
+        .filter(|strip| strip.id() == EXT_WORKSPACE_ID)
+        .map(|strip| (strip.virtual_index, strip.all_windows()))
+        .collect::<Vec<_>>();
+    selected.sort();
+    let ids = selected
+        .into_iter()
+        .map(|(index, windows)| {
+            let ids = windows
+                .iter()
+                .filter_map(|entity| world.get::<crate::manager::Window>(*entity))
+                .map(|window| window.id())
+                .collect::<Vec<_>>();
+            (index, ids)
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, vec![(1, vec![301])]);
+}
+
+/// Moving a window with `Stay` onto a missing row 0 while row 1 is active must
+/// park row 0 without stealing `SelectedVirtualMarker` from row 1.
+#[test]
+fn test_virtual_move_stay_to_parked_row_zero_keeps_shown_row() {
+    use crate::commands::MoveFocus;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.advance(Duration::from_millis(100));
+
+    // Move both windows to row 1 (first Stay, then Follow), then remove empty
+    // row 0 so moving one window back to 0 with Stay spawns a parked row 0.
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Stay)),
+    });
+    harness.advance(Duration::from_millis(200));
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(1, MoveFocus::Follow)),
+    });
+    harness.advance(Duration::from_millis(200));
+    let empty_zero = {
+        let world = harness.world();
+        let mut q = world.query::<(Entity, &LayoutStrip)>();
+        q.iter(world)
+            .find(|(_, strip)| strip.id() == TEST_WORKSPACE_ID && strip.virtual_index == 0)
+            .map(|(entity, strip)| {
+                assert_eq!(strip.len(), 0, "row 0 should be empty");
+                entity
+            })
+            .expect("empty row 0 exists")
+    };
+    harness.world().entity_mut(empty_zero).despawn();
+
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(0, MoveFocus::Stay)),
+    });
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    let mut selected = world
+        .query_filtered::<&LayoutStrip, With<crate::ecs::SelectedVirtualMarker>>()
+        .iter(world)
+        .filter(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .map(|strip| strip.virtual_index)
+        .collect::<Vec<_>>();
+    selected.sort_unstable();
+    assert_eq!(selected, vec![1]);
+}
+
 /// Restore consumes row 0's windows onto the saved rows, which empties row 0.
 /// Despawning it there left the restored space numbered from "2", so the
 /// emptied baseline row is kept.

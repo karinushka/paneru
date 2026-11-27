@@ -248,14 +248,31 @@ fn cancel_resize_intent_on_focus(
     }
 }
 
+/// Where the handlers of window commands (`window …`) read them from.
+///
+/// While the overview is open, the windows behind it aren't what the user
+/// is steering: every window command is read and dropped here, so none of
+/// them centres, resizes or moves a real window. The overview reads the
+/// few it uses (the focus moves) from the messages itself.
+#[derive(SystemParam)]
+pub struct WindowCommands<'w, 's> {
+    messages: MessageReader<'w, 's, Event>,
+    overview: Option<Res<'w, crate::ecs::overview::OverviewPhase>>,
+}
+
 pub fn filter_window_operations<'a, F: Fn(&Operation) -> bool>(
-    messages: &'a mut MessageReader<Event>,
+    commands: &'a mut WindowCommands,
     filter: F,
 ) -> impl Iterator<Item = &'a Operation> {
-    messages.read().filter_map(move |event| {
+    let held = commands
+        .overview
+        .as_ref()
+        .is_some_and(|overview| overview.is_active());
+    commands.messages.read().filter_map(move |event| {
         if let Event::Command {
             command: Command::Window(op),
         } = &event
+            && !held
             && filter(op)
         {
             Some(op)
@@ -523,7 +540,7 @@ fn floating_focus_target(
 }
 
 fn command_move_focus(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     workspaces: Query<(&LayoutStrip, Entity, Option<&NativeFullscreenMarker>)>,
     active_display: ActiveDisplay,
@@ -691,7 +708,7 @@ fn focus_from_fullscreen(
 }
 
 fn command_focus_unmanaged(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
@@ -722,7 +739,7 @@ fn command_focus_unmanaged(
 }
 
 fn command_focus_managed(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     active_display: ActiveDisplay,
     focus_history: Res<FocusHistory>,
     mut commands: Commands,
@@ -749,7 +766,7 @@ fn command_focus_managed(
 }
 
 fn command_raise_floating(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     window_manager: Res<WindowManager>,
@@ -793,7 +810,7 @@ fn command_raise_floating(
 /// made frontmost. Other windows in the new top tier are raised within their
 /// own apps' stacks as a best-effort.
 fn command_toggle_floating_layer(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     active_display: ActiveDisplay,
     mut floating_layers: Query<&mut FloatingLayer>,
     focus_history: Res<FocusHistory>,
@@ -885,7 +902,7 @@ fn command_toggle_floating_layer(
 /// `Some(Entity)` with the entity that was swapped with, otherwise `None`.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn command_swap_focus(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
@@ -982,7 +999,7 @@ fn mark_manual_offset(
 
 /// Centers the focused window on the active display.
 fn command_center_window(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     strips: StripPositions,
@@ -1050,7 +1067,7 @@ fn command_center_window(
 /// * `commands` - Bevy commands to trigger events.
 /// * `config` - The `Config` resource.
 fn resize_window(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     config: Res<Config>,
@@ -1162,7 +1179,7 @@ fn step_ratio(ratio: f64, direction: ResizeDirection, step: f64, min_ratio: f64)
 /// to the full strip height, so a height written anywhere else is overwritten on
 /// the next layout pass.
 fn resize_window_vertical(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     config: Res<Config>,
@@ -1280,7 +1297,7 @@ fn resize_window_vertical(
 }
 
 fn full_width_window(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     config: Res<Config>,
@@ -1339,7 +1356,7 @@ fn full_width_window(
 /// * `windows` - A mutable query for `Window` components, their `Entity`, and whether they have the `Unmanaged` marker.
 /// * `commands` - Bevy commands to modify entities.
 fn manage_window(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     apps: Query<&Application>,
     mut workspaces: Query<(&mut LayoutStrip, Has<ActiveWorkspaceMarker>)>,
@@ -1410,7 +1427,7 @@ fn manage_window(
 /// clipboard, so the user can paste a working starting point instead of
 /// guessing the app's bundle id and transcribing the title into a regex.
 fn copy_window_rule(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     apps: Query<&Application>,
     dialect: Res<SnippetDialect>,
@@ -1521,7 +1538,7 @@ pub(crate) fn schedule_cross_display_resize(
 /// * `active_display` - A mutable reference to the `ActiveDisplayMut` resource.
 /// * `commands` - Bevy commands to modify entities and trigger events.
 fn to_next_display(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut other_workspaces: OffscreenStrips,
@@ -1736,7 +1753,7 @@ fn mouse_to_next_display(
 
 /// Distributes heights equally among all windows in the currently focused stack.
 fn equalize_column(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     current_focus: Single<(&Window, Entity), With<FocusedMarker>>,
     windows: Windows,
     active_display: ActiveDisplay,
@@ -1779,7 +1796,7 @@ fn equalize_column(
 
 /// Makes all columns in the active strip the same width as the focused window.
 fn balance_strip(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     mut commands: Commands,
@@ -1826,7 +1843,7 @@ fn balance_strip(
 /// when it overflows right. No resize — the window keeps its current size.
 /// Bypasses the lazy-viewport check since the user explicitly asked to reveal.
 fn snap_window(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     active_display: ActiveDisplay,
     strips: StripPositions,
@@ -1946,7 +1963,7 @@ fn reposition_strip_to_snap(
 
 #[instrument(level = Level::DEBUG, skip_all)]
 pub fn stack_windows_handler(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     // config: Res<Config>,
@@ -2000,7 +2017,7 @@ pub fn stack_windows_handler(
 /// touched here at all.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub fn consume_windows_handler(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
@@ -2056,7 +2073,7 @@ pub fn consume_windows_handler(
 /// window out.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub fn expel_windows_handler(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,
@@ -2109,7 +2126,7 @@ pub fn expel_windows_handler(
 /// on anything that isn't a multi-window `Column::Stack`.
 #[instrument(level = Level::DEBUG, skip_all)]
 pub fn toggle_tabbed_display_handler(
-    mut messages: MessageReader<Event>,
+    mut messages: WindowCommands,
     windows: Windows,
     mut active_display: ActiveDisplayMut,
     mut commands: Commands,

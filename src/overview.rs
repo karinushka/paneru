@@ -12,6 +12,7 @@
 mod capture;
 mod layers;
 mod live;
+pub mod search;
 pub mod view;
 
 /// Display-local, Y-down rectangle in points.
@@ -379,6 +380,22 @@ pub fn layout_display<K: Clone>(
     }
 }
 
+impl<K: PartialEq> StripPlacement<K> {
+    /// Shift, in points, that brings tiled window `focus` fully inside
+    /// `work_area` from where the user panned the strip, the way paneru
+    /// scrolls a strip to expose a newly focused window. 0 when it is in
+    /// view already or not a tiled window of this strip.
+    fn exposing_points(&self, focus: &K, scale: f64, work_area: (f64, f64)) -> f64 {
+        let pan = self.pan / scale;
+        self.windows
+            .iter()
+            .find(|w| &w.key == focus)
+            .map_or(0.0, |w| {
+                exposing_shift(&w.layout.offset(pan, 0.0), work_area)
+            })
+    }
+}
+
 impl<K> DisplayLayout<K> {
     /// Row index whose band contains the display-local point.
     pub fn strip_at(&self, x: f64, y: f64) -> Option<usize> {
@@ -458,11 +475,140 @@ impl<K> DisplayLayout<K> {
         (lo.min(0.0) * self.scale, pinned_left.max(0.0) * self.scale)
     }
 
+    /// How far, in points, closing into `row` scrolls it past its pan so
+    /// that `focus` is fully in view: see [`reanchor`].
+    pub fn exposing_points(&self, row: usize, focus: &K) -> f64
+    where
+        K: PartialEq,
+    {
+        self.strips.get(row).map_or(0.0, |strip| {
+            strip.exposing_points(focus, self.scale.max(f64::EPSILON), self.work_area)
+        })
+    }
+
     /// A row's pan in display points: how far committing it moves the strip.
     pub fn pan_points(&self, row: usize) -> f64 {
         self.strips
             .get(row)
             .map_or(0.0, |strip| strip.pan / self.scale.max(f64::EPSILON))
+    }
+}
+
+/// An arrow key's direction, for moving the overview's selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+/// The overview move a window command stands for while the overview is
+/// open, if any: focus west/east go left/right, focus north/south and the
+/// virtual-workspace switches go up/down (rows are the virtual
+/// workspaces). The overview takes these from the handlers that would
+/// otherwise move the real focus behind it; every other command (and
+/// focus first/last/nth) still acts on the real layout.
+pub fn overview_move(op: &crate::commands::Operation) -> Option<Direction> {
+    use crate::commands::{Direction as Towards, Operation};
+    match op {
+        Operation::Focus(towards) => match towards {
+            Towards::West => Some(Direction::Left),
+            Towards::East => Some(Direction::Right),
+            Towards::North => Some(Direction::Up),
+            Towards::South => Some(Direction::Down),
+            _ => None,
+        },
+        Operation::Virtual(towards) | Operation::FocusOrVirtual(towards) => match towards {
+            Towards::North => Some(Direction::Up),
+            Towards::South => Some(Direction::Down),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Centre of a row's card where it shows while open: it moves with the
+/// row's pan.
+fn shown_centre<K>(strip: &StripPlacement<K>, window: &WindowPlacement<K>) -> (f64, f64) {
+    let f = &window.overview;
+    (f.x + strip.pan + f.w / 2.0, f.y + f.h / 2.0)
+}
+
+/// The window next to `from` in `direction`, as the cards sit on screen,
+/// among those `allowed` (the search's matches, or all). Only the rows'
+/// windows: the floating shelf is not walked.
+///
+/// Left and right stay in `from`'s row and take the nearest card that way.
+/// Up and down move within a stacked column first, then go to the nearest
+/// row that way with an allowed card and take its card closest
+/// horizontally. `None` at an edge.
+pub fn neighbour<K: PartialEq + Clone>(
+    layout: &DisplayLayout<K>,
+    from: &K,
+    direction: Direction,
+    allowed: impl Fn(&K) -> bool,
+) -> Option<(usize, K)> {
+    let (row, here, half_width) = layout.strips.iter().enumerate().find_map(|(row, strip)| {
+        let window = strip.windows.iter().find(|w| &w.key == from)?;
+        Some((row, shown_centre(strip, window), window.overview.w / 2.0))
+    })?;
+    let candidates = |row: usize| {
+        let strip = &layout.strips[row];
+        strip
+            .windows
+            .iter()
+            .filter(|w| &w.key != from && allowed(&w.key))
+            .map(move |w| (shown_centre(strip, w), w.key.clone()))
+    };
+    let closest = |items: Vec<((f64, f64), K)>, distance: &dyn Fn((f64, f64)) -> (f64, f64)| {
+        items
+            .into_iter()
+            .min_by(|(a, _), (b, _)| {
+                distance(*a)
+                    .partial_cmp(&distance(*b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(_, key)| key)
+    };
+    match direction {
+        Direction::Left | Direction::Right => {
+            let sign = if direction == Direction::Right {
+                1.0
+            } else {
+                -1.0
+            };
+            let ahead: Vec<_> = candidates(row)
+                .filter(|((x, _), _)| (x - here.0) * sign > 1.0)
+                .collect();
+            let key = closest(ahead, &|(x, y)| ((x - here.0).abs(), (y - here.1).abs()))?;
+            Some((row, key))
+        }
+        Direction::Up | Direction::Down => {
+            let sign = if direction == Direction::Down {
+                1.0
+            } else {
+                -1.0
+            };
+            // A stacked window above or below, in the same column, first.
+            let stacked: Vec<_> = candidates(row)
+                .filter(|((x, y), _)| (y - here.1) * sign > 1.0 && (x - here.0).abs() < half_width)
+                .collect();
+            if let Some(key) = closest(stacked, &|(x, y)| ((y - here.1).abs(), (x - here.0).abs()))
+            {
+                return Some((row, key));
+            }
+            let rows: Box<dyn Iterator<Item = usize>> = if direction == Direction::Down {
+                Box::new(row + 1..layout.strips.len())
+            } else {
+                Box::new((0..row).rev())
+            };
+            rows.into_iter().find_map(|row| {
+                let items: Vec<_> = candidates(row).collect();
+                let key = closest(items, &|(x, y)| ((x - here.0).abs(), (y - here.1).abs()))?;
+                Some((row, key))
+            })
+        }
     }
 }
 
@@ -613,11 +759,7 @@ pub fn reanchor<K: Clone + PartialEq>(
         // What the user panned to is where the strip is left.
         let pan = strip.pan / scale;
         let shift = if strip.active {
-            focus
-                .and_then(|key| strip.windows.iter().find(|w| &w.key == key))
-                .map_or(0.0, |w| {
-                    exposing_shift(&w.layout.offset(pan, 0.0), work_area)
-                })
+            focus.map_or(0.0, |key| strip.exposing_points(key, scale, work_area))
         } else {
             0.0
         };
@@ -804,6 +946,130 @@ mod tests {
                 ],
             },
         ]
+    }
+
+    /// Three rows: one window, three side by side, two side by side.
+    fn grid() -> DisplayLayout<u32> {
+        let row = |index: u32, active: bool, keys: &[u32]| StripInput {
+            virtual_index: index,
+            active,
+            windows: keys
+                .iter()
+                .zip(0..)
+                .map(|(&key, i)| window(key, f64::from(i) * 800.0, None))
+                .collect(),
+        };
+        let strips = [
+            row(0, false, &[1]),
+            row(1, true, &[2, 3, 4]),
+            row(2, false, &[5, 6]),
+        ];
+        layout_display(SIZE, &strips, &[], 1.0, &Metrics::default())
+    }
+
+    #[test]
+    fn arrows_follow_the_cards_on_screen() {
+        let layout = grid();
+        let all = |_: &u32| true;
+        let go = |from, direction| neighbour(&layout, &from, direction, all).map(|(_, k)| k);
+        assert_eq!(go(3, Direction::Right), Some(4));
+        assert_eq!(go(3, Direction::Left), Some(2));
+        assert_eq!(go(4, Direction::Right), None, "stops at the row's end");
+        assert_eq!(go(3, Direction::Up), Some(1));
+        assert_eq!(go(1, Direction::Down), Some(2), "the closest card below");
+        assert_eq!(go(4, Direction::Down), Some(6));
+        assert_eq!(go(5, Direction::Down), None);
+    }
+
+    #[test]
+    fn arrows_skip_windows_that_are_not_allowed() {
+        let layout = grid();
+        let matches = |k: &u32| [2, 4, 6].contains(k);
+        let go = |from, direction| neighbour(&layout, &from, direction, matches).map(|(_, k)| k);
+        assert_eq!(go(2, Direction::Right), Some(4), "jumps over 3");
+        // Row 0 has no match: up from row 1 finds nothing.
+        assert_eq!(go(2, Direction::Up), None);
+        // Down skips to the nearest match in the next row.
+        assert_eq!(go(2, Direction::Down), Some(6));
+    }
+
+    #[test]
+    fn up_and_down_walk_a_stacked_column_first() {
+        let stacked = |key, y| WindowInput {
+            layout_frame: Rect::new(0.0, y, 800.0, 480.0),
+            ..window(key, 0.0, None)
+        };
+        let strips = [
+            StripInput {
+                virtual_index: 0,
+                active: false,
+                windows: vec![window(1, 0.0, None)],
+            },
+            StripInput {
+                virtual_index: 1,
+                active: true,
+                windows: vec![stacked(2, 30.0), stacked(3, 520.0), window(4, 800.0, None)],
+            },
+        ];
+        let layout = layout_display(SIZE, &strips, &[], 1.0, &Metrics::default());
+        let all = |_: &u32| true;
+        let go = |from, direction| neighbour(&layout, &from, direction, all).map(|(_, k)| k);
+        assert_eq!(go(2, Direction::Down), Some(3));
+        assert_eq!(go(3, Direction::Up), Some(2));
+        assert_eq!(
+            go(2, Direction::Up),
+            Some(1),
+            "top of the stack: the row above"
+        );
+        assert_eq!(
+            go(4, Direction::Up),
+            Some(1),
+            "not into the stack beside it"
+        );
+    }
+
+    #[test]
+    fn focus_commands_are_overview_moves() {
+        use crate::commands::{Direction as Towards, Operation};
+        let moved = |op| overview_move(&op);
+        assert_eq!(
+            moved(Operation::Focus(Towards::West)),
+            Some(Direction::Left)
+        );
+        assert_eq!(
+            moved(Operation::Focus(Towards::South)),
+            Some(Direction::Down)
+        );
+        assert_eq!(
+            moved(Operation::Virtual(Towards::North)),
+            Some(Direction::Up)
+        );
+        assert_eq!(
+            moved(Operation::FocusOrVirtual(Towards::South)),
+            Some(Direction::Down)
+        );
+        assert_eq!(moved(Operation::Focus(Towards::First)), None);
+        assert_eq!(moved(Operation::Virtual(Towards::Last)), None);
+        assert_eq!(
+            moved(Operation::Swap(Towards::West)),
+            None,
+            "acts on the layout"
+        );
+    }
+
+    #[test]
+    fn arrows_follow_a_panned_row() {
+        let mut layout = grid();
+        // Pan row 1 so its first card sits right of where row 2's second is.
+        let row = 1;
+        let shift =
+            layout.strips[2].windows[1].overview.x - layout.strips[row].windows[0].overview.x;
+        layout.strips[row].pan = shift + 10.0;
+        let all = |_: &u32| true;
+        assert_eq!(
+            neighbour(&layout, &2, Direction::Down, all).map(|(_, k)| k),
+            Some(6)
+        );
     }
 
     #[test]

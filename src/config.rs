@@ -635,6 +635,37 @@ impl Config {
             .max(0.0)
     }
 
+    /// See [`OverviewOptions::ring_color`].
+    pub fn overview_ring_color(&self) -> (f64, f64, f64) {
+        self.inner()
+            .overview
+            .as_ref()
+            .and_then(|o| o.ring_color.as_deref())
+            .map_or((0.45, 0.65, 1.0), parse_hex_color)
+    }
+
+    /// See [`OverviewOptions::ring_width`].
+    pub fn overview_ring_width(&self) -> f64 {
+        self.inner()
+            .overview
+            .as_ref()
+            .and_then(|o| o.ring_width)
+            .filter(|w| w.is_finite())
+            .unwrap_or(2.5)
+            .max(0.0)
+    }
+
+    /// See [`OverviewOptions::ring_gap`].
+    pub fn overview_ring_gap(&self) -> f64 {
+        self.inner()
+            .overview
+            .as_ref()
+            .and_then(|o| o.ring_gap)
+            .filter(|g| g.is_finite())
+            .unwrap_or(2.0)
+            .max(0.0)
+    }
+
     pub fn swipe_vertical(&self) -> bool {
         let config = self.inner();
         config
@@ -1311,6 +1342,14 @@ pub struct OverviewOptions {
     /// a card keeps streaming, so cards scrolled just out of view don't
     /// stop and restart. Default: 0.
     pub live_margin: Option<f64>,
+    /// Colour of the ring around the focused or selected card, as
+    /// `"#rrggbb"`. Default: `"#73a6ff"`.
+    pub ring_color: Option<String>,
+    /// Width of that ring when fully open, in points. Default: 2.5.
+    pub ring_width: Option<f64>,
+    /// Space between a card's edge and its ring (which sits outside the
+    /// card), in points when fully open. Default: 2.
+    pub ring_gap: Option<f64>,
 }
 
 impl InnerConfig {
@@ -3588,4 +3627,10 @@ live_margin = 0.5
     assert_eq!(config.overview_live_margin(), 0.5);
     let negative = Config::try_from("[overview]\nlive_margin = -1.0\n").expect("parses");
     assert_eq!(negative.overview_live_margin(), 0.0);
+    assert_eq!(defaults.overview_ring_width(), 2.5);
+    let ring = Config::try_from("[overview]\nring_color = \"#ff8800\"\nring_width = 4.0\n")
+        .expect("parses");
+    assert_eq!(ring.overview_ring_color(), (1.0, 136.0 / 255.0, 0.0));
+    assert_eq!(ring.overview_ring_width(), 4.0);
+    assert_eq!(defaults.overview_ring_gap(), 2.0);
 }

@@ -900,7 +900,9 @@ pub(crate) fn demux_input_events(
         if event.is_overview() {
             overview_active = true;
             overview.write(OverviewEvent(event.clone()));
-        } else if overview_active && event.invalidates_overview() {
+        } else if overview_active
+            && (event.invalidates_overview() || event.moves_overview_selection())
+        {
             overview.write(OverviewEvent(event.clone()));
         }
     }

@@ -7,18 +7,18 @@ use objc2::{class, msg_send};
 use objc2_app_kit::NSFont;
 use objc2_core_foundation::{CFRetained, CGPoint, CGRect, CGSize};
 use objc2_core_graphics::{CGColor, CGImage};
-use objc2_foundation::{NSString, ns_string};
+use objc2_foundation::{NSArray, NSRange, NSSize, NSString, ns_string};
 use objc2_quartz_core::{
     CABasicAnimation, CACurrentMediaTime, CALayer, CAMediaTiming as _, CASpringAnimation,
-    CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAFillModeForwards, kCAGravityResizeAspect,
-    kCATruncationEnd,
+    CATextLayer, kCAAlignmentCenter, kCAAlignmentLeft, kCAAlignmentRight, kCAFillModeForwards,
+    kCAGravityResizeAspect, kCATruncationEnd,
 };
 
+use super::view::CardMatch;
 use super::{Rect, Spring};
 
-/// Corner radius and focus ring width of a card when fully open, in points.
+/// Corner radius of a card when fully open, in points.
 pub(super) const CARD_RADIUS: f64 = 10.0;
-const RING_WIDTH: f64 = 2.5;
 
 /// Without previews: a card's app icon size and title font size when fully
 /// open, in points.
@@ -74,6 +74,269 @@ pub(super) fn row_label(virtual_index: u32, rect: &Rect, scale: f64) -> Animated
     let h = (LABEL_FONT_SIZE * 1.3).min(rect.h);
     let rect = Rect::new(rect.x + 4.0, rect.y + rect.h - h - 2.0, rect.w - 8.0, h);
     Animated::new(Retained::into_super(text), rect, rect, (0.0, 1.0))
+}
+
+/// Size of the search field's text, in points.
+const SEARCH_FONT_SIZE: f64 = 20.0;
+const SEARCH_COUNT_FONT_SIZE: f64 = 13.0;
+
+/// The search field's layers.
+pub(super) struct SearchBar {
+    pub(super) bar: Retained<CALayer>,
+    pub(super) text: Retained<CATextLayer>,
+    /// "3 matches", on the right.
+    pub(super) count: Retained<CATextLayer>,
+    /// The blinking insertion point, after the typed text.
+    caret: Retained<CALayer>,
+    /// Where the text starts, and how wide it may get, in bar points.
+    text_x: f64,
+    text_w: f64,
+}
+
+impl SearchBar {
+    /// Moves the caret to the end of `query`.
+    pub(super) fn place_caret(&self, query: &str) {
+        // Before the placeholder when empty, as in a text field.
+        let x = if query.is_empty() {
+            self.text_x - 4.0
+        } else {
+            self.text_x + text_width(query, SEARCH_FONT_SIZE, true).min(self.text_w) + 1.0
+        };
+        let mut frame = self.caret.frame();
+        frame.origin.x = x;
+        self.caret.setFrame(frame);
+    }
+}
+
+/// Width of `text` set in the system font at `size` points.
+fn text_width(text: &str, size: f64, bold: bool) -> f64 {
+    if text.is_empty() {
+        return 0.0;
+    }
+    let font = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    let string = NSString::from_str(text);
+    let size: NSSize = unsafe {
+        let attributes: Retained<AnyObject> = msg_send![
+            class!(NSDictionary),
+            dictionaryWithObject: &*font,
+            forKey: ns_string!("NSFont")
+        ];
+        msg_send![&*string, sizeWithAttributes: &*attributes]
+    };
+    size.width
+}
+
+/// Blinks `layer` on and off like a text caret, until it is removed.
+fn blink(layer: &CALayer) {
+    let values = NSArray::from_retained_slice(&[ns_number(1.0), ns_number(0.0)]);
+    let times = NSArray::from_retained_slice(&[ns_number(0.0), ns_number(0.5)]);
+    unsafe {
+        let animation: Retained<AnyObject> = msg_send![
+            class!(CAKeyframeAnimation),
+            animationWithKeyPath: ns_string!("opacity")
+        ];
+        let _: () = msg_send![&*animation, setValues: &*values];
+        let _: () = msg_send![&*animation, setKeyTimes: &*times];
+        let _: () = msg_send![&*animation, setCalculationMode: ns_string!("discrete")];
+        let _: () = msg_send![&*animation, setDuration: 1.06_f64];
+        let _: () = msg_send![&*animation, setRepeatCount: f32::INFINITY];
+        let _: () = msg_send![layer, addAnimation: &*animation, forKey: ns_string!("blink")];
+    }
+}
+
+/// The search field: a rounded bar centred near the top of a panel `width`
+/// points wide, `top` points down (below a notch), above the rows (it
+/// doesn't scroll with them).
+pub(super) fn search_bar(width: f64, top: f64, scale: f64) -> SearchBar {
+    let (w, h) = (560.0_f64.min(width - 32.0), 46.0);
+    let bar = CALayer::new();
+    bar.setFrame(CGRect::new(
+        CGPoint::new((width - w) / 2.0, top + 12.0),
+        CGSize::new(w, h),
+    ));
+    bar.setBackgroundColor(Some(&color(0.09, 0.10, 0.12, 0.94)));
+    bar.setBorderColor(Some(&match_color()));
+    bar.setBorderWidth(1.5);
+    bar.setCornerRadius(h / 2.0);
+    bar.setShadowColor(Some(&color(0.0, 0.0, 0.0, 1.0)));
+    bar.setShadowOpacity(0.5);
+    bar.setShadowRadius(12.0);
+    bar.setShadowOffset(CGSize::new(0.0, 4.0));
+    bar.setHidden(true);
+
+    let count_w = 110.0;
+    let text = text_layer(
+        "",
+        &NSFont::boldSystemFontOfSize(SEARCH_FONT_SIZE),
+        SEARCH_FONT_SIZE,
+        unsafe { kCAAlignmentLeft },
+        scale,
+    );
+    let text_h = SEARCH_FONT_SIZE * 1.3;
+    text.setFrame(CGRect::new(
+        CGPoint::new(26.0, (h - text_h) / 2.0),
+        CGSize::new(w - 48.0 - count_w, text_h),
+    ));
+    bar.addSublayer(&text);
+
+    let count = text_layer(
+        "",
+        &NSFont::systemFontOfSize(SEARCH_COUNT_FONT_SIZE),
+        SEARCH_COUNT_FONT_SIZE,
+        unsafe { kCAAlignmentRight },
+        scale,
+    );
+    count.setForegroundColor(Some(&color(1.0, 1.0, 1.0, 0.6)));
+    let count_h = SEARCH_COUNT_FONT_SIZE * 1.3;
+    count.setFrame(CGRect::new(
+        CGPoint::new(w - 22.0 - count_w, (h - count_h) / 2.0),
+        CGSize::new(count_w, count_h),
+    ));
+    bar.addSublayer(&count);
+
+    let caret = CALayer::new();
+    let caret_h = SEARCH_FONT_SIZE * 1.2;
+    caret.setFrame(CGRect::new(
+        CGPoint::new(22.0, (h - caret_h) / 2.0),
+        CGSize::new(2.0, caret_h),
+    ));
+    caret.setBackgroundColor(Some(&match_color()));
+    caret.setCornerRadius(1.0);
+    bar.addSublayer(&caret);
+    blink(&caret);
+    SearchBar {
+        bar,
+        text,
+        count,
+        caret,
+        text_x: 26.0,
+        text_w: w - 48.0 - count_w,
+    }
+}
+
+/// Colour of the characters a search matched.
+pub(super) fn match_color() -> CFRetained<CGColor> {
+    color(0.55, 0.75, 1.0, 1.0)
+}
+
+/// A strip along the bottom of a card naming its app and title, with the
+/// characters the search matched highlighted. Laid out in the card's bounds
+/// space (see [`add_tile`]).
+pub(super) struct SearchLabel {
+    pub(super) bar: Retained<CALayer>,
+    app: Retained<CATextLayer>,
+    title: Retained<CATextLayer>,
+    /// Bounds-space length of one point once open.
+    unit: f64,
+}
+
+impl SearchLabel {
+    const APP_FONT: f64 = 14.0;
+    const TITLE_FONT: f64 = 12.5;
+
+    /// A label strip along the bottom of `card`, added to `parent` (a
+    /// layer covering the card).
+    pub(super) fn new(card: &Animated, parent: &CALayer, scale: f64) -> Self {
+        let unit = card.open_points(1.0);
+        let (w, h) = card.base;
+        let bar_h = (unit * 48.0).min(h);
+        let bar = CALayer::new();
+        bar.setFrame(CGRect::new(
+            CGPoint::new(0.0, h - bar_h),
+            CGSize::new(w, bar_h),
+        ));
+        bar.setBackgroundColor(Some(&color(0.05, 0.06, 0.08, 0.88)));
+        let line = |y: f64, size: f64| {
+            let text = CATextLayer::new();
+            text.setTruncationMode(unsafe { kCATruncationEnd });
+            text.setAlignmentMode(unsafe { kCAAlignmentLeft });
+            // Rendered at its size on screen, not at the window's: the card
+            // scales it down, and big windows would make huge textures.
+            text.setContentsScale(scale / unit.max(f64::EPSILON));
+            text.setFrame(CGRect::new(
+                CGPoint::new(unit * 8.0, y),
+                CGSize::new((w - unit * 16.0).max(1.0), unit * size * 1.3),
+            ));
+            bar.addSublayer(&text);
+            text
+        };
+        let app = line(unit * 5.0, Self::APP_FONT);
+        let title = line(unit * 25.0, Self::TITLE_FONT);
+        parent.addSublayer(&bar);
+        Self {
+            bar,
+            app,
+            title,
+            unit,
+        }
+    }
+
+    pub(super) fn show(&self, label: &CardMatch) {
+        let text = |layer: &CATextLayer, string: &str, hits: &[usize], size: f64, bold: bool| {
+            let string = highlighted(string, hits, self.unit * size, bold);
+            unsafe { layer.setString(Some(&string)) };
+        };
+        text(&self.app, &label.app, &label.app_hits, Self::APP_FONT, true);
+        text(
+            &self.title,
+            &label.title,
+            &label.title_hits,
+            Self::TITLE_FONT,
+            false,
+        );
+        self.bar.setHidden(false);
+    }
+}
+
+/// `text` at `size` points, with the characters at `hits` (char indices)
+/// bold and in [`match_color`].
+fn highlighted(text: &str, hits: &[usize], size: f64, bold: bool) -> Retained<AnyObject> {
+    let string = NSString::from_str(text);
+    let attributed: Retained<AnyObject> = unsafe {
+        msg_send![
+            msg_send![class!(NSMutableAttributedString), alloc],
+            initWithString: &*string
+        ]
+    };
+    // CoreText's keys: what CATextLayer draws with.
+    let font_key = ns_string!("NSFont");
+    let color_key = ns_string!("CTForegroundColor");
+    let cf = |object: &objc2_core_foundation::CFType| -> *const AnyObject {
+        std::ptr::from_ref(object).cast()
+    };
+    let add = |key: &NSString, value: *const AnyObject, range: NSRange| {
+        let _: () =
+            unsafe { msg_send![&*attributed, addAttribute: key, value: value, range: range] };
+    };
+    let regular = if bold {
+        NSFont::boldSystemFontOfSize(size)
+    } else {
+        NSFont::systemFontOfSize(size)
+    };
+    let hit_font = NSFont::boldSystemFontOfSize(size);
+    let plain = color(1.0, 1.0, 1.0, if bold { 1.0 } else { 0.88 });
+    let accent = match_color();
+    let all = NSRange::new(0, string.length());
+    add(font_key, Retained::as_ptr(&regular).cast(), all);
+    add(color_key, cf(&plain), all);
+    // Char indices to UTF-16 ranges.
+    let mut offset = 0;
+    let mut hits = hits.iter().peekable();
+    for (i, c) in text.chars().enumerate() {
+        let len = c.len_utf16();
+        if hits.peek() == Some(&&i) {
+            hits.next();
+            let range = NSRange::new(offset, len);
+            add(font_key, Retained::as_ptr(&hit_font).cast(), range);
+            add(color_key, cf(&accent), range);
+        }
+        offset += len;
+    }
+    attributed
 }
 
 /// A card without a preview: a plain tile with the app icon and the window
@@ -205,6 +468,13 @@ pub(super) struct Animated {
     /// Corner radius in bounds space when fully open; grows in like `ring`
     /// so the full-size frame at progress 0 has square corners.
     pub(super) corner: f64,
+    /// Rounded and clipped with `layer` (a card's content, which does the
+    /// clipping so the outline can sit outside the card).
+    clip: Option<Retained<CALayer>>,
+    /// Draws the ring outside the layer, `gap` (bounds space, when fully
+    /// open) away from its edge, instead of as `layer`'s own inward border.
+    outline: Option<Retained<CALayer>>,
+    gap: f64,
     /// Monotonic counter giving each additive morph animation a unique key on
     /// `layer` so rapid consecutive morphs compose rather than overwrite.
     morph_seq: u64,
@@ -234,16 +504,78 @@ impl Animated {
             base,
             ring: 0.0,
             corner: 0.0,
+            clip: None,
+            outline: None,
+            gap: 0.0,
             morph_seq: 0,
         }
     }
 
-    pub(super) fn set_ring(&mut self, on: bool) {
-        self.ring = if on {
-            self.open_points(RING_WIDTH)
-        } else {
-            0.0
-        };
+    /// Clips to `clip` instead of the layer's own bounds and draws the ring
+    /// on an outline around the layer, `gap` points out when fully open, so
+    /// it doesn't cover the edge of what the layer shows.
+    pub(super) fn ring_outside(&mut self, clip: Retained<CALayer>, color: &CGColor, gap: f64) {
+        self.layer.setMasksToBounds(false);
+        clip.setMasksToBounds(true);
+        let outline = CALayer::new();
+        outline.setPosition(CGPoint::new(self.base.0 / 2.0, self.base.1 / 2.0));
+        outline.setBorderColor(Some(color));
+        self.layer.addSublayer(&outline);
+        self.gap = self.open_points(gap);
+        self.clip = Some(clip);
+        self.outline = Some(outline);
+    }
+
+    /// Layer properties that grow in with progress: the layer, the key
+    /// path, its value at progress 0 and how much it grows by progress 1
+    /// (the outline's size starts from the layer's).
+    fn decorations(&self) -> Vec<(&CALayer, &'static NSString, f64, f64)> {
+        let corner = ns_string!("cornerRadius");
+        let border = ns_string!("borderWidth");
+        let mut values = vec![(&*self.layer, corner, 0.0, self.corner)];
+        if let Some(clip) = &self.clip {
+            values.push((clip, corner, 0.0, self.corner));
+        }
+        match &self.outline {
+            Some(outline) => {
+                let out = if self.ring > 0.0 {
+                    self.gap + self.ring
+                } else {
+                    0.0
+                };
+                values.extend([
+                    (&**outline, border, 0.0, self.ring),
+                    (outline, corner, 0.0, self.corner + out),
+                    (
+                        outline,
+                        ns_string!("bounds.size.width"),
+                        self.base.0,
+                        2.0 * out,
+                    ),
+                    (
+                        outline,
+                        ns_string!("bounds.size.height"),
+                        self.base.1,
+                        2.0 * out,
+                    ),
+                ]);
+            }
+            None => values.push((&*self.layer, border, 0.0, self.ring)),
+        }
+        values
+    }
+
+    /// Sets the decorations for progress `p`, without animating.
+    pub(super) fn decorate(&self, p: f64) {
+        let p = p.clamp(0.0, 1.0);
+        for (layer, key, start, grow) in self.decorations() {
+            set_key_path(layer, key, start + grow * p);
+        }
+    }
+
+    /// Shows the ring `width` points wide when fully open, or hides it.
+    pub(super) fn set_ring(&mut self, on: bool, width: f64) {
+        self.ring = if on { self.open_points(width) } else { 0.0 };
     }
 
     /// Bounds-space length that renders as `points` when fully open.
@@ -277,9 +609,7 @@ impl Animated {
 
     pub(super) fn set(&self, p: f64) {
         self.apply(&self.frame(p), self.opacity_at(p));
-        let p = p.clamp(0.0, 1.0);
-        self.layer.setBorderWidth(self.ring * p);
-        self.layer.setCornerRadius(self.corner * p);
+        self.decorate(p);
     }
 
     fn spring_between(
@@ -337,15 +667,18 @@ impl Animated {
         let (a, b) = (self.frame(spring.from), self.frame(spring.to));
         let opacity = (self.opacity_at(spring.from), self.opacity_at(spring.to));
         self.spring_between(&a, &b, opacity, spring, duration);
-        for (key, full) in [
-            (ns_string!("borderWidth"), self.ring),
-            (ns_string!("cornerRadius"), self.corner),
-        ] {
+        if let Some(outline) = &self.outline {
+            outline.removeAllAnimations();
+        }
+        if let Some(clip) = &self.clip {
+            clip.removeAllAnimations();
+        }
+        for (layer, key, start, full) in self.decorations() {
             if full <= 0.0 {
                 continue;
             }
-            let at = |p: f64| full * p.clamp(0.0, 1.0);
-            set_key_path(&self.layer, key, at(spring.to));
+            let at = |p: f64| start + full * p.clamp(0.0, 1.0);
+            set_key_path(layer, key, at(spring.to));
             let grow = spring_anim(
                 key,
                 &ns_number(at(spring.from)),
@@ -353,7 +686,7 @@ impl Animated {
                 spring,
                 duration,
             );
-            self.layer.addAnimation_forKey(&grow, Some(key));
+            layer.addAnimation_forKey(&grow, Some(key));
         }
     }
 
@@ -412,8 +745,7 @@ impl Animated {
                 }
             }
         }
-        self.layer.setBorderWidth(self.ring);
-        self.layer.setCornerRadius(self.corner);
+        self.decorate(1.0);
     }
 }
 

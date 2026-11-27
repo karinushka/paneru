@@ -104,6 +104,147 @@ fn assert_laptop_switched_to_second_row(world: &mut World) {
 }
 
 #[test]
+fn typing_a_letter_starts_a_search_with_it() {
+    let none = KeyModifiers {
+        shift: false,
+        command: false,
+        control: false,
+        option: false,
+    };
+    let shift = KeyModifiers {
+        shift: true,
+        ..none
+    };
+    let mut state: Option<Search> = None;
+    assert_eq!(overview_key(&mut state, 5, "G", shift), KeyAction::Query);
+    assert_eq!(overview_key(&mut state, 34, "i", none), KeyAction::Query);
+    let search = state.as_ref().expect("searching");
+    assert_eq!(search.query, "Gi");
+    assert_eq!(search.pick, SearchPick::Best, "jumps to the best match");
+
+    let mut state: Option<Search> = None;
+    assert_eq!(overview_key(&mut state, 18, "1", none), KeyAction::Query);
+    assert_eq!(state.as_ref().map(|s| s.query.as_str()), Some("1"));
+}
+
+#[test]
+fn overview_keys_search_edit_and_move() {
+    const NONE: KeyModifiers = KeyModifiers {
+        shift: false,
+        command: false,
+        control: false,
+        option: false,
+    };
+    const SHIFT: KeyModifiers = KeyModifiers {
+        shift: true,
+        ..NONE
+    };
+    const CMD: KeyModifiers = KeyModifiers {
+        command: true,
+        ..NONE
+    };
+    const CTRL: KeyModifiers = KeyModifiers {
+        control: true,
+        ..NONE
+    };
+    const OPT: KeyModifiers = KeyModifiers {
+        option: true,
+        ..NONE
+    };
+    let mut state: Option<Search> = None;
+    let key = |state: &mut Option<Search>, code, text, keys| overview_key(state, code, text, keys);
+    // Arrows move the selection, searching or not.
+    assert_eq!(
+        key(&mut state, 124, "\u{F703}", NONE),
+        KeyAction::Move(Direction::Right)
+    );
+    assert_eq!(
+        key(&mut state, 126, "\u{F700}", NONE),
+        KeyAction::Move(Direction::Up)
+    );
+    // `/` starts an empty search; Tab, punctuation, shortcuts and
+    // Option's symbols do nothing until then.
+    assert_eq!(key(&mut state, 48, "\t", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 47, ".", NONE), KeyAction::None);
+    assert_eq!(key(&mut state, 0, "a", CMD), KeyAction::None);
+    assert_eq!(key(&mut state, 0, "å", OPT), KeyAction::None);
+    assert_eq!(key(&mut state, 44, "/", CMD), KeyAction::None);
+    assert!(state.is_none());
+    assert_eq!(key(&mut state, 44, "/", NONE), KeyAction::Query);
+    // Once searching, `/` is text (URLs have it).
+    for text in ["g", "h", "/"] {
+        assert_eq!(key(&mut state, 0, text, NONE), KeyAction::Query);
+    }
+    let query = |state: &Option<Search>| state.as_ref().unwrap().query.clone();
+    assert_eq!(query(&state), "gh/");
+    assert_eq!(
+        key(&mut state, 125, "\u{F701}", NONE),
+        KeyAction::Move(Direction::Down)
+    );
+    assert_eq!(
+        key(&mut state, 99, "\u{F704}", NONE),
+        KeyAction::None,
+        "F5 isn't text"
+    );
+    assert_eq!(
+        key(&mut state, 0, "a", CMD),
+        KeyAction::None,
+        "Cmd-A isn't text"
+    );
+    assert_eq!(
+        key(&mut state, 48, "\t", NONE),
+        KeyAction::Step { forward: true }
+    );
+    assert_eq!(
+        key(&mut state, 48, "\t", SHIFT),
+        KeyAction::Step { forward: false }
+    );
+    key(&mut state, 51, "\u{7f}", NONE);
+    assert_eq!(query(&state), "gh");
+    key(&mut state, 51, "\u{7f}", CMD);
+    assert_eq!(query(&state), "", "Cmd-Backspace clears");
+
+    for text in ["brave", " ", "git", "-", "hub"] {
+        key(&mut state, 0, text, NONE);
+    }
+    key(&mut state, 51, "\u{7f}", CTRL);
+    assert_eq!(query(&state), "brave git-", "Control-Backspace: a word");
+    key(&mut state, 51, "\u{7f}", OPT);
+    assert_eq!(query(&state), "brave git", "Option-Backspace: the symbols");
+    key(&mut state, 13, "\u{17}", CTRL);
+    assert_eq!(query(&state), "brave ", "Control-W: a word");
+    key(&mut state, 13, "\u{17}", CTRL);
+    assert_eq!(query(&state), "", "and the space before the next one");
+}
+
+#[test]
+fn tab_steps_through_matches_and_wraps() {
+    let window = |n: u32| Match {
+        display: 0,
+        key: Entity::from_raw_u32(n).unwrap(),
+        window_id: n.cast_signed(),
+        virtual_index: Some(0),
+    };
+    let matches = [window(1), window(2), window(3)];
+    let key = |n: u32| Some(window(n).key);
+    assert_eq!(stepped(&matches, None, true), Some(window(1)));
+    assert_eq!(stepped(&matches, None, false), Some(window(3)));
+    assert_eq!(stepped(&matches, key(2), true), Some(window(3)));
+    assert_eq!(stepped(&matches, key(3), true), Some(window(1)), "wraps");
+    assert_eq!(
+        stepped(&matches, key(1), false),
+        Some(window(3)),
+        "wraps back"
+    );
+    assert_eq!(
+        stepped(&matches, key(9), true),
+        Some(window(1)),
+        "not a match"
+    );
+    assert_eq!(stepped(&[], key(1), true), None);
+}
+
+#[test]
 fn a_pan_on_a_display_without_focus_is_kept_after_closing() {
     let mut harness = TestHarness::new();
     harness.mock_state.add_display(
@@ -930,7 +1071,7 @@ floating = true
 }
 
 #[test]
-fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
+fn overview_focus_commands_leave_a_lone_floating_window_focused() {
     use crate::commands::Direction;
 
     let mut harness = TestHarness::new()
@@ -945,9 +1086,14 @@ fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
         tick(),
         // Iteration 1: float & focus window 200, open overview phase.
         tick(),
-        // Iteration 2: press `focus east` while lone floating window 200 is focused in overview.
+        // Iteration 2: press `focus east` while lone floating window 200 is focused in overview:
+        // the overview takes it for its selection, the real focus stays.
         Event::Command {
             command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        // Iteration 3: so is every other window command, `focus last` included.
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::Last)),
         },
     ];
 
@@ -975,11 +1121,160 @@ fn overview_focus_east_falls_back_from_lone_floating_window_to_active_strip() {
             *world.resource_mut::<OverviewPhase>() = OverviewPhase::Open;
         })
         .on_iteration(2, |world, _| {
-            let focused = focused_ids(world);
-            assert!(
-                focused == [100] || focused == [101],
-                "focus east in overview must fall back from lone floater 200 to tiled strip, got {focused:?}"
+            assert_eq!(
+                focused_ids(world),
+                [200],
+                "focus east moves the overview's selection, not the real focus"
             );
+        })
+        .on_iteration(3, |world, _| {
+            assert_eq!(
+                focused_ids(world),
+                [200],
+                "window commands are dropped while the overview is open"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn a_picked_window_out_of_view_snaps_into_view() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use bevy::ecs::lifecycle::Add;
+    use bevy::ecs::observer::On;
+
+    let harness = TestHarness::new();
+    let size = Size::new(TEST_WINDOW_WIDTH, TEST_WINDOW_HEIGHT);
+    // Five 400pt columns on a 1024pt display: the last is out of view.
+    for i in 0..5 {
+        let origin = Origin::new(i * TEST_WINDOW_WIDTH, TEST_MENUBAR_HEIGHT);
+        harness.mock_state.spawn_window(
+            TEST_PROCESS_ID,
+            TEST_WORKSPACE_ID,
+            100 + i,
+            IRect::from_corners(origin, origin + size),
+        );
+    }
+    let x_of = |world: &mut World, id: i32| window_origin(world, id).expect("the window").x;
+    // Any window or strip starting an animation after the pick.
+    let animated = Arc::new(AtomicBool::new(false));
+    let spy = animated.clone();
+    let commands = vec![tick(); 2];
+    harness
+        .on_iteration(0, move |world, _| {
+            let x = x_of(world, 104);
+            assert!(
+                x + TEST_WINDOW_WIDTH > TEST_DISPLAY_WIDTH,
+                "out of view: {x}"
+            );
+            let spy = spy.clone();
+            world.add_observer(move |_: On<Add<RepositionMarker>>| {
+                spy.store(true, Ordering::Relaxed);
+            });
+            world
+                .run_system_once(|scene: Scene, windows: Windows, mut commands: Commands| {
+                    let entries = gather(&scene, None);
+                    let entry = &entries[0];
+                    let row = entry
+                        .layout
+                        .strips
+                        .iter()
+                        .position(|strip| strip.active)
+                        .expect("a shown row");
+                    let key = entry.layout.strips[row]
+                        .windows
+                        .iter()
+                        .find(|w| w.window_id == 104)
+                        .map(|w| w.key)
+                        .expect("window 104 has a card");
+                    let pick = Pick {
+                        display: 0,
+                        virtual_index: Some(entry.layout.strips[row].virtual_index),
+                        focus: Some(key),
+                    };
+                    // As `select_hit` does it.
+                    write_back(
+                        &entries,
+                        &scene.strips,
+                        &windows,
+                        &mut commands,
+                        Some(&pick),
+                    );
+                    commands.focus_entity(key, true);
+                })
+                .expect("commit runs");
+        })
+        .on_iteration(1, move |world, _| {
+            let x = x_of(world, 104);
+            assert!(
+                (0..=TEST_DISPLAY_WIDTH - TEST_WINDOW_WIDTH).contains(&x),
+                "in view: {x}"
+            );
+            assert!(
+                !animated.load(Ordering::Relaxed),
+                "got there at once, not by an animation"
+            );
+        })
+        .run(commands);
+}
+
+#[test]
+fn window_commands_do_nothing_while_the_overview_is_open() {
+    use std::sync::{Arc, Mutex};
+
+    use crate::commands::{Direction as Compass, ResizeDirection};
+
+    type Frames = Vec<(i32, bevy::math::IVec2, bevy::math::IVec2)>;
+    let frames = |world: &mut World| -> Frames {
+        let mut windows = world.query::<(&Window, &Position, &Bounds)>();
+        let mut frames: Frames = windows
+            .iter(world)
+            .map(|(window, position, bounds)| (window.id(), position.0, bounds.0))
+            .collect();
+        frames.sort_unstable_by_key(|frame| frame.0);
+        frames
+    };
+    let window = |op| Event::Command {
+        command: Command::Window(op),
+    };
+    let commands = vec![
+        tick(),
+        window(Operation::Center),
+        window(Operation::Resize(ResizeDirection::Grow)),
+        window(Operation::Swap(Compass::West)),
+        window(Operation::Focus(Compass::West)),
+        tick(),
+        window(Operation::Resize(ResizeDirection::Grow)),
+    ];
+    let before = Arc::new(Mutex::new(None));
+    let (record, check) = (before.clone(), before);
+    let closed = Arc::new(Mutex::new(Vec::new()));
+    let (record_closed, check_closed) = (closed.clone(), closed);
+    TestHarness::new()
+        .with_windows(3)
+        .on_iteration(0, move |world, _| {
+            *record.lock().unwrap() = Some((frames(world), focused_ids(world)));
+            // Open as far as the command handlers can tell (the harness
+            // has no overview panel to show).
+            world.insert_resource(OverviewPhase::Open);
+        })
+        .on_iteration(4, move |world, _| {
+            let before = check.lock().unwrap().clone().expect("recorded");
+            assert_eq!(
+                (frames(world), focused_ids(world)),
+                before,
+                "nothing behind the open overview moved"
+            );
+            world.insert_resource(OverviewPhase::Closed);
+        })
+        .on_iteration(5, move |world, _| {
+            *record_closed.lock().unwrap() = frames(world);
+        })
+        .on_iteration(6, move |world, _| {
+            let closed = check_closed.lock().unwrap().clone();
+            assert_ne!(frames(world), closed, "once closed, a resize works again");
         })
         .run(commands);
 }

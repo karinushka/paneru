@@ -2081,7 +2081,6 @@ fn reap_empty_virtual_workspaces(
     for (entity, strip) in rows {
         if entity != changed_entity
             && !drag.keeps_strip(entity)
-            && strip.virtual_index > 0
             && strip.len() == 0
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {

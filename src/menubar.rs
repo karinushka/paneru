@@ -894,7 +894,7 @@ impl MenuBarManager {
                 }
             }
             IndicatorStyle::Paged => {
-                let last = paged_last_index(all.len());
+                let last = paged_last_index(all, current);
                 stack.addArrangedSubview(&self.format_indicator(config, format, current, true));
                 stack.addArrangedSubview(&self.indicator_field(config, "/", false));
                 stack.addArrangedSubview(&self.format_indicator(config, format, last, false));
@@ -1131,11 +1131,11 @@ fn indicator_label(
     }
 }
 
-/// The index the paged indicator's total is formatted from: the workspace
-/// count reads as the last workspace's own label, so it goes through the same
-/// formatter and comes out Roman when the format asks for it.
-fn paged_last_index(count: usize) -> u32 {
-    u32::try_from(count.max(1) - 1).unwrap_or(u32::MAX)
+/// The index the paged indicator's total is formatted from: the highest
+/// workspace index on the space (at least `current`), so gaps or a reaped
+/// row 0 never produce an impossible `2 / 1` or `3 / 2` label.
+fn paged_last_index(all: &[u32], current: u32) -> u32 {
+    all.iter().copied().max().unwrap_or(0).max(current)
 }
 
 fn roman_numeral(value: u32) -> String {
@@ -1555,7 +1555,7 @@ mod tests {
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(4),
+                paged_last_index(&[0, 1, 2, 3], 0),
                 false,
                 '☉',
                 '○'
@@ -1563,14 +1563,20 @@ mod tests {
             "4"
         );
         assert_eq!(
-            indicator_label(IndicatorFormat::Roman, paged_last_index(4), false, '☉', '○'),
+            indicator_label(
+                IndicatorFormat::Roman,
+                paged_last_index(&[0, 1, 2, 3], 0),
+                false,
+                '☉',
+                '○'
+            ),
             "IV"
         );
         // A lone workspace still reads as "1 / 1" rather than underflowing.
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(1),
+                paged_last_index(&[0], 0),
                 false,
                 '☉',
                 '○'
@@ -1580,12 +1586,43 @@ mod tests {
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(0),
+                paged_last_index(&[], 0),
                 false,
                 '☉',
                 '○'
             ),
             "1"
+        );
+        // Reaping row 0 or leaving a gap must never render "2 / 1" or "3 / 2".
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[1], 1),
+                false,
+                '☉',
+                '○'
+            ),
+            "2"
+        );
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[0, 2], 2),
+                false,
+                '☉',
+                '○'
+            ),
+            "3"
+        );
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[0, 2], 0),
+                false,
+                '☉',
+                '○'
+            ),
+            "3"
         );
     }
 

@@ -1491,6 +1491,62 @@ fn workspace_numbers(world: &mut World) -> Vec<u32> {
     numbers
 }
 
+#[test]
+fn test_the_first_workspace_emptied_while_active_is_reaped_on_leaving() {
+    use crate::commands::{Command, Direction, Operation};
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(2);
+    harness.advance(std::time::Duration::from_millis(100));
+    // Put window 0 on workspace 2 while staying on workspace 1 (which still has window 1).
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+            window: 0,
+            workspace: 2,
+            follow: false,
+        }]),
+    });
+    harness.advance(std::time::Duration::from_millis(200));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+
+    // Close window 1 while workspace 1 is active: empty workspace 1 stays while shown.
+    harness.mock_state.os_vanish_window(1);
+    harness
+        .app
+        .world_mut()
+        .write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source: crate::events::DestroySource::SpaceNotification,
+        });
+    harness.advance(std::time::Duration::from_millis(200));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+    let before = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(before.active.virtual_workspace_number, Some(1));
+    assert_eq!(before.virtual_workspaces[0].windows, []);
+
+    // Leaving reaps workspace 1 and preserves workspace 2’s number.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Virtual(Direction::South)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+    let after = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(after.active.virtual_workspace_number, Some(2));
+    assert_eq!(
+        after
+            .virtual_workspaces
+            .iter()
+            .filter(|row| !row.windows.is_empty())
+            .flat_map(|row| row.windows.iter().map(|window| window.window_id))
+            .collect::<Vec<_>>(),
+        vec![0],
+    );
+}
+
 fn reaping(on: bool) -> Config {
     use crate::config::MainOptions;
 

@@ -1133,6 +1133,58 @@ fn test_startup_restore_keeps_emptied_baseline_row() {
     );
 }
 
+/// With `reap_empty_workspaces` enabled, `reap_empty_virtual_workspaces` must
+/// not despawn baseline row 0 while `SessionRestore` is still active.
+#[test]
+fn test_startup_restore_keeps_emptied_baseline_row_with_reaping_enabled() {
+    let config: Config = (
+        MainOptions {
+            reap_empty_workspaces: Some(true),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(2);
+    harness.world().insert_resource(PaneruState {
+        version: 2,
+        timestamp: 123_456_789,
+        active_display_id: Some(TEST_DISPLAY_ID),
+        displays: vec![saved_display(TEST_DISPLAY_ID, true)],
+        workspaces: vec![SavedWorkspace {
+            workspace_id: TEST_WORKSPACE_ID,
+            display_id: Some(TEST_DISPLAY_ID),
+            active_virtual_index: Some(1),
+            strips: vec![SavedStrip {
+                virtual_index: 1,
+                columns: vec![
+                    SavedColumn::Single(saved_window(0)),
+                    SavedColumn::Single(saved_window(1)),
+                ],
+            }],
+        }],
+    });
+
+    for _ in 0..5 {
+        harness.app.update();
+    }
+
+    let world = harness.world();
+    let mut query = world.query::<(&LayoutStrip, Has<crate::ecs::ActiveWorkspaceMarker>)>();
+    let mut rows = query
+        .iter(world)
+        .filter(|(strip, _)| strip.id() == TEST_WORKSPACE_ID)
+        .map(|(strip, active)| (strip.virtual_index, strip.all_windows().len(), active))
+        .collect::<Vec<_>>();
+    rows.sort_unstable();
+
+    assert_eq!(
+        rows,
+        vec![(0, 0, false), (1, 2, true)],
+        "reaping must stay suppressed while SessionRestore is active"
+    );
+}
+
 /// When session restore keeps an emptied baseline row 0 on a workspace whose
 /// active virtual row is > 0, row 0 must be parked off-screen with a
 /// `PreviousStripPosition` (and without `SelectedVirtualMarker`), so that

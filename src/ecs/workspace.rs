@@ -159,7 +159,10 @@ impl Plugin for WorkspaceEventsPlugin {
             Update,
             (
                 renumber_virtual_indexes,
-                reap_empty_virtual_workspaces.run_if(reap_workspaces),
+                reap_empty_virtual_workspaces
+                    .run_if(reap_workspaces)
+                    .run_if(not(resource_exists::<Initializing>))
+                    .run_if(not(resource_exists::<super::restore::SessionRestore>)),
                 reap_emptied_virtual_workspaces
                     .run_if(reap_workspaces)
                     .run_if(not(resource_exists::<Initializing>))
@@ -939,9 +942,9 @@ fn find_orphaned_workspaces(
     let mut rehomed = false;
 
     for (orphan, orphan_entity, timeout, child) in orphans {
-        // Row 0 is the row every space is created with, so it is re-parented
-        // like a populated strip: despawning it leaves the space numbered from
-        // "2" with no row that any switch or reap path recreates.
+        // Row 0 is the baseline row every space starts with, so re-parent it
+        // like a populated strip rather than unexpectedly dropping workspace 1
+        // across a display reconnect when empty-workspace reaping is off.
         if orphan.len() == 0 && orphan.virtual_index > 0 {
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
                 cmd.try_despawn();
@@ -1749,16 +1752,17 @@ fn move_virtual_workspace_bind(
             }
         }
         Operation::VirtualMove(Direction::North | Direction::West, move_focus) => {
-            if current_virtual_index == 0 {
+            let Some(prev_index) = current_index.checked_sub(1) else {
                 return;
-            }
-            (current_virtual_index - 1, *move_focus)
+            };
+            (rows[prev_index].1.virtual_index, *move_focus)
         }
         Operation::VirtualMove(Direction::First, move_focus) => {
-            if current_virtual_index == 0 {
+            let first_virtual_index = rows.first().map_or(0, |(_, strip, _)| strip.virtual_index);
+            if current_virtual_index == first_virtual_index {
                 return;
             }
-            (0, *move_focus)
+            (first_virtual_index, *move_focus)
         }
         Operation::VirtualMove(Direction::Last, move_focus) => {
             let last_virtual_index = rows.last().map_or(0, |(_, strip, _)| strip.virtual_index);
@@ -2019,26 +2023,32 @@ fn renumber_virtual_indexes(mut set: RenumberStrips) {
 /// next/previous step into it. Only one that has had windows goes: one made
 /// empty (`default_workspaces`, a restore's place, a switch to a new number)
 /// is somewhere to go, and stays until it's left, as `reap_empty_virtual_workspaces`
-/// has it. Neither the first, nor one a display shows.
+/// has it. Never one a display shows, and never the last strip on its space.
 fn reap_emptied_virtual_workspaces(
     drag: Res<WindowDrag>,
     changed_strips: ChangedStrips,
-    all_strips: Query<Entity, With<LayoutStrip>>,
+    all_strips: Query<(Entity, &LayoutStrip)>,
     mut lengths: Local<EntityHashMap<usize>>,
     mut commands: Commands,
 ) {
     lengths.retain(|&entity, _| all_strips.contains(entity));
+    let mut despawned = HashSet::new();
     for (entity, strip, active, selected) in &changed_strips {
         if drag.keeps_strip(entity) {
             continue;
         }
         let len = strip.len();
         let had = lengths.get(&entity).copied().unwrap_or(0);
+        let has_sibling = || {
+            all_strips.iter().any(|(other, other_strip)| {
+                other != entity && !despawned.contains(&other) && other_strip.id() == strip.id()
+            })
+        };
         if had > 0
             && len == 0
             && !active
             && !selected
-            && strip.virtual_index > 0
+            && has_sibling()
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
             debug!(
@@ -2047,6 +2057,7 @@ fn reap_emptied_virtual_workspaces(
                 strip.id()
             );
             lengths.remove(&entity);
+            despawned.insert(entity);
             entity_commands.try_despawn();
             continue;
         }

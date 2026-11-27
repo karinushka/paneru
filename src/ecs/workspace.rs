@@ -1386,16 +1386,21 @@ fn handle_virtual_window_moves(
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
             new_strip.append_relocation_group(window_entity, group.as_ref());
 
-            let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
                 // show_active_workspace needs this to restore the strip
                 // onscreen when the user later switches to this workspace.
-                spawned.insert(PreviousStripPosition {
+                let parked = PreviousStripPosition {
                     origin: shown,
                     focus: Some(window_entity),
-                });
+                };
+                commands
+                    .spawn_parked_strip(new_strip, origin, display_entity, parked)
+                    .id()
+            } else {
+                commands
+                    .spawn_layout_strip(new_strip, origin, display_entity, false)
+                    .id()
             }
-            spawned.id()
         };
 
         // Preserve the source strip's scroll position for when the user returns.

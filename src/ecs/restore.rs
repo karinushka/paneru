@@ -610,21 +610,32 @@ pub(super) fn restore_window_state(
             focus: strip.first(),
         };
 
-        let mut spawned =
-            ctx.commands
-                .spawn_layout_strip(strip, origin, display_entity, is_global_active);
+        if is_active {
+            // `spawn_layout_strip` already selects `virtual_index == 0` when
+            // `active` is false; only insert `SelectedVirtualMarker` when it didn't.
+            let needs_selected = strip.virtual_index != 0;
+            let mut spawned =
+                ctx.commands
+                    .spawn_layout_strip(strip, origin, display_entity, is_global_active);
 
-        if is_global_active {
-            spawned.insert(RestoredActivation);
-        } else if is_shown {
-            spawned.insert(SelectedVirtualMarker);
-        } else {
-            if is_active {
-                spawned.insert(SelectedVirtualMarker);
-            } else {
-                spawned.remove::<SelectedVirtualMarker>();
+            match (is_global_active, is_shown, needs_selected) {
+                (true, _, _) => {
+                    spawned.insert(RestoredActivation);
+                }
+                (false, true, true) => {
+                    spawned.insert(SelectedVirtualMarker);
+                }
+                (false, true, false) => {}
+                (false, false, true) => {
+                    spawned.insert((SelectedVirtualMarker, previous));
+                }
+                (false, false, false) => {
+                    spawned.insert(previous);
+                }
             }
-            spawned.insert(previous);
+        } else {
+            ctx.commands
+                .spawn_parked_strip(strip, origin, display_entity, previous);
         }
         restored_strips += 1;
     }

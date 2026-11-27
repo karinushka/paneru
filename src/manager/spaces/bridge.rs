@@ -487,6 +487,7 @@ impl Iterator for SlsWindowIter {
 
 #[derive(Default)]
 struct OperationCache {
+    copy_values: OnceCell<Result<&'static AnyClass, SpaceError>>,
     show_spaces: OnceCell<Result<&'static AnyClass, SpaceError>>,
     hide_spaces: OnceCell<Result<&'static AnyClass, SpaceError>>,
     set_current_space: OnceCell<Result<&'static AnyClass, SpaceError>>,
@@ -571,6 +572,43 @@ impl DesktopBridgeApi for DesktopBridgeOS {
             ));
         }
         Ok(())
+    }
+
+    fn probe_wm_bridge(&self, space_id: SpaceId) -> Result<bool, SpaceError> {
+        self.session_unlocked()?;
+        let raw_id = space_id.get();
+        guarded(|| {
+            let spec = OperationSpec {
+                class_name: c"SLSBridgedSpaceCopyValuesOperation",
+                init_sel: sel!(initWithSpaceID:),
+                init_args: &[c"Q"],
+                perform_ret: c"@",
+            };
+            let cls = resolve_cached(&self.ops.copy_values, &spec)?;
+            let alloc: Allocated<AnyObject> = unsafe { msg_send![cls, alloc] };
+            let op: Option<Retained<AnyObject>> =
+                unsafe { msg_send![alloc, initWithSpaceID: raw_id] };
+            let op = op.ok_or_else(|| {
+                SpaceError::new(
+                    SpaceErrorKind::OperationFailed,
+                    "SLSBridgedSpaceCopyValuesOperation returned nil",
+                )
+            })?;
+            let res: Option<Retained<AnyObject>> =
+                unsafe { msg_send![&*op, performWithWMBridgeDelegate] };
+            let Some(res) = res else {
+                return Ok(false);
+            };
+            if !method_matches(res.class(), sel!(propertyListDictionary), c"@", &[]) {
+                return Err(SpaceError::new(
+                    SpaceErrorKind::Unsupported,
+                    "space copy values result missing -propertyListDictionary:@",
+                ));
+            }
+            let dict: Option<Retained<AnyObject>> =
+                unsafe { msg_send![&*res, propertyListDictionary] };
+            Ok(dict.is_some())
+        })
     }
 
     fn spaces_for_window(&self, window_id: WinID) -> Result<Vec<SpaceId>, SpaceError> {
@@ -1058,6 +1096,23 @@ mod tests {
         assert_eq!(
             num.r#type(),
             objc2_core_foundation::CFNumberType::SInt32Type
+        );
+    }
+
+    #[test]
+    fn copy_values_probe_spec_matches_skylight_abi_when_present() {
+        if AnyClass::get(c"SLSBridgedSpaceCopyValuesOperation").is_none() {
+            return;
+        }
+        let spec = OperationSpec {
+            class_name: c"SLSBridgedSpaceCopyValuesOperation",
+            init_sel: sel!(initWithSpaceID:),
+            init_args: &[c"Q"],
+            perform_ret: c"@",
+        };
+        assert!(
+            resolve_operation(&spec).is_ok(),
+            "SLSBridgedSpaceCopyValuesOperation ABI should match expected initWithSpaceID:/performWithWMBridgeDelegate encodings"
         );
     }
 }

@@ -403,6 +403,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     .or_eager(crate::menubar::menu_viewport_dirty)
                     .or_eager(resource_changed::<Config>)
                     .or_eager(resource_changed::<desktop::DesktopCensus>)
+                    .or_eager(resource_changed::<desktop::DesktopBridgeState>)
                     .or_eager(resource_changed::<crate::menubar::MenuBarVisibility>),
             ),
             systems::update_tab_indicators.run_if(tab_indicators_dirty),

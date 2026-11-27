@@ -13,9 +13,9 @@ use tracing::debug;
 use super::ops::active_display_id;
 use super::pin::PinnedDesktopWindow;
 use super::{
-    ConfirmCondition, DesktopCensus, PendingDesktopOp, PendingDesktopOps, StickyWindowMarker,
-    exec_bridge_op, join_window_to_desktops, refresh_census_from_bridge, select_desktop_strip,
-    spawn_desktop_strip,
+    ConfirmCondition, DesktopBridgeState, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
+    StickyWindowMarker, exec_bridge_op, join_window_to_desktops, probe_bridge_if_needed,
+    refresh_census_from_bridge, select_desktop_strip, spawn_desktop_strip,
 };
 use crate::config::{Config, DesktopRuleTarget};
 use crate::ecs::layout::LayoutStrip;
@@ -45,6 +45,7 @@ pub(super) struct SpawnRuleWorld<'w, 's> {
     strips: RuleStrips<'w, 's>,
     config: Res<'w, Config>,
     census: ResMut<'w, DesktopCensus>,
+    bridge_state: ResMut<'w, DesktopBridgeState>,
     pending: ResMut<'w, PendingDesktopOps>,
     commands: Commands<'w, 's>,
 }
@@ -80,6 +81,12 @@ pub(super) fn apply_window_desktop_rules(
             };
             cached_census.insert(fresh)
         };
+        if world.bridge_state.should_probe() {
+            probe_bridge_if_needed(&bridge, census, &mut world.bridge_state);
+        }
+        if world.bridge_state.is_unavailable() {
+            return;
+        }
         apply_single_window_desktop_rule(
             entity,
             window.id(),
@@ -157,8 +164,15 @@ fn apply_rule_all(
     bridge: &mut DesktopBridge,
     world: &mut SpawnRuleWorld,
 ) {
-    let (added, failed, may_have_applied) =
-        join_window_to_desktops(wid, disp, &memberships, bridge, "window rule desktop='all'");
+    let (added, failed, may_have_applied) = join_window_to_desktops(
+        wid,
+        disp,
+        &memberships,
+        bridge,
+        &mut world.bridge_state,
+        None,
+        "window rule desktop='all'",
+    );
     if may_have_applied {
         refresh_census_from_bridge(bridge, &mut world.census);
     }
@@ -176,14 +190,17 @@ fn apply_rule_all(
         ec.try_insert((StickyWindowMarker, Unmanaged::Floating, pin_marker));
     }
     let expected: HashSet<SpaceId> = memberships.into_iter().chain(added).collect();
-    world.pending.push(PendingDesktopOp::new(
-        format!("window rule desktop='all' for {wid}"),
-        ConfirmCondition::WindowMemberships {
-            windows: vec![wid],
-            expected,
-        },
-        None,
-    ));
+    world.pending.push(
+        PendingDesktopOp::new(
+            format!("window rule desktop='all' for {wid}"),
+            ConfirmCondition::WindowMemberships {
+                windows: vec![wid],
+                expected,
+            },
+            None,
+        )
+        .background(),
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -210,6 +227,8 @@ fn apply_rule_number(
             res,
             bridge,
             &mut world.census,
+            &mut world.bridge_state,
+            None,
         )
         .is_none()
         {
@@ -221,14 +240,17 @@ fn apply_rule_number(
             if !floating {
                 place_spawned_window_on_strip(entity, dest.id, disp_id, world);
             }
-            world.pending.push(PendingDesktopOp::new(
-                format!("window rule desktop={num} for {wid}"),
-                ConfirmCondition::WindowMemberships {
-                    windows: vec![wid],
-                    expected: HashSet::from([dest.id]),
-                },
-                None,
-            ));
+            world.pending.push(
+                PendingDesktopOp::new(
+                    format!("window rule desktop={num} for {wid}"),
+                    ConfirmCondition::WindowMemberships {
+                        windows: vec![wid],
+                        expected: HashSet::from([dest.id]),
+                    },
+                    None,
+                )
+                .background(),
+            );
         }
         return;
     }
@@ -238,14 +260,17 @@ fn apply_rule_number(
     if !floating {
         place_spawned_window_on_strip(entity, dest.id, disp_id, world);
     }
-    world.pending.push(PendingDesktopOp::new(
-        format!("window rule desktop={num} for {wid}"),
-        ConfirmCondition::WindowMemberships {
-            windows: vec![wid],
-            expected: HashSet::from([dest.id]),
-        },
-        None,
-    ));
+    world.pending.push(
+        PendingDesktopOp::new(
+            format!("window rule desktop={num} for {wid}"),
+            ConfirmCondition::WindowMemberships {
+                windows: vec![wid],
+                expected: HashSet::from([dest.id]),
+            },
+            None,
+        )
+        .background(),
+    );
 }
 
 fn place_spawned_window_on_strip(

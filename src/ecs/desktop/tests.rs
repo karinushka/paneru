@@ -5,7 +5,8 @@ use bevy::ecs::query::Has;
 use bevy::math::IRect;
 
 use super::{
-    ConfirmCondition, DESKTOP_CONFIRM_BUDGET, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
+    BridgeMutationStatus, ConfirmCondition, DESKTOP_BRIDGE_UNAVAILABLE_FLASH,
+    DESKTOP_CONFIRM_BUDGET, DesktopBridgeState, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
     PinnedDesktopWindow, PostConfirmAction, StickyWindowMarker,
 };
 use crate::commands::{
@@ -19,8 +20,8 @@ use crate::events::Event;
 use crate::manager::spaces::{DesktopBridge, SpaceId};
 use crate::manager::{Display, Window};
 use crate::tests::{
-    EXT_DISPLAY_HEIGHT, EXT_DISPLAY_ID, EXT_DISPLAY_WIDTH, EXT_WORKSPACE_ID, TEST_DISPLAY_WIDTH,
-    TEST_WORKSPACE_ID, TestHarness, find_window_entity,
+    EXT_DISPLAY_HEIGHT, EXT_DISPLAY_ID, EXT_DISPLAY_WIDTH, EXT_WORKSPACE_ID, MockWmBridgeMode,
+    TEST_DISPLAY_WIDTH, TEST_WORKSPACE_ID, TestHarness, find_window_entity,
 };
 
 fn tick() -> Event {
@@ -1156,4 +1157,350 @@ fn assign_clear_on_single_desktop_display_reconciles_sticky_marker() {
             );
         })
         .run(commands);
+}
+
+fn flash_messages(world: &mut bevy::ecs::world::World) -> Vec<String> {
+    world
+        .query::<&crate::ecs::FlashMessage>()
+        .iter(world)
+        .map(|m| m.0.clone())
+        .collect()
+}
+
+#[test]
+fn startup_probe_rejection_disables_desktop_mutations_and_flashes_once_on_command() {
+    let desktop_2 = 6u64;
+    let cfg = Config::try_from(
+        r#"
+[windows.slack]
+title = "Slack"
+desktop = 2
+"#,
+    )
+    .unwrap();
+    let mut harness = TestHarness::new()
+        .with_config(cfg)
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectAll);
+
+    // Startup tick triggers initial census + read-only WMBridge probe.
+    harness.run(vec![tick()]);
+    {
+        let world = harness.world();
+        assert_eq!(
+            world.resource::<DesktopBridgeState>().status(),
+            BridgeMutationStatus::Unavailable,
+            "rejected startup probe must immediately latch Unavailable"
+        );
+        assert_eq!(
+            world.resource::<DesktopCensus>().desktop_count(1),
+            2,
+            "read-only DesktopCensus must remain populated when WMBridge mutations are disabled"
+        );
+        assert!(
+            flash_messages(world).is_empty(),
+            "startup probe rejection must not flash an unprompted HUD message"
+        );
+    }
+    assert_eq!(harness.mock_state.wm_bridge_probe_calls(), 1);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 0);
+
+    // Automatic `[windows]` `desktop = 2` rule stays quiet and dispatches zero mutations.
+    {
+        let w_slack = harness.mock_state.spawn_window(
+            crate::tests::TEST_PROCESS_ID,
+            TEST_WORKSPACE_ID,
+            80,
+            IRect::new(0, 0, 400, 400),
+        );
+        harness
+            .mock_state
+            .update_window(80, |d| d.title = "Slack".to_string());
+        harness.world().trigger(SpawnWindowTrigger(vec![w_slack]));
+    }
+    harness.run(vec![tick()]);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 0);
+    assert!(
+        flash_messages(harness.world()).is_empty(),
+        "suppressed [windows] desktop rule must not flash"
+    );
+    crate::assert_on_workspace!(harness.world(), 80, TEST_WORKSPACE_ID);
+
+    // First explicit `desktop_*` command fast-fails and flashes once.
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 2,
+            display: None,
+        },
+    ))]);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 0);
+    assert!(harness.world().resource::<PendingDesktopOps>().is_empty());
+    assert_eq!(active_space_id(harness.world()), TEST_WORKSPACE_ID);
+    assert_eq!(
+        flash_messages(harness.world()),
+        vec![DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_string()]
+    );
+
+    // Advance past the 3s flash lifetime and invoke another `desktop_*` command:
+    // must stay silent (one-time flash per session) and dispatch zero mutations.
+    harness.advance(Duration::from_secs(4));
+    assert_eq!(flash_messages(harness.world()), Vec::<String>::new());
+    harness.run(vec![desktop_cmd(DesktopOperation::Create { focus: true })]);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 0);
+    assert!(
+        flash_messages(harness.world()).is_empty(),
+        "subsequent desktop commands must not re-flash once already notified"
+    );
+}
+
+#[test]
+fn startup_probe_defers_while_locked_and_retries_after_unlock() {
+    let desktop_2 = 6u64;
+    let mut harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness.mock_state.set_screen_locked(true);
+    harness
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectAll);
+
+    harness.run(vec![tick()]);
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Unknown,
+        "locked screen must defer the startup probe instead of latching Unavailable"
+    );
+    assert_eq!(harness.mock_state.wm_bridge_probe_calls(), 0);
+
+    // Unlocking and running a desktop command probes first, detects rejection immediately,
+    // flashes once, and skips dispatching the mutation (no 2s timeout).
+    harness.mock_state.set_screen_locked(false);
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 2,
+            display: None,
+        },
+    ))]);
+    assert_eq!(harness.mock_state.wm_bridge_probe_calls(), 1);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 0);
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Unavailable
+    );
+    assert!(harness.world().resource::<PendingDesktopOps>().is_empty());
+    assert_eq!(
+        flash_messages(harness.world()),
+        vec![DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_string()]
+    );
+}
+
+#[test]
+fn runtime_timeout_latches_unavailable_when_mutations_rejected_without_prior_confirm() {
+    let desktop_2 = 6u64;
+    let mut harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectMutationsOnly);
+
+    harness.run(vec![tick()]);
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Available
+    );
+    assert_eq!(harness.mock_state.wm_bridge_probe_calls(), 1);
+
+    // First command dispatches and waits in PendingDesktopOps until the 2s budget expires.
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 2,
+            display: None,
+        },
+    ))]);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 1);
+    assert!(!harness.world().resource::<PendingDesktopOps>().is_empty());
+
+    harness.advance(DESKTOP_CONFIRM_BUDGET + Duration::from_millis(100));
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Unavailable,
+        "first unconfirmed timeout on an unlocked session must latch Unavailable"
+    );
+    assert!(harness.world().resource::<PendingDesktopOps>().is_empty());
+    assert_eq!(
+        flash_messages(harness.world()),
+        vec![DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_string()]
+    );
+
+    // Subsequent commands fast-fail without dispatching to WMBridge again.
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 2,
+            display: None,
+        },
+    ))]);
+    assert_eq!(harness.mock_state.wm_bridge_mutation_calls(), 1);
+    assert!(harness.world().resource::<PendingDesktopOps>().is_empty());
+}
+
+#[test]
+fn runtime_timeout_after_confirmed_mutation_does_not_disable_desktop_controls() {
+    let desktop_2 = 6u64;
+    let mut harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, desktop_2, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+
+    // Confirm one normal switch first so `confirmed_any == true`.
+    harness.run(vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Focus(DesktopTarget::Number {
+            number: 2,
+            display: None,
+        })),
+        tick(),
+    ]);
+    assert!(
+        harness
+            .world()
+            .resource::<DesktopBridgeState>()
+            .is_confirmed()
+    );
+    assert_eq!(active_space_id(harness.world()), desktop_2);
+
+    // Now simulate a transient dropped op that times out: must NOT latch Unavailable.
+    harness
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectMutationsOnly);
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 1,
+            display: None,
+        },
+    ))]);
+    harness.advance(DESKTOP_CONFIRM_BUDGET + Duration::from_millis(100));
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Available,
+        "transient timeout after a confirmed mutation must not disable Desktop controls"
+    );
+    assert!(harness.world().resource::<PendingDesktopOps>().is_empty());
+}
+
+#[test]
+fn create_desktop_nil_latches_unavailable_below_limit_but_not_at_16_desktops() {
+    // Below macOS's 16-desktop limit: nil result from SpaceCreate latches Unavailable.
+    let mut below = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    below.mock_state.add_space_on_display(1, 6, false);
+    below
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectMutationsOnly);
+
+    below.run(vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Create { focus: true }),
+    ]);
+    assert_eq!(below.mock_state.wm_bridge_mutation_calls(), 1);
+    assert_eq!(
+        below.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Unavailable
+    );
+    assert_eq!(
+        flash_messages(below.world()),
+        vec![DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_string()]
+    );
+    below.run(vec![desktop_cmd(DesktopOperation::Create { focus: false })]);
+    assert_eq!(
+        below.mock_state.wm_bridge_mutation_calls(),
+        1,
+        "follow-up create must fast-fail without hitting WMBridge"
+    );
+
+    // At macOS's 16-desktop limit: nil result must NOT falsely latch Unavailable.
+    let mut at_cap = TestHarness::new().with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    for idx in 0..15u64 {
+        at_cap.mock_state.add_space_on_display(1, 100 + idx, false);
+    }
+    at_cap
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectMutationsOnly);
+
+    at_cap.run(vec![
+        tick(),
+        desktop_cmd(DesktopOperation::Create { focus: false }),
+    ]);
+    assert_eq!(
+        at_cap.world().resource::<DesktopCensus>().desktop_count(1),
+        16
+    );
+    assert_eq!(
+        at_cap.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Available,
+        "hitting macOS's 16-desktop limit must not latch Unavailable"
+    );
+}
+
+#[test]
+fn background_rule_timeout_latches_unavailable_silently_until_user_command() {
+    let desktop_2 = 6u64;
+    let cfg = Config::try_from(
+        r#"
+[windows.slack]
+title = "Slack"
+desktop = 2
+"#,
+    )
+    .unwrap();
+    let mut harness =
+        TestHarness::new()
+            .with_config(cfg)
+            .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {});
+    harness.mock_state.add_space_on_display(1, desktop_2, false);
+    harness
+        .mock_state
+        .set_wm_bridge_mode(MockWmBridgeMode::RejectMutationsOnly);
+
+    harness.run(vec![tick()]);
+    {
+        let w_slack = harness.mock_state.spawn_window(
+            crate::tests::TEST_PROCESS_ID,
+            TEST_WORKSPACE_ID,
+            80,
+            IRect::new(0, 0, 400, 400),
+        );
+        harness
+            .mock_state
+            .update_window(80, |d| d.title = "Slack".to_string());
+        harness.world().trigger(SpawnWindowTrigger(vec![w_slack]));
+    }
+    harness.run(vec![tick()]);
+    harness.advance(DESKTOP_CONFIRM_BUDGET + Duration::from_millis(100));
+
+    assert_eq!(
+        harness.world().resource::<DesktopBridgeState>().status(),
+        BridgeMutationStatus::Unavailable
+    );
+    assert!(
+        flash_messages(harness.world()).is_empty(),
+        "background rule timeout must latch Unavailable without flashing unprompted"
+    );
+
+    // First explicit user command after silent latch shows the one-time flash.
+    harness.run(vec![desktop_cmd(DesktopOperation::Focus(
+        DesktopTarget::Number {
+            number: 2,
+            display: None,
+        },
+    ))]);
+    assert_eq!(
+        flash_messages(harness.world()),
+        vec![DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_string()]
+    );
 }

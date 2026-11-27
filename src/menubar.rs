@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::config::decorations::{
     DescriptorStyle, IndicatorFormat, IndicatorStyle, MenubarOrientation,
 };
-use crate::ecs::desktop::DesktopCensus;
+use crate::ecs::desktop::{DesktopBridgeState, DesktopCensus};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{
@@ -278,9 +278,13 @@ impl MenuDesktopSnapshot {
 #[must_use]
 pub(crate) fn menu_desktop_snapshot(
     census: Option<&DesktopCensus>,
+    bridge_state: Option<&DesktopBridgeState>,
     display_id: u32,
     active_space_id: u64,
 ) -> MenuDesktopSnapshot {
+    if bridge_state.is_some_and(DesktopBridgeState::is_unavailable) {
+        return MenuDesktopSnapshot::default();
+    }
     let Some(disp) = census.and_then(|c| c.0.display(display_id)) else {
         return MenuDesktopSnapshot::default();
     };
@@ -1059,11 +1063,13 @@ fn selected_width_percentages(widths: &[i32], ratio: Option<f64>) -> Vec<i32> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_menu_bar(
     active_display: ActiveDisplay,
     workspaces: Query<&LayoutStrip>,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     census: Option<Res<DesktopCensus>>,
+    bridge_state: Option<Res<DesktopBridgeState>>,
     config: Res<Config>,
     visibility: Res<MenuBarVisibility>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
@@ -1093,7 +1099,12 @@ pub fn update_menu_bar(
     let focused_width_ratio = focused_window.and_then(|(bounds, unmanaged)| {
         (!unmanaged).then(|| f64::from(bounds.0.x) / f64::from(viewport.width()))
     });
-    let desktops = menu_desktop_snapshot(census.as_deref(), active_display.id(), strip.id());
+    let desktops = menu_desktop_snapshot(
+        census.as_deref(),
+        bridge_state.as_deref(),
+        active_display.id(),
+        strip.id(),
+    );
 
     menu_bar.update(
         strip.virtual_index,
@@ -1697,11 +1708,13 @@ mod tests {
 
     #[test]
     fn menu_desktop_snapshot_reflects_census_and_guards_closing_last_or_fullscreen() {
-        use super::{DesktopCensus, MenuDesktopSnapshot, menu_desktop_snapshot};
+        use super::{
+            DesktopBridgeState, DesktopCensus, MenuDesktopSnapshot, menu_desktop_snapshot,
+        };
         use crate::manager::spaces::{RawDisplaySpaces, SpaceCensus, SpaceId, SpaceKind};
 
         assert_eq!(
-            menu_desktop_snapshot(None, 1, 2),
+            menu_desktop_snapshot(None, None, 1, 2),
             MenuDesktopSnapshot::default()
         );
 
@@ -1726,7 +1739,7 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_fs = menu_desktop_snapshot(Some(&census), 1, 20);
+        let snap_fs = menu_desktop_snapshot(Some(&census), None, 1, 20);
         assert_eq!(snap_fs.desktop_count, 2);
         assert_eq!(snap_fs.active_desktop, None);
         assert!(
@@ -1747,7 +1760,7 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_other = menu_desktop_snapshot(Some(&census_other), 1, 25);
+        let snap_other = menu_desktop_snapshot(Some(&census_other), None, 1, 25);
         assert_eq!(snap_other.desktop_count, 2);
         assert_eq!(snap_other.active_desktop, None);
         assert!(
@@ -1767,10 +1780,18 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_d2 = menu_desktop_snapshot(Some(&census_d2), 1, 30);
+        let snap_d2 = menu_desktop_snapshot(Some(&census_d2), None, 1, 30);
         assert_eq!(snap_d2.desktop_count, 2);
         assert_eq!(snap_d2.active_desktop, Some(2));
         assert!(snap_d2.can_close_active());
+
+        let mut unavailable = DesktopBridgeState::default();
+        unavailable.mark_unavailable("test rejection");
+        assert_eq!(
+            menu_desktop_snapshot(Some(&census_d2), Some(&unavailable), 1, 30),
+            MenuDesktopSnapshot::default(),
+            "unavailable WMBridge must hide the interactive Desktops menu section"
+        );
 
         let census_single = DesktopCensus(
             SpaceCensus::from_raw(vec![RawDisplaySpaces {
@@ -1781,6 +1802,6 @@ mod tests {
             }])
             .unwrap(),
         );
-        assert!(!menu_desktop_snapshot(Some(&census_single), 1, 10).can_close_active());
+        assert!(!menu_desktop_snapshot(Some(&census_single), None, 1, 10).can_close_active());
     }
 }

@@ -11,8 +11,9 @@ use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
 use super::{
-    ConfirmCondition, DesktopCensus, PendingDesktopOp, PendingDesktopOps, PostConfirmAction,
-    exec_bridge_op, select_desktop_strip, spawn_desktop_strip,
+    ConfirmCondition, DesktopBridgeState, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
+    PostConfirmAction, exec_bridge_op, flash_unavailable_once, probe_bridge_if_needed,
+    refresh_census_from_bridge, select_desktop_strip, spawn_desktop_strip,
 };
 use crate::commands::{Command, DesktopOperation, DesktopTarget, Direction, MoveFocus};
 use crate::config::Config;
@@ -30,7 +31,8 @@ use crate::ecs::{
 use crate::events::Event;
 use crate::manager::Display;
 use crate::manager::spaces::{
-    DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId, SpaceKind, SpaceRecord, WindowServerMeta,
+    DesktopBridge, DisplaySpaces, SpaceCensus, SpaceError, SpaceId, SpaceKind, SpaceRecord,
+    WindowServerMeta,
 };
 use crate::platform::WinID;
 
@@ -71,11 +73,28 @@ pub(super) struct DesktopOpWorld<'w, 's> {
     pub(super) focus_history: Option<ResMut<'w, FocusHistory>>,
     pub(super) pending: ResMut<'w, PendingDesktopOps>,
     pub(super) census: ResMut<'w, DesktopCensus>,
+    pub(super) bridge_state: ResMut<'w, DesktopBridgeState>,
     pub(super) config: Res<'w, Config>,
     pub(super) commands: Commands<'w, 's>,
 }
 
 impl DesktopOpWorld<'_, '_> {
+    pub(super) fn exec_bridge_op<T>(
+        &mut self,
+        label: &str,
+        result: Result<T, SpaceError>,
+        bridge: &DesktopBridge,
+    ) -> Option<T> {
+        exec_bridge_op(
+            label,
+            result,
+            bridge,
+            &mut self.census,
+            &mut self.bridge_state,
+            Some(&mut self.commands),
+        )
+    }
+
     /// Removes `entities` from every strip other than `skip_strip`, shifting an
     /// active strip's origin rightward when a column strictly left of focus
     /// leaves it so the focused window stays at the same screen `x`.
@@ -352,13 +371,9 @@ fn dispatch_focus_space(
     };
     let hide = sibling_space_ids(census, target);
     let res = bridge.activate_space(&disp.skylight_display, target.id, &hide);
-    if exec_bridge_op(
-        &format!("desktop focus {}", target.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(&format!("desktop focus {}", target.id), res, bridge)
+        .is_none()
     {
         return false;
     }
@@ -554,13 +569,9 @@ fn handle_move_window(
     }
 
     let res = bridge.move_windows_to_space(&moving_wids, dest.id);
-    if exec_bridge_op(
-        &format!("desktop move to {}", dest.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(&format!("desktop move to {}", dest.id), res, bridge)
+        .is_none()
     {
         return;
     }
@@ -684,6 +695,17 @@ pub(super) fn desktop_command_handler(
         else {
             continue;
         };
+        if world.bridge_state.should_probe() {
+            if world.census.0.displays.is_empty() {
+                refresh_census_from_bridge(&bridge, &mut world.census);
+            }
+            probe_bridge_if_needed(&bridge, &world.census.0, &mut world.bridge_state);
+        }
+        if world.bridge_state.is_unavailable() {
+            debug!("desktop command {op:?} ignored: WMBridge mutations unavailable");
+            flash_unavailable_once(&mut world.bridge_state, &mut world.commands);
+            continue;
+        }
         match op {
             DesktopOperation::Focus(target) => handle_focus(target, &mut bridge, &mut world),
             DesktopOperation::MoveWindow { target, move_focus } => {

@@ -102,6 +102,19 @@ pub(super) struct MockDisplayData {
 
 pub(super) type DeferredDesktopMockOp = Box<dyn FnOnce(&MockState) + Send + Sync>;
 
+/// Simulates macOS `WindowManager` `WMBridge` acceptance or rejection.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) enum MockWmBridgeMode {
+    #[default]
+    Normal,
+    /// `WindowManager` rejects both the synchronous read-only probe and all
+    /// mutating `SLSBridged*Operation` calls (matches macOS 27.3+ with SIP on).
+    RejectAll,
+    /// Probe succeeds, but all mutating `SLSBridged*Operation` calls are
+    /// silently dropped (fire-and-forget) and `create_desktop` returns nil.
+    RejectMutationsOnly,
+}
+
 /// The internal state of our "Virtual macOS".
 pub(super) struct MockStateInner {
     pub(super) apps: HashMap<Pid, MockAppData>,
@@ -130,6 +143,9 @@ pub(super) struct MockStateInner {
     pub(super) screen_locked: bool,
     pub(super) defer_desktop_ops: bool,
     pub(super) deferred_desktop_ops: Vec<DeferredDesktopMockOp>,
+    pub(super) wm_bridge_mode: MockWmBridgeMode,
+    pub(super) wm_bridge_probe_calls: usize,
+    pub(super) wm_bridge_mutation_calls: usize,
 }
 
 #[derive(Clone)]
@@ -159,6 +175,9 @@ impl MockState {
                 screen_locked: false,
                 defer_desktop_ops: false,
                 deferred_desktop_ops: Vec::new(),
+                wm_bridge_mode: MockWmBridgeMode::Normal,
+                wm_bridge_probe_calls: 0,
+                wm_bridge_mutation_calls: 0,
             })),
         }
     }

@@ -371,6 +371,9 @@ structured `paneru query` responses and `paneru subscribe` event stream.
 
 Paneru can also switch, create, close, reorder, and move/pin windows across native macOS Spaces (Mission Control Desktops) directly via `SkyLight` / `WMBridge`, bypassing macOS's slow slide animations.
 
+> [!NOTE]
+> Starting with macOS 27.3, `WindowManager` rejects bridged Space operations (`SLSBridged*Operation`) from binaries without a private Apple entitlement when SIP is enabled. When Paneru detects that macOS is rejecting these operations, it automatically disables `desktop_*` commands, the menu bar's Desktops section, and `[windows]` `desktop` placement rules for the session. Read-only Desktop queries (`paneru query desktops`), manual Space-switch tracking, and Paneru's virtual workspaces (`window_virtual_*`) continue to work normally without disabling SIP.
+
 - **Display-local 1-based numbering:** `1..N` counts ordinary Desktops on the active display.
 - **Directional stepping (`west` / `east`):** `desktop_focus_west` and `desktop_focus_east` step across all managed Spaces on the display (including native Fullscreen Spaces, matching `Ctrl+Left/Right` without slide animations), clamping at display edges.
 - **Multi-Desktop pinning & sticky windows:** Windows carrying macOS's sticky bit (`0x800`), pinned via `desktop_pin_*`, assigned via `desktop_assign_all`, or matched by `[windows]` `desktop = "all"` automatically float (`Unmanaged::Floating`) so single-Desktop tiling strips never fight over their geometry.

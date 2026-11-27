@@ -371,6 +371,17 @@ impl std::error::Error for SpaceError {}
 pub trait DesktopBridgeApi {
     fn read_census(&self) -> Result<SpaceCensus, SpaceError>;
     fn session_unlocked(&self) -> Result<(), SpaceError>;
+    /// Probes whether `WindowManager` accepts `SLSBridged*Operation` (`WMBridge`)
+    /// requests from this process by dispatching a synchronous read-only
+    /// `SLSBridgedSpaceCopyValuesOperation` on `space_id`.
+    ///
+    /// Returns `Ok(true)` when `WindowManager` serviced the request, `Ok(false)`
+    /// when it rejected the bridged operation (e.g. missing private entitlement
+    /// on macOS 27.3+), or `Err(...)` when the session is locked/headless or the
+    /// probe class/ABI is unavailable.
+    fn probe_wm_bridge(&self, _space_id: SpaceId) -> Result<bool, SpaceError> {
+        Ok(true)
+    }
     fn spaces_for_window(&self, window_id: WinID) -> Result<Vec<SpaceId>, SpaceError>;
     fn windows_in_space(
         &self,

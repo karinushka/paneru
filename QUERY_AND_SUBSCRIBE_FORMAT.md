@@ -294,3 +294,14 @@ Paneru applies the operations in order.
 
 If the destination is stale, a successful unstack still takes effect.
 A group of native macOS tabs stays together.
+
+### Layout operation results
+
+Send `Apply` with the same operation list as `WindowSetApply` to receive
+`Applied` with one result per operation, in request order. For example, the
+MessagePack response `{"Applied": ["Applied", {"Refused": "window 42 is gone"}]}`
+says the first operation was accepted and the second was skipped. A refusal
+does not stop later operations. An empty batch returns an empty list.
+
+The reply reports processing of the batch. Window motion and deferred system
+work can continue after it arrives. Subscribe for changes to the shared layout.

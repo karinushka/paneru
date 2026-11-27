@@ -87,6 +87,11 @@ impl CommandReader {
                 );
             }
 
+            Request::Apply(ops) => {
+                answer(events, reply, "layout batch", move |respond_to| {
+                    Event::Apply { ops, respond_to }
+                });
+            }
             Request::Query(kind) => {
                 answer(events, reply, "state query", move |respond_to| {
                     Event::StateQuery { kind, respond_to }

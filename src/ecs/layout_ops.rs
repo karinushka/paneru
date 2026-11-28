@@ -1,5 +1,4 @@
-//! Replays a script's [`LayoutOp`]s (returned by a Lua handler that
-//! transformed a `WindowSet`) against the live world.
+//! Replays a client or Lua handler's [`LayoutOp`]s against the live world.
 //!
 //! Unlike other command handlers, each op names a window explicitly rather
 //! than acting on the focused one. Because the snapshot a script transformed
@@ -27,9 +26,10 @@ use crate::ecs::{
     FocusedMarker, FullWidthMarker, RepositionMarker, ReshuffleAroundMarker, ResizeAnchor,
     Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Unmanaged,
 };
-use crate::events::Event;
+use crate::events::{Event, Reply};
 use crate::manager::{Origin, Size, WindowManager};
 use crate::platform::WorkspaceId;
+use crate::types::wire::{OpOutcome, Response};
 use crate::util::round_px;
 
 #[derive(SystemParam)]
@@ -132,7 +132,7 @@ impl LayoutBatch {
 #[derive(Message)]
 pub(crate) struct LayoutOpsProcessed;
 
-/// Applies the layout operations a Lua handler returned.
+/// Applies layout batches from clients and Lua handlers.
 pub(crate) fn apply_layout_ops(
     mut messages: MessageReader<Event>,
     windows: Windows,
@@ -142,12 +142,13 @@ pub(crate) fn apply_layout_ops(
     mut commands: Commands,
     mut processed: MessageWriter<LayoutOpsProcessed>,
 ) {
-    let batches: Vec<Vec<LayoutOp>> = messages
+    let batches: Vec<(Vec<LayoutOp>, Option<Reply>)> = messages
         .read()
         .filter_map(|message| match message {
             Event::Command {
                 command: Command::Layout(ops),
-            } if !ops.is_empty() => Some(ops.clone()),
+            } if !ops.is_empty() => Some((ops.clone(), None)),
+            Event::Apply { ops, respond_to } => Some((ops.clone(), Some(respond_to.clone()))),
             _ => None,
         })
         .collect();
@@ -157,7 +158,7 @@ pub(crate) fn apply_layout_ops(
 
     let has_placement = batches
         .iter()
-        .flatten()
+        .flat_map(|(ops, _)| ops)
         .any(|op| matches!(op, LayoutOp::Place { .. }));
     let original_focus = has_placement
         .then(|| windows.focused().map(|(_, entity)| entity))
@@ -172,13 +173,15 @@ pub(crate) fn apply_layout_ops(
         has_placement,
         notify_subscribers: false,
     };
-    for ops in batches {
+    let mut replies = Vec::new();
+    for (ops, reply) in batches {
         // Unmanaged inserts are deferred. Keep the existing per-request
         // tracking for SetFrame and Place.
         batch.floated.clear();
+        let mut outcomes = reply.as_ref().map(|_| Vec::with_capacity(ops.len()));
         for op in ops {
-            apply(
-                op,
+            let result = apply(
+                &op,
                 &windows,
                 &mut workspaces,
                 &displays,
@@ -186,10 +189,27 @@ pub(crate) fn apply_layout_ops(
                 &mut batch,
                 &mut commands,
             );
+            if let Err(reason) = &result {
+                debug!(target: "paneru::lua", "skipping {op:?}: {reason}");
+            }
+            if let Some(outcomes) = &mut outcomes {
+                outcomes.push(match result {
+                    Ok(()) => OpOutcome::Applied,
+                    Err(reason) => OpOutcome::Refused(reason),
+                });
+            }
+        }
+        if let (Some(reply), Some(outcomes)) = (reply, outcomes) {
+            replies.push((reply, outcomes));
         }
     }
     let notify_subscribers = batch.notify_subscribers;
     batch.finish(original_focus, &workspaces, &mut commands);
+    for (reply, outcomes) in replies {
+        commands.queue(move |_: &mut bevy::ecs::world::World| {
+            _ = reply.try_send(Response::Applied(outcomes));
+        });
+    }
     if notify_subscribers {
         // The consumer runs in PostUpdate, after this batch and layout have run.
         processed.write(LayoutOpsProcessed);
@@ -199,29 +219,25 @@ pub(crate) fn apply_layout_ops(
 /// Applies one op, or explains why it could not be.
 #[allow(clippy::too_many_lines)]
 fn apply(
-    op: LayoutOp,
+    op: &LayoutOp,
     windows: &Windows,
     workspaces: &mut RemovableStrips,
     displays: &LayoutDisplays,
     config: &Config,
     batch: &mut LayoutBatch,
     commands: &mut Commands,
-) {
+) -> Result<(), String> {
     // Resolve up front so every arm below can assume the window still exists.
     let entity = if let Some(window_id) = op.target() {
         let Some((_, entity)) = windows.find(window_id) else {
-            debug!(
-                target: "paneru::lua",
-                "skipping {op:?}: window {window_id} is gone since the handler ran"
-            );
-            return;
+            return Err(format!("window {window_id} is gone"));
         };
         Some(entity)
     } else {
         None
     };
 
-    match op {
+    match *op {
         LayoutOp::Focus(_) => {
             let entity = entity.expect("Focus names a window");
             if batch.has_placement {
@@ -234,20 +250,18 @@ fn apply(
         LayoutOp::Swap(_, other) => {
             let entity = entity.expect("Swap names a window");
             let Some((_, other_entity)) = windows.find(other) else {
-                debug!(target: "paneru::lua", "skipping {op:?}: window {other} is gone");
-                return;
+                return Err(format!("window {other} is gone"));
             };
             let Some(mut item) = workspaces
                 .iter_mut()
                 .find(|item| item.strip.contains(entity) && item.strip.contains(other_entity))
             else {
-                debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
-                return;
+                return Err("the two windows share no strip".into());
             };
             let strip = &mut item.strip;
             let (Ok(left), Ok(right)) = (strip.index_of(entity), strip.index_of(other_entity))
             else {
-                return;
+                return Err("one of the windows is missing from its strip".into());
             };
             strip.swap(left, right);
             commands.reshuffle_around(entity);
@@ -261,8 +275,7 @@ fn apply(
             // Virtual workspaces are numbered from one for a script and from
             // zero inside the layout.
             let Some(target_virtual_index) = workspace.checked_sub(1) else {
-                debug!(target: "paneru::lua", "skipping {op:?}: workspaces are numbered from 1");
-                return;
+                return Err("workspaces are numbered from 1".into());
             };
             if let Ok(mut entity_commands) = commands.get_entity(entity) {
                 entity_commands.try_insert(VirtualMoveMarker {
@@ -298,16 +311,12 @@ fn apply(
                     commands,
                 )
             };
-            match result {
-                Ok(changed) => batch.notify_subscribers |= changed,
-                Err(reason) => debug!(target: "paneru::lua", "skipping {op:?}: {reason}"),
-            }
+            batch.notify_subscribers |= result?;
         }
 
         LayoutOp::View { workspace } => {
             let Some(index) = workspace.checked_sub(1) else {
-                debug!(target: "paneru::lua", "skipping {op:?}: workspaces are numbered from 1");
-                return;
+                return Err("workspaces are numbered from 1".into());
             };
             commands.trigger(SendMessageTrigger(Event::Command {
                 command: Command::Window(Operation::VirtualNumber(index)),
@@ -339,8 +348,7 @@ fn apply(
         LayoutOp::SetWidth { ratio, .. } => {
             let entity = entity.expect("SetWidth names a window");
             if !ratio.is_finite() || ratio <= 0.0 {
-                debug!(target: "paneru::lua", "skipping {op:?}: a width ratio must be positive");
-                return;
+                return Err("a width ratio must be positive".into());
             }
             // If this window crossed displays earlier in the batch, carry the
             // explicit width ratio forward so the delayed cross-display resize
@@ -374,23 +382,21 @@ fn apply(
                 commands.trigger(SendMessageTrigger(Event::Command {
                     command: Command::Window(Operation::SetWidth(ratio)),
                 }));
-                return;
+                return Ok(());
             }
             // Any other window is resized here, against the usable width of
             // the display its strip is on. Storing a `WidthRatio` would not
             // do: nothing reacts to it, and the next bounds sync recomputes it
             // from the live frame.
             let Some(item) = workspaces.iter().find(|item| item.strip.contains(entity)) else {
-                debug!(target: "paneru::lua", "skipping {op:?}: the window is in no strip");
-                return;
+                return Err("the window is in no strip".into());
             };
             let Some(viewport) = item
                 .child_of
                 .and_then(|parent| displays.viewports.get(parent.parent()).ok())
                 .map(|(display, dock)| display.actual_display_bounds(dock, config))
             else {
-                debug!(target: "paneru::lua", "skipping {op:?}: the strip is on no display");
-                return;
+                return Err("the strip is on no display".into());
             };
             let width = round_px(ratio * f64::from(viewport.width()));
             // Stacked siblings share a column, and so its width.
@@ -438,27 +444,25 @@ fn apply(
         LayoutOp::Stack { onto, tabs, .. } => {
             let entity = entity.expect("Stack names a window");
             let Some((_, onto_entity)) = windows.find(onto) else {
-                debug!(target: "paneru::lua", "skipping {op:?}: window {onto} is gone");
-                return;
+                return Err(format!("window {onto} is gone"));
             };
             let Some(mut item) = workspaces
                 .iter_mut()
                 .find(|item| item.strip.contains(entity) && item.strip.contains(onto_entity))
             else {
-                debug!(target: "paneru::lua", "skipping {op:?}: the two windows share no strip");
-                return;
+                return Err("the two windows share no strip".into());
             };
             let strip = &mut item.strip;
             let (Ok(entity_index), Ok(onto_index)) =
                 (strip.index_of(entity), strip.index_of(onto_entity))
             else {
-                return;
+                return Err("one of the windows is missing from its strip".into());
             };
             if [entity_index, onto_index]
                 .iter()
                 .any(|&at| matches!(strip.get(at), Ok(Column::Fullscren(_))))
             {
-                return;
+                return Err("cannot stack a fullscreen window".into());
             }
             if entity_index == onto_index {
                 if tabs != strip.is_tabbed_display(entity) {
@@ -471,7 +475,7 @@ fn apply(
                     commands.reshuffle_around(active);
                     batch.notify_subscribers = true;
                 }
-                return;
+                return Ok(());
             }
             // `LayoutStrip::stack` joins a column onto its left neighbour, so
             // first bring the window, alone, to just right of `onto`'s column:
@@ -479,12 +483,11 @@ fn apply(
             // not in whichever one happened to sit to its left.
             strip.remove(entity);
             let Ok(index) = strip.index_of(onto_entity) else {
-                return;
+                return Err("the target window is missing from its strip".into());
             };
             strip.insert_at(index + 1, entity);
             if strip.stack(entity).is_err() {
-                debug!(target: "paneru::lua", "skipping {op:?}: the layout refused the stack");
-                return;
+                return Err("the layout refused the stack".into());
             }
             if tabs != strip.is_tabbed_display(entity) {
                 let active = windows
@@ -511,17 +514,17 @@ fn apply(
                 .iter_mut()
                 .find(|item| item.strip.contains(entity))
             else {
-                return;
+                return Err("the window is in no strip".into());
             };
             let strip = &mut item.strip;
             if strip.unstack(entity).is_err() {
-                debug!(target: "paneru::lua", "skipping {op:?}: the window is not in a stack");
-                return;
+                return Err("the window is not in a stack".into());
             }
             commands.reshuffle_around(entity);
             batch.notify_subscribers = true;
         }
     }
+    Ok(())
 }
 
 /// Place a whole tiled column without switching displays or workspaces.

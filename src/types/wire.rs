@@ -101,6 +101,8 @@ pub enum Request {
     /// Replay a transform's recorded operations against the live world.
     /// Fire-and-forget, for the same reason [`Request::Command`] is.
     WindowSetApply(Vec<LayoutOp>),
+    /// Replay operations and report an outcome for each, in request order.
+    Apply(Vec<LayoutOp>),
     /// Read or write the script-state store.
     ScriptState(ScriptStateRequest),
     /// Ask for state events to be pushed as they happen.
@@ -123,9 +125,18 @@ pub enum Response {
     Query(QueryPayload),
     WindowSet(Box<WindowSet>),
     ScriptState(ScriptStateResponse),
+    Applied(Vec<OpOutcome>),
     /// The request could not be answered. Carries the message a client should
     /// show.
     Error(String),
+}
+
+/// The result of processing one operation in a layout batch.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum OpOutcome {
+    /// Accepted by the layout handler. Window motion may still be in progress.
+    Applied,
+    Refused(String),
 }
 
 /// The answer to a [`Request::Query`], one variant per [`StateQueryKind`].
@@ -190,6 +201,11 @@ mod tests {
         round_trip(&Request::Query(StateQueryKind::Desktops));
         round_trip(&Request::WindowSet);
         round_trip(&Request::WindowSetApply(vec![LayoutOp::Focus(7)]));
+        round_trip(&Request::Apply(vec![LayoutOp::Focus(7)]));
+        round_trip(&Response::Applied(vec![
+            OpOutcome::Applied,
+            OpOutcome::Refused("window is gone".to_string()),
+        ]));
         round_trip(&Request::WindowSetApply(vec![LayoutOp::Place {
             window: 7,
             space: 123,

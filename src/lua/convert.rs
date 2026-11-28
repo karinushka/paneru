@@ -266,6 +266,7 @@ impl TryFrom<&Event> for LuaEvent {
             | Event::CancelDrag
             | Event::StateQuery { .. }
             | Event::WindowSetQuery { .. }
+            | Event::Apply { .. }
             | Event::StateSubscribe { .. }
             | Event::ScriptState { .. }
             | Event::OverviewClick { .. }

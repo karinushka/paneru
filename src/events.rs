@@ -267,6 +267,12 @@ pub enum Event {
         respond_to: Reply,
     },
 
+    /// A client wants ordered outcomes for a layout batch.
+    Apply {
+        ops: Vec<crate::types::windowset::LayoutOp>,
+        respond_to: Reply,
+    },
+
     /// A client has asked for the window set: the same layout value a
     /// `paneru.windows` handler is given inside the daemon.
     WindowSetQuery { respond_to: Reply },

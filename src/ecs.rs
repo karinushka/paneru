@@ -557,6 +557,9 @@ pub struct Scrolling {
     pub is_user_swiping: bool,
     /// Last time a physical swipe event was received.
     pub last_event: Duration,
+    /// Raw trackpad swipes can pull the strip past a bound and spring back.
+    pub(super) rubber_band: bool,
+    pub(super) ends: Option<(f64, f64)>,
 }
 
 #[derive(Component, Clone, Debug, Default, Deref, DerefMut)]
@@ -1423,6 +1426,8 @@ mod tests {
                     position: 0.0,
                     is_user_swiping: false,
                     last_event: Duration::from_secs(1),
+                    rubber_band: false,
+                    ends: None,
                 });
             }),
             "overlay must rerun to hide when Scrolling starts"

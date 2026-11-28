@@ -483,9 +483,9 @@ fn swipe_frame_moves_only_by_finger_displacement() {
         .expect("active strip is scrolling");
     assert!(scroll.is_user_swiping);
     // The raw touchpad calibration makes 0.04 of a 1024px viewport at the
-    // default 0.35 sensitivity about 72px of direct finger movement.
+    // default 0.35 sensitivity 71.68px of direct finger movement.
     assert!(
-        (scroll.position - f64::from(initial_x) + 72.0).abs() < 0.1,
+        (scroll.position - f64::from(initial_x) + 71.68).abs() < 0.01,
         "expected about -72px from the finger, got {}px",
         scroll.position - f64::from(initial_x)
     );
@@ -1162,7 +1162,7 @@ fn test_scrolling_stop() {
     harness.run(vec![Event::MenuOpened { window_id: 0 }]);
     let world = harness.world();
     world.write_message::<Event>(Event::Swipe {
-        delta: 0.3,
+        delta: 0.025,
         fingers: 3,
         distance_cm: 0.0,
         elapsed_secs: Some(0.02),
@@ -5621,7 +5621,7 @@ fn swipe_ignores_stale_entity_at_strip_end() {
 }
 
 #[test]
-fn swipe_clamps_to_second_live_column_with_stale_leading_or_second_entry() {
+fn swipe_uses_second_live_column_as_the_right_bound_with_stale_leading_or_second_entry() {
     use crate::ecs::LayoutPosition;
 
     for insert_index in [0usize, 1] {
@@ -5670,16 +5670,16 @@ fn swipe_clamps_to_second_live_column_with_stale_leading_or_second_entry() {
         harness.advance(Duration::from_millis(20));
 
         let world = harness.world();
-        let strip_x = world
-            .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+        let (_, right) = world
+            .query_filtered::<&crate::ecs::Scrolling, With<ActiveWorkspaceMarker>>()
             .single(world)
-            .expect("active strip")
-            .0
-            .x;
-        let expected = TEST_DISPLAY_WIDTH - second_live_x;
-        assert_eq!(
-            strip_x, expected,
-            "stale entity at index {insert_index} must clamp continuous swipe to the second live column"
+            .expect("active scroll")
+            .ends
+            .expect("layout bounds");
+        let expected = f64::from(TEST_DISPLAY_WIDTH - second_live_x);
+        assert!(
+            (right - expected).abs() < f64::EPSILON,
+            "stale entity at index {insert_index} must leave the bound at the second live column"
         );
     }
 }
@@ -5739,16 +5739,15 @@ fn swipe_non_continuous_ignores_stale_entity_at_strip_end() {
     harness.advance(Duration::from_millis(20));
 
     let world = harness.world();
-    let strip_x = world
-        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+    let (left, _) = world
+        .query_filtered::<&crate::ecs::Scrolling, With<ActiveWorkspaceMarker>>()
         .single(world)
-        .expect("active strip")
-        .0
-        .x;
-    assert_eq!(
-        strip_x,
-        TEST_DISPLAY_WIDTH - total_live_width,
-        "non-continuous swipe must clamp to the last live column width past a trailing stale entry"
+        .expect("active scroll")
+        .ends
+        .expect("layout bounds");
+    assert!(
+        (left - f64::from(TEST_DISPLAY_WIDTH - total_live_width)).abs() < f64::EPSILON,
+        "non-continuous swipe must use the last live column width past a trailing stale entry"
     );
 }
 
@@ -5816,7 +5815,7 @@ fn swipe_prefers_active_tab_over_narrower_parked_tab() {
     harness.advance(Duration::from_millis(20));
 
     // Simulate macOS undershooting a parked off-screen tab's width.
-    // `UpdateSet::Input` clamps using `clamp_viewport_offset` before
+    // `UpdateSet::Input` computes the strip bounds before
     // `UpdateSet::Layout` reconciles sizes in this frame.
     {
         let world = harness.world();
@@ -5835,15 +5834,14 @@ fn swipe_prefers_active_tab_over_narrower_parked_tab() {
     harness.app.update();
 
     let world = harness.world();
-    let strip_x = world
-        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+    let (left, _) = world
+        .query_filtered::<&crate::ecs::Scrolling, With<ActiveWorkspaceMarker>>()
         .single(world)
-        .expect("active strip")
-        .0
-        .x;
-    assert_eq!(
-        strip_x,
-        TEST_DISPLAY_WIDTH - expected_total_width,
+        .expect("active scroll")
+        .ends
+        .expect("layout bounds");
+    assert!(
+        (left - f64::from(TEST_DISPLAY_WIDTH - expected_total_width)).abs() < f64::EPSILON,
         "tabbed column scroll bounds must prefer the active tab over a narrower parked tab"
     );
 }
@@ -5905,15 +5903,14 @@ fn swipe_falls_back_past_stale_stack_top() {
     harness.advance(Duration::from_millis(20));
 
     let world = harness.world();
-    let strip_x = world
-        .query_filtered::<&Position, With<ActiveWorkspaceMarker>>()
+    let (left, _) = world
+        .query_filtered::<&crate::ecs::Scrolling, With<ActiveWorkspaceMarker>>()
         .single(world)
-        .expect("active strip")
-        .0
-        .x;
-    assert_eq!(
-        strip_x,
-        TEST_DISPLAY_WIDTH - expected_total_width,
+        .expect("active scroll")
+        .ends
+        .expect("layout bounds");
+    assert!(
+        (left - f64::from(TEST_DISPLAY_WIDTH - expected_total_width)).abs() < f64::EPSILON,
         "stack with a stale top entry must fall back to its surviving member for scroll bounds"
     );
 }
@@ -6265,5 +6262,58 @@ fn test_snap_keeps_strip_height_for_shorter_window() {
         window_frame(&mut h, 2).min.y,
         top,
         "sibling column must remain aligned at top={top}"
+    );
+}
+
+#[test]
+fn a_trackpad_pull_stretches_past_the_edge_and_springs_back_on_lift() {
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(false),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+    let mut harness = TestHarness::new().with_config(config).with_windows(3);
+    harness.advance(Duration::from_millis(100));
+    let strip = active_strip_entity(harness.world());
+    let x = |harness: &mut TestHarness| harness.world().get::<Position>(strip).expect("strip").x;
+    assert_eq!(x(&mut harness), 0);
+
+    harness.world().write_message(Event::TouchpadDown);
+    let mut positions = Vec::new();
+    for _ in 0..8 {
+        harness.world().write_message(Event::Swipe {
+            delta: -0.025,
+            fingers: 3,
+            distance_cm: 0.0,
+            elapsed_secs: Some(0.02),
+        });
+        harness.advance(Duration::from_millis(20));
+        positions.push(x(&mut harness));
+    }
+    assert!(
+        positions[0] > 0 && positions[7] > positions[0],
+        "{positions:?}"
+    );
+    assert!(
+        positions[7] - positions[6] < positions[1] - positions[0],
+        "{positions:?}"
+    );
+
+    harness.advance(Duration::from_millis(150));
+    assert_eq!(x(&mut harness), positions[7]);
+
+    harness.world().write_message(Event::TouchpadUp);
+    harness.advance(Duration::from_secs(1));
+    assert_eq!(x(&mut harness), 0);
+    assert!(
+        harness
+            .world()
+            .get::<crate::ecs::Scrolling>(strip)
+            .is_none()
     );
 }

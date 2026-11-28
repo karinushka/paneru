@@ -984,3 +984,98 @@ fn tap_flag_tracks_drag_lifecycle_and_resets_on_drop() {
         "releasing the drag must clear the tap flag"
     );
 }
+
+// The strip of `three` is 1200 wide on a 1024-wide display: it scrolls as far
+// as x -176, its right end at the display's right edge.
+
+#[test]
+fn at_the_edge_the_strip_scrolls_to_the_columns_beyond() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 2);
+    press(&mut h, start);
+    let at = drag(&mut h, 2, start, &[10, 10]);
+    assert!(at.x >= 1024 - 48);
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), -176);
+    assert_eq!(order(&mut h), [0, 1, 2]);
+    assert_eq!(x(&mut h, 2), 820);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert!(!held(&mut h));
+    assert_eq!(x(&mut h, 2), 800 - 176);
+}
+
+#[test]
+fn the_columns_not_passed_move_with_the_strip() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 2);
+    press(&mut h, start);
+    let at = drag(&mut h, 2, start, &[10, 10]);
+    for _ in 0..10 {
+        h.advance(Duration::from_millis(20));
+        let strip = strip_x(&mut h);
+        assert_eq!(x(&mut h, 0), strip);
+        assert_eq!(x(&mut h, 1), strip + 400);
+    }
+    // Under way, not at its end.
+    let strip = strip_x(&mut h);
+    assert!(-176 < strip && strip < 0, "{strip}");
+    release(&mut h, at);
+}
+
+#[test]
+fn a_press_at_the_edge_scrolls_nothing() {
+    let mut h = three_gliding();
+    let at = Origin::new(1020, 30);
+    press(&mut h, at);
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), 0);
+    release(&mut h, at);
+}
+
+#[test]
+fn at_the_strips_end_the_edge_scrolls_nothing() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 0);
+    press(&mut h, start);
+    let at = drag(&mut h, 0, start, &[-50; 4]);
+    assert!(at.x < 48);
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), 0);
+    assert_eq!(order(&mut h), [0, 1, 2]);
+    release(&mut h, at);
+}
+
+#[test]
+fn leaving_the_edge_stops_the_scroll() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 2);
+    press(&mut h, start);
+    let at = drag(&mut h, 2, start, &[10, 10]);
+    h.advance(Duration::from_millis(200));
+    let at = drag(&mut h, 2, at, &[-100]);
+    let left_at = strip_x(&mut h);
+    assert!(-176 < left_at && left_at < 0, "{left_at}");
+    h.advance(SETTLE);
+    assert_eq!(strip_x(&mut h), left_at);
+    release(&mut h, at);
+}
+
+#[test]
+fn a_release_at_the_edge_lands_the_window_in_its_slot() {
+    let mut h = three_gliding();
+    let start = title_bar(&mut h, 0);
+    press(&mut h, start);
+    // Past both neighbours, its left edge at 800.
+    let at = drag(&mut h, 0, start, &[50; 16]);
+    assert!(at.x >= 1024 - 48);
+    h.advance(Duration::from_millis(200));
+    assert_eq!(order(&mut h), [1, 2, 0]);
+    release(&mut h, at);
+    h.advance(SETTLE);
+    assert!(!held(&mut h));
+    assert_eq!(order(&mut h), [1, 2, 0]);
+    let strip = strip_x(&mut h);
+    assert_eq!(x(&mut h, 0), strip + 800);
+    assert_eq!(x(&mut h, 1), strip);
+}

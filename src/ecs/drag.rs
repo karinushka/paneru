@@ -5,11 +5,12 @@ use bevy::ecs::change_detection::DetectChangesMut as _;
 use bevy::ecs::component::Component;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::ChildOf;
-use bevy::ecs::query::{Has, Without};
+use bevy::ecs::query::{Has, With, Without};
 use bevy::ecs::resource::Resource;
 use bevy::ecs::schedule::IntoScheduleConfigs as _;
 use bevy::ecs::system::{Commands, ParamSet, Query, Res, ResMut, SystemParam};
 use bevy::math::IRect;
+use bevy::time::Time;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -30,6 +31,19 @@ use crate::events::{Event, MouseButton};
 use crate::manager::{Display, Origin, Window, WindowManager, origin_from};
 use crate::platform::WorkspaceId;
 use crate::util::round_px;
+
+/// How near a display's edge the pointer scrolls the strip, in points, at an
+/// edge with no display beyond it.
+const EDGE_ZONE: f64 = 48.0;
+
+/// How fast the strip scrolls with the pointer at the very edge, in display
+/// widths a second, and slower further in: a column a third of the display
+/// wide passes in a third of a second.
+const EDGE_SPEED: f64 = 1.0;
+
+/// How long the scroll takes to come up to speed, in seconds, so a window
+/// flung to the edge doesn't skip a column.
+const EDGE_RAMP: f64 = 0.25;
 
 /// Tracks a left-button press and active title-bar column drag, owning the
 /// shared atomic flag read by `InputHandler` on the `CGEventTap`.
@@ -72,6 +86,14 @@ struct Press {
     pointer: Option<Origin>,
     end: Option<End>,
     drag: Option<Drag>,
+    edge: Option<EdgeScroll>,
+}
+
+#[derive(Default)]
+struct EdgeScroll {
+    held_for: f64,
+    carry: f64,
+    side: f64,
 }
 
 #[derive(Clone, Copy)]
@@ -134,6 +156,7 @@ impl WindowDrag {
             pointer: None,
             end: None,
             drag: None,
+            edge: None,
         });
     }
 
@@ -184,6 +207,12 @@ impl WindowDrag {
             .is_some_and(|drag| drag.home == entity)
     }
 
+    pub(super) fn edge_scrolling(&self) -> bool {
+        self.press
+            .as_ref()
+            .is_some_and(|press| press.edge.is_some())
+    }
+
     pub(crate) fn dragging(&self) -> bool {
         self.press
             .as_ref()
@@ -194,10 +223,177 @@ impl WindowDrag {
 pub(super) fn register(app: &mut App) {
     app.init_resource::<WindowDrag>().add_systems(
         Update,
-        reorder_column
+        (edge_scroll, reorder_column)
+            .chain()
             .in_set(UpdateSet::Workspace)
             .run_if(|drag: Res<WindowDrag>| drag.press.is_some()),
     );
+}
+
+/// Strips, for [`edge_scroll`] to move.
+type ScrolledStrips<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static LayoutStrip,
+        &'static mut Position,
+        Option<&'static mut RepositionMarker>,
+        Has<Scrolling>,
+        Has<PreviousStripPosition>,
+        &'static ChildOf,
+    ),
+>;
+
+/// Windows, for [`edge_scroll`] to move with their strip.
+type ScrolledWindows<'w, 's> = Query<
+    'w,
+    's,
+    (
+        &'static mut Position,
+        Option<&'static mut RepositionMarker>,
+        &'static LayoutPosition,
+        &'static Bounds,
+        Option<&'static ResizeMarker>,
+    ),
+    (With<Window>, Without<LayoutStrip>),
+>;
+
+/// Scrolls the strip under a dragged window while the pointer is at its
+/// display's edge, toward the columns beyond it, faster the nearer the edge.
+/// The columns the window passes glide aside as they do without a scroll; the
+/// others move with the strip, a frame at a time, as a swipe moves them.
+fn edge_scroll(
+    mut drag: ResMut<WindowDrag>,
+    mut strips: ScrolledStrips,
+    mut windows: ScrolledWindows,
+    env: DragEnv,
+    time: Res<Time>,
+) {
+    let Some(press) = drag.press.as_mut() else {
+        return;
+    };
+    let Some(active) = &press.drag else {
+        return;
+    };
+    let at_edge = strips.get_mut(press.strip).ok().and_then(|strip| {
+        let (_, _, _, swiping, parked, parent) = &strip;
+        let pointer = press
+            .pointer
+            .filter(|_| press.end.is_none() && !*swiping && !*parked && env.drag_available())?;
+        let (_, display, dock) = env.displays.get(parent.parent()).ok()?;
+        let beyond = |point| {
+            env.displays
+                .iter()
+                .any(|(_, other, _)| other.id() != display.id() && other.frame().contains(point))
+        };
+        let depth = edge_depth(pointer, display.frame(), beyond);
+        (depth != 0.0).then_some((strip, depth, display, dock))
+    });
+    let Some(((strip, mut position, mut reposition, ..), depth, display, dock)) = at_edge else {
+        press.edge = None;
+        return;
+    };
+    let viewport = display.actual_display_bounds(dock, &env.config);
+    let strip_x = reposition.as_ref().map_or(position.0, |target| target.0).x;
+    let Some(span) = strip.columns().rev().find_map(|column| {
+        strip
+            .resolve_column(column, |entity| {
+                let (_, _, layout, bounds, resize) = windows.get(entity).ok()?;
+                Some((
+                    layout.0.x,
+                    layout.0.x + resize.map_or(bounds.0, |resize| resize.0).x,
+                ))
+            })
+            .map(|(_, end)| end)
+    }) else {
+        press.edge = None;
+        return;
+    };
+    let (min, max) = (viewport.max.x - span, viewport.min.x);
+    if min >= max || (depth > 0.0 && strip_x <= min) || (depth < 0.0 && strip_x >= max) {
+        press.edge = None;
+        return;
+    }
+    let edge = press.edge.get_or_insert_with(EdgeScroll::default);
+    if edge.side * depth <= 0.0 {
+        *edge = EdgeScroll {
+            side: depth.signum(),
+            ..Default::default()
+        };
+    }
+    let dt = time.delta_secs_f64().min(1.0 / 30.0);
+    edge.held_for += dt;
+    let ramp = (edge.held_for / EDGE_RAMP).min(1.0);
+    let speed = EDGE_SPEED * f64::from(display.bounds().width()) * ramp;
+    // Content follows the pointer's way in: at the right edge the strip goes
+    // left, bringing in the columns past it.
+    edge.carry -= depth * speed * dt;
+    #[allow(clippy::cast_possible_truncation)]
+    let whole = edge.carry.trunc() as i32;
+    edge.carry -= f64::from(whole);
+
+    // Stop at the end in the direction of travel even if a prior gesture left
+    // the strip beyond its normal range on the opposite side.
+    if whole == 0 {
+        return;
+    }
+    let step = if whole < 0 {
+        (strip_x + whole).max(min) - strip_x
+    } else {
+        (strip_x + whole).min(max) - strip_x
+    };
+    if step != whole {
+        edge.carry = 0.0;
+    }
+    if step == 0 {
+        return;
+    }
+
+    position.0.x += step;
+    if let Some(target) = reposition.as_mut() {
+        target.0.x += step;
+    }
+    for entity in strip.all_windows() {
+        if active.held.contains(&entity) {
+            continue;
+        }
+        let Ok((mut position, reposition, layout, ..)) = windows.get_mut(entity) else {
+            continue;
+        };
+        // Only a window where the layout has it, or gliding there: one
+        // parked at the display's side stays put until it comes into view.
+        let in_place = layout.0.x + strip_x;
+        match reposition {
+            Some(mut target) if target.0.x == in_place => {
+                target.0.x += step;
+                position.0.x += step;
+            }
+            None if position.0.x == in_place => position.0.x += step,
+            _ => {}
+        }
+    }
+}
+
+/// How deep `pointer` is in the scrolling zone at a side of the display
+/// `bounds`, from 0 outside it to 1 at the edge, positive on the right and
+/// negative on the left; 0 at a side with a display `beyond` it.
+fn edge_depth(pointer: Origin, bounds: IRect, beyond: impl Fn(Origin) -> bool) -> f64 {
+    if !bounds.contains(pointer) {
+        return 0.0;
+    }
+    let x = f64::from(pointer.x);
+    // The last pixel is the edge: the pointer stops there. Bounds take in
+    // their far side, which the display beyond starts on, so that is probed a
+    // pixel further.
+    let right = (x + 1.0 - (f64::from(bounds.max.x) - EDGE_ZONE)) / EDGE_ZONE;
+    let left = (f64::from(bounds.min.x) + EDGE_ZONE - x) / EDGE_ZONE;
+    if right > 0.0 && !beyond(Origin::new(bounds.max.x + 1, pointer.y)) {
+        right.min(1.0)
+    } else if left > 0.0 && !beyond(Origin::new(bounds.min.x - 1, pointer.y)) {
+        -left.min(1.0)
+    } else {
+        0.0
+    }
 }
 
 type DragStrips<'w, 's> = Query<
@@ -657,4 +853,38 @@ fn slot(
         index += 1;
     }
     index
+}
+
+#[cfg(test)]
+mod edge_tests {
+    use super::{IRect, Origin, edge_depth};
+
+    #[test]
+    fn the_edge_zone_deepens_toward_the_edge() {
+        let bounds = IRect::new(0, 0, 1024, 768);
+        let alone = |_| false;
+        let depth = |x| edge_depth(Origin::new(x, 300), bounds, alone);
+        assert_eq!(depth(500), 0.0);
+        assert_eq!(depth(975), 0.0);
+        assert_eq!(depth(976), 1.0 / 48.0);
+        assert_eq!(depth(1023), 1.0);
+        assert_eq!(depth(47), -1.0 / 48.0);
+        assert_eq!(depth(48), 0.0);
+        assert_eq!(depth(0), -1.0);
+        // Rounded up onto the display's far side.
+        assert_eq!(depth(1024), 1.0);
+        assert_eq!(depth(1030), 0.0);
+    }
+
+    #[test]
+    fn a_side_with_a_display_beyond_it_doesnt_scroll() {
+        let bounds = IRect::new(0, 0, 1024, 768);
+        // As display bounds do, it takes in its near side.
+        let right_of = |point: Origin| point.x >= 1024 && point.y <= 600;
+        let depth = |y| edge_depth(Origin::new(1023, y), bounds, right_of);
+        assert_eq!(depth(300), 0.0);
+        // Below where the display beyond it ends.
+        assert_eq!(depth(700), 1.0);
+        assert_eq!(edge_depth(Origin::new(0, 300), bounds, right_of), -1.0);
+    }
 }

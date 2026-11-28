@@ -1,3 +1,4 @@
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 
 use bevy::math::IRect;
@@ -41,7 +42,7 @@ pub struct DimParams {
 
 // ── DimView: fullscreen dark overlay with a transparent cutout + border ──
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct DimViewIvars {
     opacity: f32,
     dim_r: f64,
@@ -63,18 +64,53 @@ struct DimViewIvars {
     border_radius: f64,
 }
 
+impl DimViewIvars {
+    fn from_params(params: &DimParams) -> Self {
+        let (has_cutout, cx, cy, cw, ch) = params.cutout.map_or((false, 0.0, 0.0, 0.0, 0.0), |r| {
+            (true, r.origin.x, r.origin.y, r.size.width, r.size.height)
+        });
+        let (has_border, br, bg, bb, bo, bw, brad) =
+            params
+                .border
+                .as_ref()
+                .map_or((false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |b| {
+                    (
+                        true, b.color.0, b.color.1, b.color.2, b.opacity, b.width, b.radius,
+                    )
+                });
+        Self {
+            opacity: params.opacity,
+            dim_r: params.color.0,
+            dim_g: params.color.1,
+            dim_b: params.color.2,
+            cutout_x: cx,
+            cutout_y: cy,
+            cutout_w: cw,
+            cutout_h: ch,
+            has_cutout,
+            has_border,
+            border_r: br,
+            border_g: bg,
+            border_b: bb,
+            border_opacity: bo,
+            border_width: bw,
+            border_radius: brad,
+        }
+    }
+}
+
 define_class!(
     #[unsafe(super(NSView))]
     #[thread_kind = MainThreadOnly]
     #[name = "PaneruDimView"]
-    #[ivars = DimViewIvars]
+    #[ivars = Cell<DimViewIvars>]
     #[derive(Debug)]
     struct DimView;
 
     impl DimView {
         #[unsafe(method(drawRect:))]
         fn draw_rect(&self, _dirty_rect: NSRect) {
-            let ivars = self.ivars();
+            let ivars = self.ivars().get();
             let bounds = self.bounds();
 
             // Fill the entire view with the dim color.
@@ -143,37 +179,13 @@ define_class!(
 
 impl DimView {
     fn new(mtm: MainThreadMarker, frame: NSRect, params: &DimParams) -> Retained<Self> {
-        let (has_cutout, cx, cy, cw, ch) = params.cutout.map_or((false, 0.0, 0.0, 0.0, 0.0), |r| {
-            (true, r.origin.x, r.origin.y, r.size.width, r.size.height)
-        });
-        let (has_border, br, bg, bb, bo, bw, brad) =
-            params
-                .border
-                .as_ref()
-                .map_or((false, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0), |b| {
-                    (
-                        true, b.color.0, b.color.1, b.color.2, b.opacity, b.width, b.radius,
-                    )
-                });
-        let this = Self::alloc(mtm).set_ivars(DimViewIvars {
-            opacity: params.opacity,
-            dim_r: params.color.0,
-            dim_g: params.color.1,
-            dim_b: params.color.2,
-            cutout_x: cx,
-            cutout_y: cy,
-            cutout_w: cw,
-            cutout_h: ch,
-            has_cutout,
-            has_border,
-            border_r: br,
-            border_g: bg,
-            border_b: bb,
-            border_opacity: bo,
-            border_width: bw,
-            border_radius: brad,
-        });
+        let this = Self::alloc(mtm).set_ivars(Cell::new(DimViewIvars::from_params(params)));
         unsafe { msg_send![super(this), initWithFrame: frame] }
+    }
+
+    fn set_params(&self, params: &DimParams) {
+        self.ivars().set(DimViewIvars::from_params(params));
+        self.setNeedsDisplay(true);
     }
 }
 
@@ -193,9 +205,13 @@ fn cg_abs_to_cocoa(frame: NSRect, primary_screen_height: f64) -> NSRect {
 /// displays are stacked, lands it on the wrong monitor).
 fn primary_screen_height(mtm: MainThreadMarker) -> f64 {
     let screens = NSScreen::screens(mtm);
+    primary_screen_height_from(&screens)
+}
+
+fn primary_screen_height_from(screens: &objc2_foundation::NSArray<NSScreen>) -> f64 {
     let mut fallback = 0.0;
     let mut first = true;
-    for screen in &screens {
+    for screen in screens {
         let frame = screen.frame();
         if first {
             fallback = frame.size.height;
@@ -246,13 +262,20 @@ fn make_overlay_window(mtm: MainThreadMarker, cocoa_frame: NSRect) -> Retained<N
 }
 // ── OverlayManager ──────────────────────────────────────────────────────
 
+struct ScreenOverlay {
+    window: Retained<NSWindow>,
+    view: Retained<DimView>,
+    frame: NSRect,
+    params: DimParams,
+}
+
 pub struct OverlayManager {
     mtm: MainThreadMarker,
     /// One overlay window per display. macOS will not reliably let a single
     /// window span multiple displays (with "Displays have separate Spaces" it
     /// renders on only one), so each screen gets its own overlay drawn in that
     /// screen's local coordinates. Indexed in lockstep with `NSScreen::screens`.
-    overlays: Vec<(Retained<NSWindow>, DimParams)>,
+    overlays: Vec<ScreenOverlay>,
     hidden: bool,
 }
 
@@ -275,16 +298,16 @@ impl OverlayManager {
         focused_abs_cg: Option<NSRect>,
         border: Option<&BorderParams>,
     ) {
-        let screen_h = primary_screen_height(self.mtm);
         let screens = NSScreen::screens(self.mtm);
+        let screen_h = primary_screen_height_from(&screens);
 
         // The focused window in Cocoa global coords (shared across all screens).
         let focused_cocoa = focused_abs_cg.map(|cg| cg_abs_to_cocoa(cg, screen_h));
 
         // A display was added/removed — tear down and rebuild from scratch.
         if self.overlays.len() != screens.len() {
-            for (window, _) in self.overlays.drain(..) {
-                window.orderOut(None::<&AnyObject>);
+            for overlay in self.overlays.drain(..) {
+                overlay.window.orderOut(None::<&AnyObject>);
             }
         }
 
@@ -313,33 +336,41 @@ impl OverlayManager {
                 border: border.cloned(),
             };
 
-            if let Some((window, stored)) = self.overlays.get_mut(i) {
-                if *stored == params {
-                    // Keep geometry in sync cheaply (no forced redraw).
-                    window.setFrame_display(frame, false);
-                } else {
-                    let view = DimView::new(self.mtm, frame, &params);
-                    window.setContentView(Some(&view));
-                    window.setFrame_display(frame, true);
-                    *stored = params;
+            if let Some(overlay) = self.overlays.get_mut(i) {
+                if overlay.frame != frame {
+                    overlay.window.setFrame_display(frame, false);
+                    overlay.frame = frame;
+                }
+                if overlay.params != params {
+                    // Mutate the existing view in-place so AppKit reuses its
+                    // backing store and coalesces redraws into the vsync commit
+                    // instead of tearing down `contentView` and synchronously
+                    // rasterizing a full-screen Retina bitmap every tick.
+                    overlay.view.set_params(&params);
+                    overlay.params = params;
                 }
                 if self.hidden {
-                    window.orderFront(None::<&AnyObject>);
+                    overlay.window.orderFront(None::<&AnyObject>);
                 }
             } else {
                 let window = make_overlay_window(self.mtm, frame);
                 let view = DimView::new(self.mtm, frame, &params);
                 window.setContentView(Some(&view));
                 window.orderFront(None::<&AnyObject>);
-                self.overlays.push((window, params));
+                self.overlays.push(ScreenOverlay {
+                    window,
+                    view,
+                    frame,
+                    params,
+                });
             }
         }
         self.hidden = false;
     }
 
     pub fn remove_all(&mut self) {
-        for (window, _) in self.overlays.drain(..) {
-            window.orderOut(None::<&AnyObject>);
+        for overlay in self.overlays.drain(..) {
+            overlay.window.orderOut(None::<&AnyObject>);
         }
         self.hidden = false;
     }
@@ -348,8 +379,8 @@ impl OverlayManager {
         if self.hidden {
             return;
         }
-        for (window, _) in &self.overlays {
-            window.orderOut(None::<&AnyObject>);
+        for overlay in &self.overlays {
+            overlay.window.orderOut(None::<&AnyObject>);
         }
         self.hidden = true;
     }
@@ -359,7 +390,6 @@ impl OverlayManager {
 
 #[derive(Debug, Clone)]
 struct FlashMessageViewIvars {
-    opacity: f32,
     message: Retained<NSString>,
     is_badge: bool,
 }
@@ -379,11 +409,10 @@ define_class!(
             let bounds = self.bounds();
             let is_badge = ivars.is_badge;
 
+            // Drawn at full opacity; fade-out is driven on the GPU via
+            // `NSWindow::setAlphaValue` so each fade frame avoids re-rasterizing text.
             // 1. Draw semi-transparent bezel
-            let bezel_color = NSColor::colorWithSRGBRed_green_blue_alpha(
-                0.12, 0.12, 0.12,
-                CGFloat::from(ivars.opacity * 0.88),
-            );
+            let bezel_color = NSColor::colorWithSRGBRed_green_blue_alpha(0.12, 0.12, 0.12, 0.88);
             bezel_color.setFill();
             let radius = if is_badge {
                 24.0
@@ -396,10 +425,7 @@ define_class!(
             path.fill();
 
             // Draw subtle border for contrast
-            let border_color = NSColor::colorWithSRGBRed_green_blue_alpha(
-                1.0, 1.0, 1.0,
-                CGFloat::from(ivars.opacity * 0.15),
-            );
+            let border_color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.15);
             border_color.setStroke();
             path.setLineWidth(1.0);
             path.stroke();
@@ -410,10 +436,7 @@ define_class!(
             } else {
                 NSFont::systemFontOfSize(30.0)
             };
-            let color = NSColor::colorWithSRGBRed_green_blue_alpha(
-                1.0, 1.0, 1.0,
-                CGFloat::from(ivars.opacity * 0.95),
-            );
+            let color = NSColor::colorWithSRGBRed_green_blue_alpha(1.0, 1.0, 1.0, 0.95);
 
             let paragraph_style = unsafe {
                 let style = NSParagraphStyle::defaultParagraphStyle().mutableCopy();
@@ -469,15 +492,8 @@ define_class!(
 );
 
 impl FlashMessageView {
-    fn new(
-        mtm: MainThreadMarker,
-        frame: NSRect,
-        message: &str,
-        opacity: f32,
-        is_badge: bool,
-    ) -> Retained<Self> {
+    fn new(mtm: MainThreadMarker, frame: NSRect, message: &str, is_badge: bool) -> Retained<Self> {
         let this = Self::alloc(mtm).set_ivars(FlashMessageViewIvars {
-            opacity,
             message: NSString::from_str(message),
             is_badge,
         });
@@ -485,18 +501,47 @@ impl FlashMessageView {
     }
 }
 
+struct FlashWindowState {
+    window: Retained<NSWindow>,
+    message: String,
+    top_right: NSPoint,
+    size: NSSize,
+}
+
 pub struct FlashMessageManager {
     mtm: MainThreadMarker,
-    window: Option<Retained<NSWindow>>,
+    active: Option<FlashWindowState>,
 }
 
 impl FlashMessageManager {
     pub fn new(mtm: MainThreadMarker) -> Self {
-        Self { mtm, window: None }
+        Self { mtm, active: None }
     }
 
     #[allow(clippy::cast_precision_loss)]
     pub fn show(&mut self, message: &str, opacity: f32, top_right_abs_cg: NSPoint) {
+        const PADDING: f64 = 20.0;
+
+        let alpha = CGFloat::from(opacity);
+        if let Some(state) = &mut self.active
+            && state.message == message
+        {
+            if state.top_right != top_right_abs_cg {
+                let screen_h = primary_screen_height(self.mtm);
+                let frame = NSRect::new(
+                    NSPoint::new(
+                        top_right_abs_cg.x - state.size.width - PADDING,
+                        screen_h - (top_right_abs_cg.y + state.size.height + PADDING),
+                    ),
+                    state.size,
+                );
+                state.window.setFrame_display(frame, false);
+                state.top_right = top_right_abs_cg;
+            }
+            state.window.setAlphaValue(alpha);
+            return;
+        }
+
         let is_badge = message.chars().count() <= 2;
         let screen_h = primary_screen_height(self.mtm);
 
@@ -521,43 +566,44 @@ impl FlashMessageManager {
             NSSize::new(width, 64.0)
         };
 
-        let padding = 20.0;
-
-        let cocoa_origin_x = top_right_abs_cg.x - size.width - padding;
-        let cocoa_origin_y = screen_h - (top_right_abs_cg.y + size.height + padding);
+        let cocoa_origin_x = top_right_abs_cg.x - size.width - PADDING;
+        let cocoa_origin_y = screen_h - (top_right_abs_cg.y + size.height + PADDING);
 
         let frame = NSRect::new(NSPoint::new(cocoa_origin_x, cocoa_origin_y), size);
+        let view = FlashMessageView::new(
+            self.mtm,
+            NSRect::new(NSPoint::new(0.0, 0.0), size),
+            message,
+            is_badge,
+        );
 
-        if let Some(window) = &self.window {
-            let view = FlashMessageView::new(
-                self.mtm,
-                NSRect::new(NSPoint::new(0.0, 0.0), size),
-                message,
-                opacity,
-                is_badge,
-            );
-            window.setContentView(Some(&view));
-            window.setFrame_display(frame, true);
-            window.orderFront(None::<&AnyObject>);
+        if let Some(state) = &mut self.active {
+            state.window.setContentView(Some(&view));
+            state.window.setFrame_display(frame, true);
+            state.window.setAlphaValue(alpha);
+            state.window.orderFront(None::<&AnyObject>);
+            state.message.clear();
+            state.message.push_str(message);
+            state.top_right = top_right_abs_cg;
+            state.size = size;
         } else {
             let window = make_overlay_window(self.mtm, frame);
             window.setLevel(NSFloatingWindowLevel + 1);
-            let view = FlashMessageView::new(
-                self.mtm,
-                NSRect::new(NSPoint::new(0.0, 0.0), size),
-                message,
-                opacity,
-                is_badge,
-            );
             window.setContentView(Some(&view));
+            window.setAlphaValue(alpha);
             window.orderFront(None::<&AnyObject>);
-            self.window = Some(window);
+            self.active = Some(FlashWindowState {
+                window,
+                message: message.to_string(),
+                top_right: top_right_abs_cg,
+                size,
+            });
         }
     }
 
     pub fn remove(&mut self) {
-        if let Some(window) = self.window.take() {
-            window.orderOut(None::<&AnyObject>);
+        if let Some(state) = self.active.take() {
+            state.window.orderOut(None::<&AnyObject>);
         }
     }
 }

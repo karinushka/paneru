@@ -1257,6 +1257,44 @@ fn test_layout_ops_apply_to_the_named_window_not_the_focused_one() {
 }
 
 #[test]
+fn test_layout_op_place_reorders_and_ignores_invalid_destinations() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3);
+    harness.app.update();
+    let layout = |harness: &mut TestHarness| {
+        let state = extract_window_set(harness.world()).unwrap();
+        let columns = state
+            .current()
+            .unwrap()
+            .columns
+            .iter()
+            .map(|column| column.top().unwrap().id)
+            .collect::<Vec<_>>();
+        (columns, state.focused())
+    };
+    let (before, focused) = layout(&mut harness);
+    let window = before[0];
+    for (workspace, index) in [(1, 2), (2, 0), (1, 3), (0, 0)] {
+        harness.world().write_message(Event::Command {
+            command: Command::Layout(vec![LayoutOp::Place {
+                window,
+                space: TEST_WORKSPACE_ID,
+                workspace,
+                index,
+            }]),
+        });
+        harness.app.update();
+        assert_eq!(
+            layout(&mut harness),
+            (vec![before[1], before[2], window], focused)
+        );
+    }
+}
+
+#[test]
 fn test_layout_op_stack_lands_in_the_named_column() {
     use crate::commands::Command;
     use crate::tests::harness::TestHarness;
@@ -1453,6 +1491,62 @@ fn workspace_numbers(world: &mut World) -> Vec<u32> {
     numbers
 }
 
+#[test]
+fn test_the_first_workspace_emptied_while_active_is_reaped_on_leaving() {
+    use crate::commands::{Command, Direction, Operation};
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(2);
+    harness.advance(std::time::Duration::from_millis(100));
+    // Put window 0 on workspace 2 while staying on workspace 1 (which still has window 1).
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+            window: 0,
+            workspace: 2,
+            follow: false,
+        }]),
+    });
+    harness.advance(std::time::Duration::from_millis(200));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+
+    // Close window 1 while workspace 1 is active: empty workspace 1 stays while shown.
+    harness.mock_state.os_vanish_window(1);
+    harness
+        .app
+        .world_mut()
+        .write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source: crate::events::DestroySource::SpaceNotification,
+        });
+    harness.advance(std::time::Duration::from_millis(200));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+    let before = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(before.active.virtual_workspace_number, Some(1));
+    assert_eq!(before.virtual_workspaces[0].windows, []);
+
+    // Leaving reaps workspace 1 and preserves workspace 2’s number.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::Virtual(Direction::South)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+    let after = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(after.active.virtual_workspace_number, Some(2));
+    assert_eq!(
+        after
+            .virtual_workspaces
+            .iter()
+            .filter(|row| !row.windows.is_empty())
+            .flat_map(|row| row.windows.iter().map(|window| window.window_id))
+            .collect::<Vec<_>>(),
+        vec![0],
+    );
+}
+
 fn reaping(on: bool) -> Config {
     use crate::config::MainOptions;
 
@@ -1612,4 +1706,114 @@ fn test_a_workspace_made_empty_stays() {
     harness.advance(std::time::Duration::from_millis(300));
 
     assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+}
+
+#[test]
+fn test_the_first_workspace_emptied_behind_the_active_one_is_reaped() {
+    use crate::commands::Command;
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(2);
+    harness.advance(std::time::Duration::from_millis(100));
+    // Move window 1 to workspace 2 and follow it, leaving window 0 on hidden workspace 1.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+            window: 1,
+            workspace: 2,
+            follow: true,
+        }]),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+
+    // Closing the last window on hidden workspace 1 reaps workspace 1 right away.
+    harness.mock_state.os_close_window(0);
+    harness.advance(std::time::Duration::from_millis(300));
+
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(state.active.virtual_workspace_number, Some(2));
+}
+
+#[test]
+fn test_virtual_move_north_and_first_follow_existing_rows_without_row_zero() {
+    use crate::commands::{Command, Direction, MoveFocus, Operation};
+    use crate::tests::harness::TestHarness;
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new()
+        .with_config(reaping(true))
+        .with_windows(2);
+    harness.advance(std::time::Duration::from_millis(100));
+    // Move both windows to workspace 2 so workspace 1 is reaped, leaving only [2].
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+            window: 0,
+            workspace: 2,
+            follow: false,
+        }]),
+    });
+    harness.advance(std::time::Duration::from_millis(200));
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::MoveToWorkspace {
+            window: 1,
+            workspace: 2,
+            follow: true,
+        }]),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+
+    // On a lone workspace 2, North and First must be no-ops rather than spawning workspace 1.
+    for dir in [Direction::North, Direction::First] {
+        harness.app.world_mut().write_message(Event::Command {
+            command: Command::Window(Operation::VirtualMove(dir, MoveFocus::Follow)),
+        });
+        harness.advance(std::time::Duration::from_millis(200));
+        assert_eq!(workspace_numbers(harness.world()), vec![2]);
+        let state = extract_query_state(harness.world()).expect("query state extraction");
+        assert_eq!(state.active.virtual_workspace_number, Some(2));
+    }
+
+    // Create workspace 4 with a gap at 3, then VirtualMove(North) crosses the gap to 2.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(3, MoveFocus::Follow)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![2, 4]);
+
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMove(Direction::North, MoveFocus::Follow)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(state.active.virtual_workspace_number, Some(2));
+
+    // Create workspace 4 again, then VirtualMove(First) lands on first existing row (2).
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(3, MoveFocus::Follow)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![2, 4]);
+
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMove(Direction::First, MoveFocus::Follow)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![2]);
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(state.active.virtual_workspace_number, Some(2));
+
+    // Explicit VirtualMoveNumber(0) still recreates workspace 1 on demand.
+    harness.app.world_mut().write_message(Event::Command {
+        command: Command::Window(Operation::VirtualMoveNumber(0, MoveFocus::Follow)),
+    });
+    harness.advance(std::time::Duration::from_millis(300));
+    assert_eq!(workspace_numbers(harness.world()), vec![1, 2]);
+    let state = extract_query_state(harness.world()).expect("query state extraction");
+    assert_eq!(state.active.virtual_workspace_number, Some(1));
 }

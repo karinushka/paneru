@@ -959,8 +959,8 @@ fn test_unordered_window_releases_its_layout_space() {
     // Window 1 disappears silently from the OS (unordered on WindowServer and dead in AX).
     harness.mock_state.os_vanish_window(1);
 
-    // Step past the 1-second periodic CLOSED_WINDOW_CHECK_FREQ timer.
-    harness.advance(Duration::from_millis(1100));
+    // Step past the 5-second periodic UNORDERED_WINDOW_SWEEP_FREQ timer.
+    harness.advance(Duration::from_millis(5200));
 
     let mut query = harness.app.world_mut().query::<&crate::manager::Window>();
     assert!(

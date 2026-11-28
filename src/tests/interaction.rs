@@ -1959,6 +1959,7 @@ fn test_regroup_stray_native_tabs_skips_os_queries_without_overlapping_columns()
     // `windows_on_screen` is called when no columns share a frame.
     let mut wm = MockWindowManagerApi::new();
     wm.expect_windows_on_screen().never();
+    wm.expect_screen_locked().returning(|| false);
     wm.expect_window_is_unordered().returning(|_| false);
     wm.expect_present_displays().returning(Vec::new);
     harness
@@ -4120,6 +4121,222 @@ fn test_own_window_move_echo_is_ignored() {
     );
 }
 
+/// Duplicate `WindowMoved` and `WindowResized` events for the same window in
+/// one tick must deduplicate so `update_frame()` runs at most once per window
+/// per frame and top-edge stacked resize adjustments are not applied twice.
+#[test]
+fn test_window_moved_and_resized_dedup_per_frame() {
+    use bevy::ecs::system::RunSystemOnce as _;
+
+    use crate::ecs::Bounds;
+    use crate::manager::{MockWindowApi, Window};
+
+    // Case 1: burst of `WindowMoved` events for window 0 calls `update_frame()` once.
+    {
+        let mut harness = TestHarness::new().with_windows(1);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(200));
+
+        let world = harness.world();
+        let entity = find_window_entity(0, world);
+        assert!(
+            world.get::<RepositionMarker>(entity).is_none(),
+            "test setup: window 0 must have finished initial positioning"
+        );
+        let moved_frame = IRect::new(123, 456, 123 + TEST_WINDOW_WIDTH, 456 + TEST_WINDOW_HEIGHT);
+
+        let mut mock_win = MockWindowApi::new();
+        mock_win.expect_id().return_const(0);
+        mock_win
+            .expect_update_frame()
+            .times(1)
+            .returning(move || Ok(moved_frame));
+        world
+            .entity_mut(entity)
+            .insert(Window::new(Box::new(mock_win)));
+
+        for _ in 0..4 {
+            world.write_message(Event::WindowMoved { window_id: 0 });
+        }
+        world
+            .run_system_once(crate::ecs::systems::window_moved_update_frame)
+            .expect("running window_moved_update_frame");
+
+        assert_eq!(
+            world.get::<Position>(entity).expect("window position").0,
+            moved_frame.min
+        );
+    }
+
+    // Case 2: burst of `WindowResized` events on the bottom window of a stack
+    // calls `update_frame()` once and shrinks the window above by `diff` once.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![
+            Event::MenuOpened { window_id: 0 },
+            Event::Command {
+                command: Command::Window(Operation::Focus(Direction::East)),
+            },
+            Event::Command {
+                command: Command::Window(Operation::Stack(true)),
+            },
+        ]);
+        harness.advance(Duration::from_millis(500));
+
+        let world = harness.world();
+        let top_entity = find_window_entity(0, world);
+        let bottom_entity = find_window_entity(1, world);
+        assert!(
+            world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .any(|strip| strip.above(bottom_entity) == Some(top_entity)),
+            "test setup: window 1 must be stacked below window 0"
+        );
+        let top_height_before = world.get::<Bounds>(top_entity).expect("top bounds").0.y;
+        let bottom_pos = world.get::<Position>(bottom_entity).expect("bottom pos").0;
+        let bottom_bounds = world.get::<Bounds>(bottom_entity).expect("bottom bounds").0;
+
+        // Simulate dragging the bottom window's top edge up by 20 px.
+        let diff = 20;
+        let resized_frame = IRect::from_corners(
+            Origin::new(bottom_pos.x, bottom_pos.y - diff),
+            Origin::new(
+                bottom_pos.x + bottom_bounds.x,
+                bottom_pos.y + bottom_bounds.y,
+            ),
+        );
+
+        let mut mock_win = MockWindowApi::new();
+        mock_win.expect_id().return_const(1);
+        mock_win
+            .expect_update_frame()
+            .times(1)
+            .returning(move || Ok(resized_frame));
+        world
+            .entity_mut(bottom_entity)
+            .insert(Window::new(Box::new(mock_win)));
+
+        for _ in 0..4 {
+            world.write_message(Event::WindowResized { window_id: 1 });
+        }
+        world
+            .run_system_once(crate::ecs::systems::window_resized_update_frame)
+            .expect("running window_resized_update_frame");
+
+        assert_eq!(
+            world.get::<Bounds>(bottom_entity).expect("bottom bounds").0,
+            resized_frame.size()
+        );
+        assert_eq!(
+            world.get::<Bounds>(top_entity).expect("top bounds").0.y,
+            top_height_before - diff,
+            "duplicate WindowResized events in one tick must adjust the above window only once"
+        );
+    }
+}
+
+/// `front_switched_trigger` and `window_focused_trigger` must share a single
+/// `app.focused_window_id()` AX read within the same frame, and an echo of our
+/// own `focus_entity` while `VerifyFocus` is active on a non-tabbed window must
+/// skip re-querying `app.focused_window_id()`.
+#[test]
+fn test_window_focused_eliminates_duplicate_focused_window_id_reads() {
+    use crate::ecs::VerifyFocus;
+    use crate::manager::Application;
+    use crate::manager::app::MockApplicationApi;
+    use crate::platform::ProcessSerialNumber;
+
+    // Case 1: `ApplicationFrontSwitched` + same-frame `WindowFocused` calls
+    // `focused_window_id()` exactly once across both systems.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(200));
+
+        let psn = ProcessSerialNumber {
+            high: 0,
+            low: TEST_PROCESS_ID.cast_unsigned(),
+        };
+        let world = harness.world();
+        let app_entity = world
+            .query_filtered::<Entity, With<Application>>()
+            .single(world)
+            .expect("single test app");
+
+        let mut mock_app = MockApplicationApi::new();
+        mock_app.expect_pid().return_const(TEST_PROCESS_ID);
+        mock_app.expect_psn().return_const(psn);
+        mock_app.expect_name().return_const("TestApp".to_string());
+        mock_app
+            .expect_bundle_id()
+            .return_const(Some("com.test.app".to_string()));
+        mock_app.expect_is_frontmost().returning(|| true);
+        mock_app
+            .expect_focused_window_id()
+            .times(1)
+            .returning(|| Ok(1));
+        world
+            .entity_mut(app_entity)
+            .insert(Application::new(Box::new(mock_app)));
+
+        world.write_message(Event::ApplicationFrontSwitched { psn });
+        world.write_message(Event::WindowFocused { window_id: 1 });
+        harness.app.update();
+
+        assert_focused!(harness.world(), 1);
+    }
+
+    // Case 2: Echo `Event::WindowFocused` for our own `focus_entity` while
+    // `VerifyFocus` is active on a non-tabbed window makes zero AX reads.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(200));
+
+        // Drive one frame so `VerifyFocus` (300ms timeout) is still live when
+        // the OS focus echo arrives on the next tick.
+        harness.world().write_message(Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        });
+        harness.app.update();
+
+        let world = harness.world();
+        let focused_entity = find_window_entity(1, world);
+        assert!(
+            world.get::<VerifyFocus>(focused_entity).is_some(),
+            "test setup: window 1 must carry VerifyFocus right after Focus(East)"
+        );
+
+        let psn = ProcessSerialNumber {
+            high: 0,
+            low: TEST_PROCESS_ID.cast_unsigned(),
+        };
+        let app_entity = world
+            .query_filtered::<Entity, With<Application>>()
+            .single(world)
+            .expect("single test app");
+
+        let mut mock_app = MockApplicationApi::new();
+        mock_app.expect_pid().return_const(TEST_PROCESS_ID);
+        mock_app.expect_psn().return_const(psn);
+        mock_app.expect_name().return_const("TestApp".to_string());
+        mock_app
+            .expect_bundle_id()
+            .return_const(Some("com.test.app".to_string()));
+        mock_app.expect_is_frontmost().returning(|| true);
+        mock_app.expect_focused_window_id().never();
+        world
+            .entity_mut(app_entity)
+            .insert(Application::new(Box::new(mock_app)));
+
+        world.write_message(Event::WindowFocused { window_id: 1 });
+        harness.app.update();
+
+        assert_focused!(harness.world(), 1);
+    }
+}
+
 #[test]
 fn test_virtual_directions_first_last_east_west() {
     use crate::config::{Config, MainOptions};
@@ -5842,4 +6059,211 @@ fn test_column_jumps_focus_the_stacks_last_focused_window() {
         .on_iteration(8, |world, _state| assert_focused!(world, 0))
         .on_iteration(9, |world, _state| assert_focused!(world, 1))
         .run(commands);
+}
+
+/// `window center` sent while a workspace switch is still sliding the strip up
+/// from its parked corner must only move the strip sideways. Taking the
+/// focused window's mid-slide height for the strip's left every window on the
+/// workspace stranded low on the screen once the animation ended.
+#[test]
+fn test_center_mid_switch_keeps_strip_height() {
+    let config: Config = (
+        MainOptions {
+            virtual_workspace_animations: Some(true),
+            animation_speed: Some(12.0),
+            auto_center: Some(false),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(4);
+    let settle = |h: &mut TestHarness, frames: usize| {
+        for _ in 0..frames {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let send = |h: &mut TestHarness, operation: Operation| {
+        h.app.world_mut().write_message::<Event>(Event::Command {
+            command: Command::Window(operation),
+        });
+    };
+    let heights = |h: &mut TestHarness| {
+        let world = h.app.world_mut();
+        let mut q = world.query::<&Window>();
+        let mut ys: Vec<(WinID, i32)> = q.iter(world).map(|w| (w.id(), w.frame().min.y)).collect();
+        ys.sort_unstable();
+        ys
+    };
+
+    settle(&mut h, 8);
+    let top = heights(&mut h)[0].1;
+
+    // Two windows go to workspace 2, which then sits parked.
+    send(&mut h, Operation::VirtualMoveNumber(1, MoveFocus::Stay));
+    settle(&mut h, 200);
+    send(&mut h, Operation::VirtualMoveNumber(1, MoveFocus::Stay));
+    settle(&mut h, 200);
+
+    // Switch to it, and center a couple of frames into the slide.
+    send(&mut h, Operation::VirtualNumber(1));
+    settle(&mut h, 2);
+
+    let shown: Vec<WinID> = {
+        let world = h.app.world_mut();
+        let mut strips = world.query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>();
+        let entities: Vec<Entity> = strips
+            .iter(world)
+            .flat_map(LayoutStrip::all_windows)
+            .collect();
+        entities
+            .into_iter()
+            .filter_map(|e| world.get::<Window>(e).map(|w| w.id()))
+            .collect()
+    };
+    assert_eq!(
+        shown.len(),
+        2,
+        "test setup: workspace 2 shows the two moved windows"
+    );
+    for (id, y) in heights(&mut h) {
+        if shown.contains(&id) {
+            assert!(
+                y > top,
+                "test setup: window {id} must still be mid-slide before Center (y={y}, top={top})"
+            );
+        }
+    }
+
+    send(&mut h, Operation::Center);
+    settle(&mut h, 300);
+
+    for (id, y) in heights(&mut h) {
+        if shown.contains(&id) {
+            assert_eq!(
+                y, top,
+                "window {id} must end at the top of the display, not at {y}"
+            );
+        }
+    }
+
+    let focused_frame = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Window, With<FocusedMarker>>();
+        q.single(world)
+            .expect("focused window should exist after centering")
+            .frame()
+    };
+    let expected_x = TEST_DISPLAY_WIDTH / 2 - focused_frame.width() / 2;
+    assert_eq!(
+        focused_frame.min.x, expected_x,
+        "focused window must end horizontally centered (got x={}, expected {expected_x})",
+        focused_frame.min.x
+    );
+}
+
+/// `window snap` must only move the strip sideways. If a stacked window is
+/// vertically displaced (e.g. nudged by macOS/the app), clamping its shorter
+/// frame into the viewport keeps that displaced y and drags the whole strip
+/// down unless `snap_strip_position` preserves the strip's target y.
+#[test]
+fn test_snap_keeps_strip_height_for_shorter_window() {
+    let config: Config = (
+        MainOptions {
+            swipe_gesture_fingers: Some(3),
+            continuous_swipe: Some(true),
+            auto_center: Some(false),
+            animation_speed: Some(10000.0),
+            ..Default::default()
+        },
+        vec![],
+    )
+        .into();
+
+    let mut h = TestHarness::new().with_config(config).with_windows(3);
+    let settle = |h: &mut TestHarness, frames: usize| {
+        for _ in 0..frames {
+            h.app.update();
+            for e in h.mock_state.drain_events() {
+                h.app.world_mut().write_message::<Event>(e);
+            }
+        }
+    };
+    let send_op = |h: &mut TestHarness, op: Operation| {
+        h.app.world_mut().write_message::<Event>(Event::Command {
+            command: Command::Window(op),
+        });
+    };
+    let window_frame = |h: &mut TestHarness, id: WinID| {
+        let world = h.app.world_mut();
+        let mut q = world.query::<&Window>();
+        q.iter(world)
+            .find(|w| w.id() == id)
+            .expect("window should exist")
+            .frame()
+    };
+
+    settle(&mut h, 8);
+    let top = window_frame(&mut h, 0).min.y;
+
+    // Stack windows 0 and 1, then focus the top window (id 0).
+    send_op(&mut h, Operation::Focus(Direction::East));
+    settle(&mut h, 8);
+    send_op(&mut h, Operation::Stack(true));
+    settle(&mut h, 8);
+    send_op(&mut h, Operation::Focus(Direction::North));
+    settle(&mut h, 8);
+
+    // Swipe partially left so the stacked column overhangs the left edge.
+    let world = h.app.world_mut();
+    world.write_message::<Event>(Event::TouchpadDown);
+    world.write_message::<Event>(Event::Swipe {
+        delta: 0.1,
+        fingers: 3,
+        distance_cm: 0.0,
+        elapsed_secs: None,
+    });
+    settle(&mut h, 4);
+    h.app.world_mut().write_message::<Event>(Event::TouchpadUp);
+    settle(&mut h, 8);
+
+    let clipped = window_frame(&mut h, 0);
+    assert!(
+        clipped.min.x < 0,
+        "test setup: window 0 must overhang the left edge before Snap (x={})",
+        clipped.min.x
+    );
+
+    // Simulate the OS/app nudging the shorter stacked window downward.
+    h.mock_state
+        .os_move_window(0, Origin::new(clipped.min.x, top + 100));
+    settle(&mut h, 4);
+
+    // Snap must pull the strip back horizontally without lowering its y.
+    send_op(&mut h, Operation::Snap);
+    settle(&mut h, 10);
+
+    let strip_y = {
+        let world = h.app.world_mut();
+        let mut q = world.query_filtered::<&Position, With<ActiveWorkspaceMarker>>();
+        q.single(world).expect("active strip").0.y
+    };
+    assert_eq!(
+        strip_y, top,
+        "strip must keep y={top} after Snap, not drop to {strip_y}"
+    );
+    assert_eq!(
+        window_frame(&mut h, 0).min.x,
+        0,
+        "snapped window 0 must align with the left viewport edge"
+    );
+    assert_eq!(
+        window_frame(&mut h, 2).min.y,
+        top,
+        "sibling column must remain aligned at top={top}"
+    );
 }

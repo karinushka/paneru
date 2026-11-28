@@ -287,6 +287,7 @@ fn setup_world() -> App {
         .add_plugins(DisplaySetupsPlugin)
         .add_plugins((register_triggers, register_systems, register_commands));
 
+    crate::ecs::strip_unused_schedules(&mut bevy_app);
     bevy_app.insert_resource(TimeUpdateStrategy::ManualDuration(FRAME));
 
     bevy_app

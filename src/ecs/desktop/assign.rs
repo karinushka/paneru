@@ -12,7 +12,7 @@ use super::ops::{
 };
 use super::pin::{PinnedDesktopWindow, detach_and_float_window};
 use super::{
-    ConfirmCondition, PendingDesktopOp, PostConfirmAction, StickyWindowMarker, exec_bridge_op,
+    ConfirmCondition, PendingDesktopOp, PostConfirmAction, StickyWindowMarker,
     validate_desktop_memberships,
 };
 use crate::commands::DesktopAssignTarget;
@@ -98,13 +98,9 @@ fn assign_pid_all(
     world: &mut DesktopOpWorld,
 ) {
     let res = bridge.assign_process(pid, AssignMode::AllSpaces);
-    if exec_bridge_op(
-        &format!("desktop assign all for pid {pid}"),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(&format!("desktop assign all for pid {pid}"), res, bridge)
+        .is_none()
     {
         return;
     }
@@ -148,13 +144,13 @@ fn assign_pid_space(
         return;
     }
     let res = bridge.assign_process(pid, AssignMode::Space(dest.id));
-    if exec_bridge_op(
-        &format!("desktop assign pid {pid} -> {}", dest.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(
+            &format!("desktop assign pid {pid} -> {}", dest.id),
+            res,
+            bridge,
+        )
+        .is_none()
     {
         return;
     }
@@ -253,13 +249,9 @@ fn assign_pid_clear(
     };
 
     let res = bridge.assign_process(pid, AssignMode::Clear);
-    if exec_bridge_op(
-        &format!("desktop assign clear for pid {pid}"),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(&format!("desktop assign clear for pid {pid}"), res, bridge)
+        .is_none()
     {
         return;
     }

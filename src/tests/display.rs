@@ -6,11 +6,14 @@ use bevy::time::TimeUpdateStrategy;
 use crate::commands::{Command, Direction, MouseMove, MoveFocus, Operation};
 use crate::config::{Config, MainOptions};
 use crate::ecs::layout::{LayoutStrip, PARKED_STRIP_SLIVER};
-use crate::ecs::{DockPosition, Timeout};
+use crate::ecs::{ActiveWorkspaceMarker, DockPosition, FocusedMarker, Timeout};
 use crate::events::Event;
 use crate::manager::{Display, Origin, Size, Window};
 use crate::platform::WinID;
-use crate::{assert_not_on_workspace, assert_on_workspace, assert_window_at, assert_window_size};
+use crate::{
+    assert_focused, assert_not_on_workspace, assert_on_workspace, assert_window_at,
+    assert_window_size,
+};
 
 use super::*;
 
@@ -272,6 +275,566 @@ fn test_next_display_inserts_into_target_strip() {
             assert_not_on_workspace!(world, 0, TEST_WORKSPACE_ID);
         })
         .run(commands);
+}
+
+#[test]
+fn test_layout_op_place_carries_the_tabbed_column_without_following() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Stack {
+                window: 2,
+                onto: 1,
+                tabs: true,
+            },
+            LayoutOp::Focus(0),
+        ]),
+    });
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let first = find_window_entity(1, world);
+    let second = find_window_entity(2, world);
+    let active_tab = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap()
+        .active_tab(first)
+        .unwrap();
+    assert_focused!(world, 0);
+
+    // The target is addressed by its Space and may still be unfocused.
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 2,
+            space: EXT_WORKSPACE_ID,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let moved = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == EXT_WORKSPACE_ID)
+        .unwrap();
+    assert_eq!(moved.index_of(first).unwrap(), 0);
+    assert_eq!(moved.index_of(second).unwrap(), 0);
+    assert_eq!(moved.active_tab(first), Some(active_tab));
+    assert_not_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
+    assert_focused!(world, 0);
+    assert!(world.get::<Window>(active_tab).unwrap().frame().min.x >= TEST_DISPLAY_WIDTH);
+}
+
+#[test]
+fn test_layout_op_unstack_then_place_moves_only_one_window() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(3).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Stack {
+            window: 2,
+            onto: 1,
+            tabs: false,
+        }]),
+    });
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let first = find_window_entity(1, world);
+    let second = find_window_entity(2, world);
+    let source = world
+        .query::<&LayoutStrip>()
+        .iter(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap();
+    assert_eq!(
+        source.index_of(first).unwrap(),
+        source.index_of(second).unwrap()
+    );
+
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Unstack(2),
+            LayoutOp::Place {
+                window: 2,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 1, EXT_WORKSPACE_ID);
+    assert_on_workspace!(world, 2, EXT_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 2, TEST_WORKSPACE_ID);
+    let frame = world.get::<Window>(second).unwrap().frame();
+    assert!(frame.min.y < 0);
+    assert_eq!(
+        frame.width(),
+        TEST_WINDOW_WIDTH * EXT_DISPLAY_WIDTH / TEST_DISPLAY_WIDTH
+    );
+}
+
+#[test]
+fn test_layout_op_place_leaves_the_column_when_native_space_is_inactive() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new()
+        .with_windows(1)
+        .with_display(
+            TEST_DISPLAY_ID,
+            IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+            vec![TEST_WORKSPACE_ID, TEST_WORKSPACE_ID + 1],
+        )
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+            vec![EXT_WORKSPACE_ID, EXT_WORKSPACE_ID + 1],
+        );
+    harness.advance(Duration::from_millis(500));
+    for inactive_space in [TEST_WORKSPACE_ID + 1, EXT_WORKSPACE_ID + 1] {
+        let world = harness.world();
+        assert!(
+            world
+                .query::<&LayoutStrip>()
+                .iter(world)
+                .any(|strip| strip.id() == inactive_space)
+        );
+        world.write_message(Event::Command {
+            command: Command::Layout(vec![LayoutOp::Place {
+                window: 0,
+                space: inactive_space,
+                workspace: 1,
+                index: 0,
+            }]),
+        });
+        harness.advance(Duration::from_millis(900));
+        let world = harness.world();
+        assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+        assert_not_on_workspace!(world, 0, inactive_space);
+    }
+    harness
+        .mock_state
+        .activate_workspace(TEST_DISPLAY_ID, TEST_WORKSPACE_ID + 1, false);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: EXT_WORKSPACE_ID,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+}
+
+#[test]
+fn test_layout_op_place_parks_an_unselected_workspace_on_either_display() {
+    use crate::types::windowset::LayoutOp;
+
+    for (space, parked_x) in [
+        (TEST_WORKSPACE_ID, TEST_DISPLAY_WIDTH),
+        (EXT_WORKSPACE_ID, TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH),
+    ] {
+        let config = Config::try_from("default_workspaces = 2\n").unwrap();
+        let mut harness = TestHarness::new()
+            .with_config(config)
+            .with_windows(2)
+            .with_display(
+                EXT_DISPLAY_ID,
+                IRect::new(
+                    TEST_DISPLAY_WIDTH,
+                    0,
+                    TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+                    EXT_DISPLAY_HEIGHT,
+                ),
+                vec![EXT_WORKSPACE_ID],
+            );
+        harness.advance(Duration::from_millis(500));
+        for (window, index) in [(0, 0), (1, 1)] {
+            let world = harness.world();
+            world.write_message(Event::Command {
+                command: Command::Layout(vec![LayoutOp::Focus(window)]),
+            });
+            harness.advance(Duration::from_millis(250));
+            assert_focused!(harness.world(), window);
+            harness.world().write_message(Event::Command {
+                command: Command::Layout(vec![LayoutOp::Place {
+                    window,
+                    space,
+                    workspace: 2,
+                    index,
+                }]),
+            });
+            harness.advance(Duration::from_millis(900));
+            let world = harness.world();
+            let entity = find_window_entity(window, world);
+            let mut strips = world.query::<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>();
+            assert!(strips.iter(world).any(|(strip, active)| active
+                && strip.id() == TEST_WORKSPACE_ID
+                && strip.virtual_index == 0));
+            assert!(strips.iter(world).any(|(strip, active)| !active
+                && strip.id() == space
+                && strip.virtual_index == 1
+                && strip.contains(entity)));
+            let frame = world.get::<Window>(entity).unwrap().frame();
+            assert!(
+                frame.min.x >= parked_x - PARKED_STRIP_SLIVER,
+                "hidden window frame: {frame:?}"
+            );
+            if index == 0 {
+                assert_focused!(world, 1);
+            } else {
+                assert!(
+                    world
+                        .query_filtered::<Entity, With<FocusedMarker>>()
+                        .iter(world)
+                        .next()
+                        .is_none()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn test_layout_op_place_left_of_focus_keeps_the_focused_window_stationary() {
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new().with_config(config).with_windows(5);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Window(Operation::Focus(Direction::Last)),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 4);
+    let focused = find_window_entity(4, world);
+    let left = find_window_entity(3, world);
+    let strip = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .unwrap();
+    assert!(strip.index_of(left).unwrap() < strip.index_of(focused).unwrap());
+    let x = world.get::<Window>(focused).unwrap().frame().min.x;
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 3,
+            space: TEST_WORKSPACE_ID,
+            workspace: 2,
+            index: 0,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 4);
+    assert_eq!(world.get::<Window>(focused).unwrap().frame().min.x, x);
+    assert!(
+        world
+            .query::<&LayoutStrip>()
+            .iter(world)
+            .any(|strip| strip.virtual_index == 1 && strip.contains(left))
+    );
+}
+
+#[test]
+fn test_layout_op_place_keeps_a_reordered_focused_column_visible() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(6);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_focused!(world, 0);
+    let focused = find_window_entity(0, world);
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: TEST_WORKSPACE_ID,
+            workspace: 1,
+            index: 5,
+        }]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let strip = world
+        .query_filtered::<&LayoutStrip, With<ActiveWorkspaceMarker>>()
+        .single(world)
+        .unwrap();
+    assert_eq!(strip.index_of(focused).unwrap(), 5);
+    assert_focused!(world, 0);
+    let frame = world.get::<Window>(focused).unwrap().frame();
+    assert!(
+        frame.min.x >= 0 && frame.max.x <= TEST_DISPLAY_WIDTH,
+        "{frame:?}"
+    );
+}
+
+#[test]
+fn test_layout_op_place_rejects_a_fullscreen_strip() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(1).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    let world = harness.world();
+    let window = find_window_entity(0, world);
+    let mut strips = world.query::<&mut LayoutStrip>();
+    let mut source = strips
+        .iter_mut(world)
+        .find(|strip| strip.id() == TEST_WORKSPACE_ID)
+        .unwrap();
+    *source = LayoutStrip::fullscreen(TEST_WORKSPACE_ID, window);
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Place {
+            window: 0,
+            space: EXT_WORKSPACE_ID,
+            workspace: 1,
+            index: 0,
+        }]),
+    });
+    harness.app.update();
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_not_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+}
+
+#[test]
+fn test_layout_op_place_batch_round_trip_preserves_width() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(600));
+    let entity = find_window_entity(1, harness.world());
+    let width = harness
+        .world()
+        .get::<Window>(entity)
+        .unwrap()
+        .frame()
+        .width();
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 1,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: TEST_WORKSPACE_ID,
+                workspace: 1,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    assert_eq!(world.get::<Window>(entity).unwrap().frame().width(), width);
+}
+
+#[test]
+fn test_layout_op_place_batch_does_not_focus_an_offscreen_neighbour() {
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new().with_config(config).with_windows(2);
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 0);
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: TEST_WORKSPACE_ID,
+                workspace: 2,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: TEST_WORKSPACE_ID,
+                workspace: 2,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    let focused = world
+        .query_filtered::<&Window, With<FocusedMarker>>()
+        .iter(world)
+        .map(|w| w.id())
+        .collect::<Vec<_>>();
+    assert!(
+        focused.is_empty(),
+        "parked windows holding focus: {focused:?}"
+    );
+}
+
+#[test]
+fn test_layout_op_place_batch_saves_startup_workspace_origin_once() {
+    use crate::ecs::Position;
+    use crate::ecs::workspace::PreviousStripPosition;
+    use crate::types::windowset::LayoutOp;
+
+    let config = Config::try_from("default_workspaces = 2\n").unwrap();
+    let mut harness = TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .with_display(
+            EXT_DISPLAY_ID,
+            IRect::new(
+                TEST_DISPLAY_WIDTH,
+                0,
+                TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+                EXT_DISPLAY_HEIGHT,
+            ),
+            vec![EXT_WORKSPACE_ID],
+        );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(2)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 2);
+    let world = harness.world();
+    let target = world
+        .query::<(Entity, &LayoutStrip)>()
+        .iter(world)
+        .find(|(_, strip)| strip.id() == EXT_WORKSPACE_ID && strip.virtual_index == 1)
+        .unwrap()
+        .0;
+    assert!(world.get::<PreviousStripPosition>(target).is_none());
+    let original = world.get::<Position>(target).unwrap().0;
+    world.write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: EXT_WORKSPACE_ID,
+                workspace: 2,
+                index: 0,
+            },
+            LayoutOp::Place {
+                window: 1,
+                space: EXT_WORKSPACE_ID,
+                workspace: 2,
+                index: 1,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let saved = harness
+        .world()
+        .get::<PreviousStripPosition>(target)
+        .unwrap();
+    assert_eq!(saved.origin, original);
+}
+
+#[test]
+fn test_layout_op_place_then_set_width_keeps_the_requested_width() {
+    use crate::types::windowset::LayoutOp;
+
+    let mut harness = TestHarness::new().with_windows(2).with_display(
+        EXT_DISPLAY_ID,
+        IRect::new(
+            TEST_DISPLAY_WIDTH,
+            0,
+            TEST_DISPLAY_WIDTH + EXT_DISPLAY_WIDTH,
+            EXT_DISPLAY_HEIGHT,
+        ),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(500));
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![LayoutOp::Focus(0)]),
+    });
+    harness.advance(Duration::from_millis(250));
+    assert_focused!(harness.world(), 0);
+    let neighbour_entity = find_window_entity(1, harness.world());
+    let neighbour_width = harness
+        .world()
+        .get::<Window>(neighbour_entity)
+        .unwrap()
+        .frame()
+        .width();
+
+    harness.world().write_message(Event::Command {
+        command: Command::Layout(vec![
+            LayoutOp::Place {
+                window: 0,
+                space: EXT_WORKSPACE_ID,
+                workspace: 1,
+                index: 0,
+            },
+            LayoutOp::SetWidth {
+                window: 0,
+                ratio: 0.5,
+            },
+        ]),
+    });
+    harness.advance(Duration::from_millis(900));
+    let world = harness.world();
+    assert_on_workspace!(world, 0, EXT_WORKSPACE_ID);
+    assert_focused!(world, 1);
+    let placed_entity = find_window_entity(0, world);
+    assert_eq!(
+        world.get::<Window>(placed_entity).unwrap().frame().width(),
+        EXT_DISPLAY_WIDTH / 2,
+        "delayed cross-display resize must not overwrite SetWidth from the same batch"
+    );
+    assert_eq!(
+        world
+            .get::<Window>(neighbour_entity)
+            .unwrap()
+            .frame()
+            .width(),
+        neighbour_width,
+        "SetWidth after moving the focused window must not resize its remaining neighbour"
+    );
 }
 
 /// A window macOS filled covers its display and ignores the edge padding, so
@@ -3207,4 +3770,491 @@ fn test_move_display_follows_the_physical_arrangement() {
             })
             .run(commands);
     }
+}
+
+/// While the screen is locked, macOS moves windows across spaces when monitors
+/// sleep or disconnect and emits destroy notifications for them; ignoring those
+/// avoids dropping live windows before the real close sweep runs on unlock.
+#[test]
+fn test_window_destroyed_ignored_while_screen_locked() {
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+}
+
+/// While macOS reports no displays (e.g. lid-closed transition), space-change
+/// destroy notifications must not tear down windows that are still alive.
+#[test]
+fn test_window_destroyed_ignored_while_displays_unsettled() {
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.remove_display(TEST_DISPLAY_ID);
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.add_display(
+        TEST_DISPLAY_ID,
+        IRect::new(0, 0, TEST_DISPLAY_WIDTH, TEST_DISPLAY_HEIGHT),
+        vec![TEST_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_millis(200));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+}
+
+/// A window that genuinely closes while the screen is locked stays until unlock,
+/// then is removed by the unordered-window sweep once the app list settles.
+#[test]
+fn test_window_closed_while_screen_locked_is_swept_after_unlock() {
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert_on_workspace!(harness.world(), 1, TEST_WORKSPACE_ID);
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert!(
+        !world.query::<&Window>().iter(world).any(|w| w.id() == 1),
+        "window 1 should be despawned after unlock"
+    );
+}
+
+/// A floating window (`Unmanaged::Floating`, not in any `LayoutStrip`) that
+/// closes while the screen is locked must still be reaped once unlocked.
+#[test]
+fn test_floating_window_closed_while_screen_locked_is_swept_after_unlock() {
+    use crate::ecs::Unmanaged;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![
+        Event::MenuOpened { window_id: 0 },
+        Event::Command {
+            command: Command::Window(Operation::Focus(Direction::East)),
+        },
+        Event::Command {
+            command: Command::Window(Operation::Manage),
+        },
+    ]);
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            matches!(world.get::<Unmanaged>(entity), Some(Unmanaged::Floating)),
+            "test setup: window 1 must be floating"
+        );
+    }
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "floating window 1 stays while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "floating window 1 should be despawned after unlock"
+    );
+}
+
+/// A minimized window (excluded from the steady-state unordered sweep) whose
+/// destroy event is deferred while locked must still be reaped once unlocked.
+#[test]
+fn test_minimized_window_closed_while_screen_locked_is_swept_after_unlock() {
+    use crate::ecs::Unmanaged;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.os_minimize_window(1, true);
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            matches!(world.get::<Unmanaged>(entity), Some(Unmanaged::Minimized)),
+            "test setup: window 1 must be minimized"
+        );
+    }
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "minimized window 1 stays while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(3));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "minimized window 1 should be despawned after unlock"
+    );
+}
+
+/// While the screen is locked, `cleanup_unordered_windows` must stay idle rather
+/// than emitting a dropped `Event::WindowDestroyed` every second (which would
+/// spam Lua listeners and state broadcasts) or polling AX IPC.
+#[test]
+fn test_cleanup_unordered_windows_silent_while_screen_locked() {
+    #[derive(Resource, Default)]
+    struct DestroyCount(usize);
+
+    fn count_destroys(mut events: MessageReader<Event>, mut count: ResMut<DestroyCount>) {
+        for event in events.read() {
+            if matches!(event, Event::WindowDestroyed { .. }) {
+                count.0 += 1;
+            }
+        }
+    }
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.app.init_resource::<DestroyCount>();
+    harness.app.add_systems(PostUpdate, count_destroys);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.set_screen_locked(true);
+    harness.mock_state.os_close_window(1);
+    // Let the initial two OS close events flush through the bus.
+    harness.advance(Duration::from_millis(100));
+    harness.world().resource_mut::<DestroyCount>().0 = 0;
+
+    // Advance past several 1-second CLOSED_WINDOW_CHECK_FREQ ticks while locked.
+    harness.advance(Duration::from_secs(3));
+    assert_eq!(
+        harness.world().resource::<DestroyCount>().0,
+        0,
+        "cleanup_unordered_windows must not emit WindowDestroyed while screen is locked"
+    );
+
+    harness.mock_state.os_settle_window_list();
+    harness.mock_state.set_screen_locked(false);
+    harness.advance(Duration::from_secs(2));
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 1),
+        "window 1 should be despawned after unlock"
+    );
+}
+
+/// While any present display reports zero spaces (mid-reconfiguration), destroy
+/// notifications must be ignored so live windows survive, and the deferred
+/// liveness marker must expire cleanly once displays settle.
+#[test]
+fn test_window_destroyed_ignored_when_display_has_no_spaces() {
+    use crate::ecs::PendingDestroyCheck;
+    use crate::events::DestroySource;
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(200));
+
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![],
+    );
+    for source in [
+        DestroySource::SpaceNotification,
+        DestroySource::Accessibility,
+    ] {
+        harness.world().write_message(Event::WindowDestroyed {
+            window_id: 1,
+            source,
+        });
+    }
+    harness.advance(Duration::from_millis(200));
+    {
+        let world = harness.world();
+        let entity = find_window_entity(1, world);
+        assert!(
+            world.get::<PendingDestroyCheck>(entity).is_some(),
+            "suppressed destroy must attach PendingDestroyCheck while unsettled"
+        );
+    }
+
+    // Give the external display a space so topology settles.
+    harness.mock_state.add_display(
+        EXT_DISPLAY_ID,
+        IRect::new(0, -EXT_DISPLAY_HEIGHT, EXT_DISPLAY_WIDTH, 0),
+        vec![EXT_WORKSPACE_ID],
+    );
+    harness.advance(Duration::from_secs(4));
+
+    let world = harness.world();
+    assert_on_workspace!(world, 0, TEST_WORKSPACE_ID);
+    assert_on_workspace!(world, 1, TEST_WORKSPACE_ID);
+    let entity = find_window_entity(1, world);
+    assert!(
+        world.get::<PendingDestroyCheck>(entity).is_none(),
+        "PendingDestroyCheck must expire cleanly on a live window once settled"
+    );
+}
+
+/// `window_destroyed_trigger` must short-circuit `displays_unsettled()` when
+/// locked, never call `present_displays()`, and evaluate the locked/unsettled
+/// guard at most once per tick across a burst of destroy events.
+#[test]
+fn test_window_destroyed_short_circuits_and_caches_display_check() {
+    use crate::events::DestroySource;
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    // Case 1: locked — neither `displays_unsettled()` nor `present_displays()`
+    // is called, and `screen_locked()` is checked once for the whole burst.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(100));
+
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().times(1).returning(|| true);
+        wm.expect_displays_unsettled().never();
+        wm.expect_present_displays().never();
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+        for window_id in [0, 1] {
+            harness.world().write_message(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            });
+        }
+        harness.app.update();
+    }
+
+    // Case 2: unlocked with unsettled displays — both `screen_locked()` and
+    // `displays_unsettled()` are called once for the whole burst, and
+    // `present_displays()` (which queries menubar height) is never called.
+    {
+        let mut harness = TestHarness::new().with_windows(2);
+        harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+        harness.advance(Duration::from_millis(100));
+
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().times(1).returning(|| false);
+        wm.expect_displays_unsettled().times(1).returning(|| true);
+        wm.expect_present_displays().never();
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+        for window_id in [0, 1] {
+            harness.world().write_message(Event::WindowDestroyed {
+                window_id,
+                source: DestroySource::Accessibility,
+            });
+        }
+        harness.app.update();
+    }
+}
+
+/// In steady state (unlocked, all windows ordered in, no deferred destroys),
+/// the periodic `cleanup_unordered_windows` sweep must not query
+/// `displays_unsettled()` or `present_displays()`.
+#[test]
+fn test_cleanup_unordered_windows_skips_present_displays_when_all_windows_ordered() {
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    let mut harness = TestHarness::new().with_windows(2);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+    harness.advance(Duration::from_millis(100));
+
+    let mut wm = MockWindowManagerApi::new();
+    wm.expect_screen_locked().returning(|| false);
+    wm.expect_window_is_unordered().returning(|_| false);
+    wm.expect_displays_unsettled().never();
+    wm.expect_present_displays().never();
+    harness.world().insert_resource(WindowManager(Box::new(wm)));
+
+    // Advance past two 5-second UNORDERED_WINDOW_SWEEP_FREQ ticks.
+    harness.advance(Duration::from_secs(11));
+}
+
+/// Live windows on an inactive native macOS Space (both managed strip windows
+/// and floating windows) report `SLSWindowIsOrderedIn == 0`. The periodic
+/// `cleanup_unordered_windows` sweep must skip them without calling
+/// `displays_unsettled()`, `present_displays()`, or probing AX `is_alive()`,
+/// while still sweeping dead floating windows that have left all Spaces.
+#[test]
+fn test_cleanup_unordered_windows_skips_inactive_native_space_windows() {
+    use crate::ecs::Unmanaged;
+    use crate::manager::{MockWindowManagerApi, WindowManager};
+
+    let inactive_space = TEST_WORKSPACE_ID + 1;
+    let mut harness = TestHarness::new()
+        .with_workspace_window(10, TEST_WORKSPACE_ID, |_| {})
+        .with_workspace_window(20, inactive_space, |_| {})
+        .with_workspace_window(30, inactive_space, |_| {});
+    harness
+        .mock_state
+        .add_space_on_display(TEST_DISPLAY_ID, inactive_space, false);
+    harness.run(vec![
+        Event::MenuOpened { window_id: 10 },
+        Event::DisplayChanged,
+    ]);
+    harness.advance(Duration::from_millis(100));
+
+    // Mark window 30 (on the inactive native Space) as floating (`Unmanaged::Floating`).
+    {
+        let world = harness.world();
+        let floating_entity = find_window_entity(30, world);
+        world
+            .entity_mut(floating_entity)
+            .insert(Unmanaged::Floating);
+        let mut strips = world.query::<&mut LayoutStrip>();
+        for mut strip in strips.iter_mut(world) {
+            strip.remove(floating_entity);
+        }
+    }
+
+    // Both windows on the inactive native Space report unordered while alive.
+    // Neither `displays_unsettled()` nor `present_displays()` may be called.
+    {
+        let mut wm = MockWindowManagerApi::new();
+        wm.expect_screen_locked().returning(|| false);
+        wm.expect_window_is_unordered()
+            .returning(|id| id == 20 || id == 30);
+        wm.expect_displays_unsettled().never();
+        wm.expect_present_displays().never();
+        harness.world().insert_resource(WindowManager(Box::new(wm)));
+    }
+    harness.advance(Duration::from_secs(6));
+
+    {
+        let world = harness.world();
+        assert_on_workspace!(world, 10, TEST_WORKSPACE_ID);
+        assert_on_workspace!(world, 20, inactive_space);
+        assert!(
+            world.query::<&Window>().iter(world).any(|w| w.id() == 30),
+            "live floating window on inactive Space must survive"
+        );
+    }
+
+    // Restore default mock WindowManager, then close floating window 30 silently
+    // (removing it from WindowServer without emitting WindowDestroyed). Because
+    // `spaces_for_window(30)` is now empty, the 5-second sweep must reap it.
+    let restored_wm = harness.mock_state.create_window_manager();
+    harness
+        .world()
+        .insert_resource(WindowManager(Box::new(restored_wm)));
+    harness.mock_state.os_vanish_window(30);
+    harness.advance(Duration::from_secs(6));
+
+    assert!(
+        !harness
+            .world()
+            .query::<&Window>()
+            .iter(harness.world())
+            .any(|w| w.id() == 30),
+        "dead floating window no longer on any Space must be reaped"
+    );
+    assert_on_workspace!(harness.world(), 20, inactive_space);
+}
+
+/// Stripping `RunFixedMainLoop` and `SpawnScene` from `MainScheduleOrder` must
+/// keep `Messages<Event>` double-buffering active on every frame (via
+/// `ShouldUpdateMessages::Always`) so events do not accumulate unboundedly.
+#[test]
+fn test_strip_unused_schedules_preserves_message_double_buffering() {
+    use bevy::app::{MainScheduleOrder, RunFixedMainLoop, SpawnScene};
+    use bevy::ecs::message::{MessageRegistry, Messages, ShouldUpdateMessages};
+    use bevy::ecs::schedule::ScheduleLabel as _;
+
+    let mut harness = TestHarness::new().with_windows(1);
+    harness.run(vec![Event::MenuOpened { window_id: 0 }]);
+
+    {
+        let world = harness.world();
+        let order = world.resource::<MainScheduleOrder>();
+        assert!(!order.labels.contains(&RunFixedMainLoop.intern()));
+        assert!(!order.labels.contains(&SpawnScene.intern()));
+        assert_eq!(
+            world.resource::<MessageRegistry>().should_update,
+            ShouldUpdateMessages::Always
+        );
+    }
+
+    harness
+        .world()
+        .write_message(Event::MenuOpened { window_id: 0 });
+    assert_eq!(harness.world().resource::<Messages<Event>>().len(), 1);
+
+    // Double-buffered messages live two frames and are dropped by frame 3.
+    harness.app.update();
+    harness.app.update();
+    harness.app.update();
+    assert_eq!(
+        harness.world().resource::<Messages<Event>>().len(),
+        0,
+        "Messages<Event> must flush each frame without RunFixedMainLoop"
+    );
 }

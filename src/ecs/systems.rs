@@ -691,6 +691,7 @@ pub(super) fn timeout_ticker(
 pub(super) fn retry_front_switch(
     retries: Populated<(Entity, &RetryFrontSwitch)>,
     applications: Query<&Application>,
+    mut confirmed_focus: Option<ResMut<crate::ecs::triggers::ConfirmedAppFocus>>,
     mut commands: Commands,
 ) {
     for (entity, retry) in retries.iter() {
@@ -711,6 +712,9 @@ pub(super) fn retry_front_switch(
         }
         if let Ok(focused_id) = app.focused_window_id() {
             debug!("Front switch retry succeeded for window {focused_id}.");
+            if let Some(confirmed) = confirmed_focus.as_mut() {
+                confirmed.record(retry.0, focused_id);
+            }
             commands.trigger(SendMessageTrigger(Event::WindowFocused {
                 window_id: focused_id,
             }));
@@ -1006,16 +1010,21 @@ pub(crate) fn pump_events(
 }
 
 #[instrument(level = Level::TRACE, skip_all)]
-pub(super) fn window_resized_update_frame(
+pub(crate) fn window_resized_update_frame(
     mut messages: MessageReader<Event>,
     drag: Res<crate::ecs::drag::WindowDrag>,
     mut windows: ResizableWindows,
     mut workspaces: Query<(&LayoutStrip, &mut Position)>,
 ) {
+    let mut seen: Vec<WinID> = Vec::new();
     for event in messages.read() {
         let Event::WindowResized { window_id } = event else {
             continue;
         };
+        if seen.contains(window_id) {
+            continue;
+        }
+        seen.push(*window_id);
 
         let Some((mut window, entity, position, mut bounds, unmanaged, resizing)) = windows
             .iter_mut()
@@ -1093,10 +1102,16 @@ pub(crate) fn window_moved_update_frame(
     mut messages: MessageReader<Event>,
     mut windows: MovableWindows,
 ) {
+    let mut seen: Vec<WinID> = Vec::new();
     for event in messages.read() {
         let Event::WindowMoved { window_id } = event else {
             continue;
         };
+        if seen.contains(window_id) {
+            continue;
+        }
+        seen.push(*window_id);
+        trace!("window {window_id} moved");
 
         let Some((mut window, mut position, bounds, unmanaged, repositioning)) = windows
             .iter_mut()
@@ -1252,11 +1267,37 @@ pub(super) struct OverlayWindowConfigCache {
     window_id: Option<WinID>,
     focused_border_radius: Option<f64>,
     detected_border_radius: Option<f64>,
+    fullscreen_window_id: Option<WinID>,
+    is_full_screen: bool,
+}
+
+impl OverlayWindowConfigCache {
+    /// Returns the focused window's fullscreen state, re-probing AX only when
+    /// focus, window bounds, or active workspace changed rather than on every
+    /// horizontal position step during an animation.
+    fn resolve_fullscreen(
+        &mut self,
+        window_id: WinID,
+        bounds_changed: bool,
+        workspace_activated: bool,
+        probe: impl FnOnce() -> bool,
+    ) -> bool {
+        if self.fullscreen_window_id != Some(window_id) || bounds_changed || workspace_activated {
+            self.fullscreen_window_id = Some(window_id);
+            self.is_full_screen = probe();
+        }
+        self.is_full_screen
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 pub(super) fn update_overlays(
-    active_workspace: Populated<(Has<Scrolling>, &LayoutStrip), With<ActiveWorkspaceMarker>>,
+    active_workspace: Populated<(
+        Has<Scrolling>,
+        &LayoutStrip,
+        bevy::ecs::change_detection::Ref<ActiveWorkspaceMarker>,
+    )>,
+    focused_resized: Query<(), (With<FocusedMarker>, Changed<Bounds>)>,
     windows: Windows,
     applications: Query<&Application>,
     overlay_mgr: Option<NonSendMut<OverlayManager>>,
@@ -1279,7 +1320,7 @@ pub(super) fn update_overlays(
 
     // Hide overlays during swipe, title-bar drag, mission control, native
     // fullscreen spaces, or briefly after a space change (macOS space-switch animation).
-    let Some((swiping, active_strip)) = active_workspace.iter().next() else {
+    let Some((swiping, active_strip, active_marker)) = active_workspace.iter().next() else {
         return;
     };
 
@@ -1301,7 +1342,13 @@ pub(super) fn update_overlays(
         return;
     };
     let focused_window_id = window.id();
-    let show_overlay = !window.is_full_screen()
+    let is_full_screen = window_config_cache.resolve_fullscreen(
+        focused_window_id,
+        !focused_resized.is_empty(),
+        active_marker.is_added(),
+        || window.is_full_screen(),
+    );
+    let show_overlay = !is_full_screen
         && (active_strip.contains(entity)
             // if the window is floating, check whether it's present in the workspace.
             || window_manager
@@ -1481,8 +1528,12 @@ pub(super) fn commit_window_position(
 ) {
     // `par_iter_mut` runs on `ComputeTaskPool` worker threads, which have no
     // `CFRunLoop` of their own to drain thread-local autorelease pools.
+    // Force 1 window per task: each `reposition` is an I/O-bound cross-process
+    // AX IPC call (0.5-50 ms), so Bevy's default coarse batching would serialize
+    // fast apps behind a slow app in the same batch.
     moved_windows
         .par_iter_mut()
+        .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
         .for_each(|(entity, mut window, position)| {
             if !drag.holds(entity) {
                 objc2::rc::autoreleasepool(|_| window.reposition(position.0));
@@ -1545,6 +1596,7 @@ pub(super) fn commit_window_size(
         .collect();
     resized_windows
         .par_iter_mut()
+        .batching_strategy(bevy::ecs::batching::BatchingStrategy::fixed(1))
         .for_each(|(entity, mut window, size, mut width_ratio)| {
             if drag.holds(entity) {
                 return;
@@ -2298,7 +2350,7 @@ mod pump_timeout_tests {
 
 #[cfg(test)]
 mod animation_tests {
-    use super::{AnimationProgress, ease_out_factor};
+    use super::{AnimationProgress, OverlayWindowConfigCache, ease_out_factor};
     use bevy::math::IVec2;
 
     #[test]
@@ -2343,5 +2395,55 @@ mod animation_tests {
                 .0,
             IVec2::splat(25),
         );
+    }
+
+    #[test]
+    fn overlay_fullscreen_cache_skips_ax_probe_on_position_only_updates() {
+        let mut cache = OverlayWindowConfigCache::default();
+        let mut probes = 0;
+
+        // First call for window 1 probes AX.
+        assert!(!cache.resolve_fullscreen(1, false, false, || {
+            probes += 1;
+            false
+        }));
+        assert_eq!(probes, 1);
+
+        // Position-only animation ticks for the same window reuse the cached value.
+        for _ in 0..10 {
+            assert!(!cache.resolve_fullscreen(1, false, false, || {
+                probes += 1;
+                true
+            }));
+        }
+        assert_eq!(probes, 1);
+
+        // Bounds change (e.g. entering fullscreen) re-probes.
+        assert!(cache.resolve_fullscreen(1, true, false, || {
+            probes += 1;
+            true
+        }));
+        assert_eq!(probes, 2);
+
+        // Subsequent position-only tick retains `true` without probing.
+        assert!(cache.resolve_fullscreen(1, false, false, || {
+            probes += 1;
+            false
+        }));
+        assert_eq!(probes, 2);
+
+        // Workspace activation re-probes.
+        assert!(!cache.resolve_fullscreen(1, false, true, || {
+            probes += 1;
+            false
+        }));
+        assert_eq!(probes, 3);
+
+        // Focus change to another window re-probes.
+        assert!(cache.resolve_fullscreen(2, false, false, || {
+            probes += 1;
+            true
+        }));
+        assert_eq!(probes, 4);
     }
 }

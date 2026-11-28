@@ -14,10 +14,11 @@ use objc2_core_foundation::{
     CFArray, CFBoolean, CFNumber, CFRetained, CFString, CFType, CGPoint, CGRect, CGSize,
     kCFBooleanFalse, kCFBooleanTrue,
 };
-use std::collections::HashMap;
+use objc2_core_graphics::CGError;
+use std::collections::{HashMap, VecDeque};
 use std::ptr::null_mut;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, Condvar, LazyLock, Mutex, OnceLock, RwLock};
 use std::thread;
 use std::time::{Duration, Instant};
 use stdext::function_name;
@@ -27,7 +28,7 @@ use tracing::{Level, debug, instrument, trace, warn};
 use super::skylight::{
     _AXUIElementGetWindow, _SLPSSetFrontProcessWithOptions, AXUIElementCopyAttributeValue,
     AXUIElementIsAttributeSettable, AXUIElementPerformAction, AXUIElementSetAttributeValue,
-    SLPSPostEventRecordTo, SLSWindowIteratorAdvance,
+    SLPSPostEventRecordTo, SLSGetWindowBounds, SLSMainConnectionID, SLSWindowIteratorAdvance,
 };
 use crate::config::Config;
 use crate::errors::{Error, Result};
@@ -38,6 +39,146 @@ use crate::util::{AXUIAttributes, AXUIWrapper, MacResult};
 /// The registry lock only looks up per-app locks; AX calls never hold it.
 static ENHANCED_UI_STATES: LazyLock<Mutex<HashMap<Pid, Arc<Mutex<EnhancedUiState>>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Dedicated background worker for `kAXRaiseAction` IPCs so raising windows
+/// never blocks the main thread or `CGEventTap` behind a slow target app.
+static AX_RAISE_WORKER: LazyLock<AxRaiseWorker> = LazyLock::new(AxRaiseWorker::spawn);
+
+/// Maximum number of pending ordered raises (`raise_without_focus`) retained
+/// if a target application hangs while the user switches workspaces repeatedly.
+const MAX_ORDERED_RAISES: usize = 32;
+
+enum RaiseItem<T> {
+    Ordered(T),
+    Focus(T),
+}
+
+/// Queue feeding [`AxRaiseWorker`]:
+/// - Ordered raises (`raise_without_focus`) preserve FIFO z-order (bounded by
+///   [`MAX_ORDERED_RAISES`], dropping oldest ordered entries if saturated).
+/// - Focus raises (`focus_with_raise`) are latest-wins: a newer focus raise
+///   replaces any unstarted focus raise and appends at the back so it finishes
+///   above any preceding ordered raises.
+struct RaiseQueue<T> {
+    items: VecDeque<RaiseItem<T>>,
+}
+
+impl<T> Default for RaiseQueue<T> {
+    fn default() -> Self {
+        Self {
+            items: VecDeque::new(),
+        }
+    }
+}
+
+impl<T> RaiseQueue<T> {
+    fn push_ordered(&mut self, item: T) {
+        let ordered_count = self
+            .items
+            .iter()
+            .filter(|existing| matches!(existing, RaiseItem::Ordered(_)))
+            .count();
+        if ordered_count >= MAX_ORDERED_RAISES
+            && let Some(oldest) = self
+                .items
+                .iter()
+                .position(|existing| matches!(existing, RaiseItem::Ordered(_)))
+        {
+            self.items.remove(oldest);
+        }
+        self.items.push_back(RaiseItem::Ordered(item));
+    }
+
+    fn push_focus(&mut self, item: T) {
+        self.items
+            .retain(|existing| !matches!(existing, RaiseItem::Focus(_)));
+        self.items.push_back(RaiseItem::Focus(item));
+    }
+
+    fn pop(&mut self) -> Option<T> {
+        self.items.pop_front().map(|item| match item {
+            RaiseItem::Ordered(value) | RaiseItem::Focus(value) => value,
+        })
+    }
+
+    fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+type RaiseWorkerState = (Mutex<RaiseQueue<CFRetained<AXUIWrapper>>>, Condvar);
+
+struct AxRaiseWorker {
+    state: Option<Arc<RaiseWorkerState>>,
+}
+
+impl AxRaiseWorker {
+    fn spawn() -> Self {
+        let state = Arc::new((Mutex::new(RaiseQueue::default()), Condvar::new()));
+        let worker_state = Arc::clone(&state);
+        match thread::Builder::new()
+            .name("paneru-ax-raise".to_string())
+            .spawn(move || Self::run(&worker_state))
+        {
+            Ok(_) => Self { state: Some(state) },
+            Err(err) => {
+                warn!("failed to spawn paneru-ax-raise worker; raising synchronously: {err}");
+                Self { state: None }
+            }
+        }
+    }
+
+    fn run(state: &RaiseWorkerState) {
+        let (lock, condvar) = state;
+        loop {
+            let element = {
+                let mut queue = lock
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                while queue.is_empty() {
+                    queue = condvar
+                        .wait(queue)
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                }
+                queue.pop()
+            };
+            if let Some(element) = element {
+                objc2::rc::autoreleasepool(|_| perform_ax_raise(&element));
+            }
+        }
+    }
+
+    fn enqueue_focus(&self, element: CFRetained<AXUIWrapper>) {
+        let Some(state) = self.state.as_ref() else {
+            perform_ax_raise(&element);
+            return;
+        };
+        let (lock, condvar) = &**state;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.push_focus(element);
+        condvar.notify_one();
+    }
+
+    fn enqueue_ordered(&self, element: CFRetained<AXUIWrapper>) {
+        let Some(state) = self.state.as_ref() else {
+            perform_ax_raise(&element);
+            return;
+        };
+        let (lock, condvar) = &**state;
+        let mut queue = lock
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        queue.push_ordered(element);
+        condvar.notify_one();
+    }
+}
+
+fn perform_ax_raise(element: &AXUIWrapper) {
+    let action = CFString::from_static_str(kAXRaiseAction);
+    unsafe { AXUIElementPerformAction(element.as_ptr(), &action) };
+}
 
 /// How long `AXEnhancedUserInterface` stays disabled after an app's last window
 /// operation. An animation writes every frame; restoring the flag between
@@ -883,6 +1024,74 @@ impl WindowOS {
         event_bytes[0x08] = 0x02;
         unsafe { SLPSPostEventRecordTo(psn, event_bytes.as_ptr().cast()) };
     }
+
+    fn apply_frame(&mut self, frame: CGRect) -> IRect {
+        self.frame = irect_from(frame);
+
+        self.frame.min.x -= self.horizontal_padding;
+        self.frame.min.y -= self.vertical_padding;
+        self.frame.max.x += self.horizontal_padding;
+        self.frame.max.y += self.vertical_padding;
+
+        self.frame
+    }
+
+    fn sls_window_bounds(&self) -> Option<CGRect> {
+        let mut rect = CGRect::default();
+        let err = unsafe { SLSGetWindowBounds(SLSMainConnectionID(), self.id, &mut rect) };
+        valid_sls_bounds(err, rect)
+    }
+
+    fn update_frame_ax(&mut self) -> Result<IRect> {
+        let window_ref = self.ax_element.as_ptr();
+
+        let position = unsafe {
+            let mut position_ref: *mut CFType = null_mut();
+            AXUIElementCopyAttributeValue(
+                window_ref,
+                CFString::from_static_str(kAXPositionAttribute).as_ref(),
+                &mut position_ref,
+            )
+            .to_result(function_name!())?;
+            AXUIWrapper::from_retained(position_ref)?
+        };
+        let size = unsafe {
+            let mut size_ref: *mut CFType = null_mut();
+            AXUIElementCopyAttributeValue(
+                window_ref,
+                CFString::from_static_str(kAXSizeAttribute).as_ref(),
+                &mut size_ref,
+            )
+            .to_result(function_name!())?;
+            AXUIWrapper::from_retained(size_ref)?
+        };
+
+        let mut frame = CGRect::default();
+        unsafe {
+            AXValueGetValue(
+                position.as_ptr(),
+                kAXValueTypeCGPoint,
+                NonNull::from(&mut frame.origin).as_ptr().cast(),
+            );
+            AXValueGetValue(
+                size.as_ptr(),
+                kAXValueTypeCGSize,
+                NonNull::from(&mut frame.size).as_ptr().cast(),
+            );
+        }
+        Ok(self.apply_frame(frame))
+    }
+}
+
+fn valid_sls_bounds(err: CGError, rect: CGRect) -> Option<CGRect> {
+    (err == CGError::Success
+        && rect.origin.x.is_finite()
+        && rect.origin.y.is_finite()
+        && rect.size.width.is_finite()
+        && rect.size.height.is_finite()
+        && rect.size.width > 0.0
+        && rect.size.height > 0.0)
+        .then_some(rect)
 }
 
 impl WindowApi for WindowOS {
@@ -1045,7 +1254,10 @@ impl WindowApi for WindowOS {
         let mut previous_observed_frame = previous_frame;
         let mut staged = false;
         for attempt in 1..=3 {
-            let Ok(actual_frame) = self.update_frame() else {
+            // Read directly from AX right after `set_ax_size`: WindowServer
+            // bounds (`SLSGetWindowBounds`) can lag behind the app's own
+            // synchronous AX clamp before the resized frame is committed.
+            let Ok(actual_frame) = self.update_frame_ax() else {
                 break;
             };
             if let Some(staging_origin) =
@@ -1084,7 +1296,7 @@ impl WindowApi for WindowOS {
         }
 
         if staged {
-            if let Ok(final_frame) = self.update_frame() {
+            if let Ok(final_frame) = self.update_frame_ax() {
                 debug!(
                     requested_width = size.x,
                     actual_width = final_frame.width(),
@@ -1095,64 +1307,24 @@ impl WindowApi for WindowOS {
         }
     }
 
-    /// Updates the internal `frame` of the window by querying its current position and size from the Accessibility API.
-    /// It also updates the `width_ratio`.
-    ///
-    /// # Arguments
-    ///
-    /// * `display_bounds` - An optional `CGRect` representing the bounds of the display the window is on.
+    /// Updates the internal `frame` of the window by reading its current bounds
+    /// from `WindowServer` via `SLSGetWindowBounds` (fast compositor read with no
+    /// cross-process AX IPC), falling back to Accessibility
+    /// (`kAXPositionAttribute` + `kAXSizeAttribute`) if `WindowServer` does not
+    /// return a valid positive rectangle.
     ///
     /// # Returns
     ///
-    /// `Ok(())` if the frame is updated successfully, otherwise `Err(Error)`.
+    /// `Ok(IRect)` with the updated padded frame if successful, otherwise `Err(Error)`.
     fn update_frame(&mut self) -> Result<IRect> {
-        let window_ref = self.ax_element.as_ptr();
-
-        let position = unsafe {
-            let mut position_ref: *mut CFType = null_mut();
-            AXUIElementCopyAttributeValue(
-                window_ref,
-                CFString::from_static_str(kAXPositionAttribute).as_ref(),
-                &mut position_ref,
-            )
-            .to_result(function_name!())?;
-            AXUIWrapper::from_retained(position_ref)?
-        };
-        let size = unsafe {
-            let mut size_ref: *mut CFType = null_mut();
-            AXUIElementCopyAttributeValue(
-                window_ref,
-                CFString::from_static_str(kAXSizeAttribute).as_ref(),
-                &mut size_ref,
-            )
-            .to_result(function_name!())?;
-            AXUIWrapper::from_retained(size_ref)?
-        };
-
-        let mut frame = CGRect::default();
-        unsafe {
-            AXValueGetValue(
-                position.as_ptr(),
-                kAXValueTypeCGPoint,
-                NonNull::from(&mut frame.origin).as_ptr().cast(),
-            );
-            AXValueGetValue(
-                size.as_ptr(),
-                kAXValueTypeCGSize,
-                NonNull::from(&mut frame.size).as_ptr().cast(),
-            );
+        if let Some(frame) = self.sls_window_bounds() {
+            return Ok(self.apply_frame(frame));
         }
-        // if (CGRectEqualToRect(new_frame, window->frame)) {
-        //     debug("%s:DEBOUNCED %s %d\n", __FUNCTION__, window->application->name, window->id);
-        // }
-        self.frame = irect_from(frame);
-
-        self.frame.min.x -= self.horizontal_padding;
-        self.frame.min.y -= self.vertical_padding;
-        self.frame.max.x += self.horizontal_padding;
-        self.frame.max.y += self.vertical_padding;
-
-        Ok(self.frame)
+        trace!(
+            window_id = self.id,
+            "SLSGetWindowBounds unavailable; falling back to AX frame read"
+        );
+        self.update_frame_ax()
     }
 
     /// Focuses the window without raising it. This involves sending specific events to the process.
@@ -1198,6 +1370,11 @@ impl WindowApi for WindowOS {
     }
 
     /// Focuses the window and raises it to the front.
+    ///
+    /// `SkyLight` front/key activation stays synchronous on the main thread so
+    /// keyboard routing switches immediately; the cross-process `kAXRaiseAction`
+    /// IPC is dispatched to [`AX_RAISE_WORKER`] (latest-wins) so slow target
+    /// apps cannot stall the main loop or `CGEventTap`.
     #[instrument(level = Level::DEBUG)]
     fn focus_with_raise(&self, psn: ProcessSerialNumber) {
         let window_id = self.id();
@@ -1205,16 +1382,12 @@ impl WindowApi for WindowOS {
             _SLPSSetFrontProcessWithOptions(&psn, window_id, CPS_USER_GENERATED);
         }
         self.make_key_window(&psn);
-        let element_ref = self.ax_element.as_ptr();
-        let action = CFString::from_static_str(kAXRaiseAction);
-        unsafe { AXUIElementPerformAction(element_ref, &action) };
+        AX_RAISE_WORKER.enqueue_focus(self.ax_element.clone());
     }
 
     #[instrument(level = Level::DEBUG)]
     fn raise_without_focus(&self) {
-        let element_ref = self.ax_element.as_ptr();
-        let action = CFString::from_static_str(kAXRaiseAction);
-        unsafe { AXUIElementPerformAction(element_ref, &action) };
+        AX_RAISE_WORKER.enqueue_ordered(self.ax_element.clone());
     }
 
     fn pid(&self) -> Result<Pid> {
@@ -1951,5 +2124,70 @@ mod tests {
         let previous = IRect::new(0, 40, 800, 640);
         let completed = IRect::new(0, 40, 4112, 640);
         assert_eq!(resize_staging_origin(previous, completed, 4112), None);
+    }
+
+    #[test]
+    fn valid_sls_bounds_accepts_positive_finite_rects_and_rejects_invalid() {
+        let negative_origin_display =
+            CGRect::new(CGPoint::new(-1920.0, -400.0), CGSize::new(800.0, 600.0));
+        assert_eq!(
+            valid_sls_bounds(CGError::Success, negative_origin_display),
+            Some(negative_origin_display)
+        );
+
+        assert_eq!(
+            valid_sls_bounds(CGError::Failure, negative_origin_display),
+            None
+        );
+
+        let zero_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(0.0, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, zero_size), None);
+
+        let negative_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(800.0, -10.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, negative_size), None);
+
+        let nan_origin = CGRect::new(CGPoint::new(f64::NAN, 0.0), CGSize::new(800.0, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, nan_origin), None);
+
+        let inf_size = CGRect::new(CGPoint::new(0.0, 0.0), CGSize::new(f64::INFINITY, 600.0));
+        assert_eq!(valid_sls_bounds(CGError::Success, inf_size), None);
+    }
+
+    #[test]
+    fn raise_queue_focus_supersedes_earlier_focus_and_preserves_ordered_z_order() {
+        let mut queue = RaiseQueue::default();
+
+        // Rapid focus raises coalesce to the latest target.
+        queue.push_focus(10);
+        queue.push_focus(20);
+        queue.push_focus(30);
+        assert_eq!(queue.pop(), Some(30));
+        assert_eq!(queue.pop(), None);
+
+        // Ordered raises stay FIFO, and a trailing focus raise finishes on top
+        // while superseding any earlier queued focus raise.
+        queue.push_ordered(1);
+        queue.push_focus(10);
+        queue.push_ordered(2);
+        queue.push_focus(20);
+        assert_eq!(queue.pop(), Some(1));
+        assert_eq!(queue.pop(), Some(2));
+        assert_eq!(queue.pop(), Some(20));
+        assert_eq!(queue.pop(), None);
+
+        // Saturated ordered raises drop oldest ordered entries without dropping
+        // the pending focus raise.
+        queue.push_focus(999);
+        for id in 0..(MAX_ORDERED_RAISES + 5) {
+            queue.push_ordered(id);
+        }
+        let mut drained = Vec::new();
+        while let Some(item) = queue.pop() {
+            drained.push(item);
+        }
+        assert_eq!(drained.len(), MAX_ORDERED_RAISES + 1);
+        assert_eq!(drained[0], 999);
+        assert_eq!(drained[1], 5);
+        assert_eq!(*drained.last().unwrap(), MAX_ORDERED_RAISES + 4);
     }
 }

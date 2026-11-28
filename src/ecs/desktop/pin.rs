@@ -10,8 +10,8 @@ use tracing::{debug, warn};
 
 use super::ops::{DesktopOpWorld, read_active_census, resolve_desktop_target};
 use super::{
-    ConfirmCondition, DesktopCensus, PendingDesktopOp, PendingDesktopOps, StickyWindowMarker,
-    exec_bridge_op, join_window_to_desktops, refresh_census_from_bridge,
+    ConfirmCondition, DesktopBridgeState, DesktopCensus, PendingDesktopOp, PendingDesktopOps,
+    StickyWindowMarker, join_window_to_desktops, refresh_census_from_bridge,
     validate_desktop_memberships,
 };
 use crate::commands::DesktopPinTarget;
@@ -128,13 +128,13 @@ pub(super) fn handle_pin(
             }
             if !memberships.contains(&dest.id) {
                 let res = bridge.add_windows_to_space(&[wid], dest.id, false);
-                if exec_bridge_op(
-                    &format!("desktop pin adding {wid} to {}", dest.id),
-                    res,
-                    bridge,
-                    &mut world.census,
-                )
-                .is_none()
+                if world
+                    .exec_bridge_op(
+                        &format!("desktop pin adding {wid} to {}", dest.id),
+                        res,
+                        bridge,
+                    )
+                    .is_none()
                 {
                     return;
                 }
@@ -169,8 +169,15 @@ fn pin_window_to_all_desktops(
     let Some(disp) = census.display(disp_id) else {
         return;
     };
-    let (added, partial_failure, may_have_applied) =
-        join_window_to_desktops(wid, disp, &memberships, bridge, "desktop pin all");
+    let (added, partial_failure, may_have_applied) = join_window_to_desktops(
+        wid,
+        disp,
+        &memberships,
+        bridge,
+        &mut world.bridge_state,
+        Some(&mut world.commands),
+        "desktop pin all",
+    );
     if may_have_applied {
         refresh_census_from_bridge(bridge, &mut world.census);
     }
@@ -220,13 +227,13 @@ pub(super) fn handle_unpin(bridge: &mut DesktopBridge, world: &mut DesktopOpWorl
     };
 
     let res = bridge.move_windows_to_space(&[wid], cur_space.id);
-    if exec_bridge_op(
-        &format!("desktop unpin {wid} -> {}", cur_space.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(
+            &format!("desktop unpin {wid} -> {}", cur_space.id),
+            res,
+            bridge,
+        )
+        .is_none()
     {
         return;
     }
@@ -249,6 +256,7 @@ pub(super) fn handle_unpin(bridge: &mut DesktopBridge, world: &mut DesktopOpWorl
 pub(super) fn join_pinned_windows_to_new_desktops(
     pinned_windows: Populated<(&Window, &PinnedDesktopWindow)>,
     mut census: ResMut<DesktopCensus>,
+    mut bridge_state: ResMut<DesktopBridgeState>,
     bridge: Option<NonSendMut<DesktopBridge>>,
     mut pending: ResMut<PendingDesktopOps>,
     mut seen_desktops: Local<HashMap<CGDirectDisplayID, Vec<SpaceId>>>,
@@ -297,6 +305,8 @@ pub(super) fn join_pinned_windows_to_new_desktops(
                 disp,
                 &memberships,
                 &mut bridge,
+                &mut bridge_state,
+                None,
                 "auto-join pinned window",
             );
             resync_census |= may_have_applied;
@@ -307,14 +317,17 @@ pub(super) fn join_pinned_windows_to_new_desktops(
                 continue;
             }
             let expected: HashSet<SpaceId> = memberships.into_iter().chain(added).collect();
-            pending.push(PendingDesktopOp::new(
-                format!("auto-join pinned window {wid} to new desktops"),
-                ConfirmCondition::WindowMemberships {
-                    windows: vec![wid],
-                    expected,
-                },
-                None,
-            ));
+            pending.push(
+                PendingDesktopOp::new(
+                    format!("auto-join pinned window {wid} to new desktops"),
+                    ConfirmCondition::WindowMemberships {
+                        windows: vec![wid],
+                        expected,
+                    },
+                    None,
+                )
+                .background(),
+            );
         }
     }
 

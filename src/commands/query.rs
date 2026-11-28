@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::{Command, DesktopOperation, Operation};
 
+use crate::ecs::layout_ops::LayoutOpsProcessed;
 use crate::ecs::state::{
     PaneruActiveState, PaneruDesktopState, PaneruQueryState, PaneruVirtualWorkspaceState,
     PaneruWindowState, QueryStateParams, StateEvent, StateQueryKind,
@@ -21,6 +22,24 @@ use crate::events::Event;
 use crate::platform::WinID;
 use crate::types::wire::{self, Response};
 
+enum SubscriberChannel {
+    Wire(Arc<wire::Subscriber>),
+    #[cfg(test)]
+    Test(std::sync::mpsc::Sender<StateEvent>),
+}
+
+impl SubscriberChannel {
+    fn try_send(&self, event: &StateEvent) -> Result<(), wire::Error> {
+        match self {
+            Self::Wire(channel) => channel.try_send(event),
+            #[cfg(test)]
+            Self::Test(sender) => sender
+                .send(event.clone())
+                .map_err(|_| wire::Error::PeerGone),
+        }
+    }
+}
+
 /// One connected `paneru subscribe` client.
 ///
 /// The channel is only ever touched from a task on the IO pool, since writing
@@ -28,7 +47,7 @@ use crate::types::wire::{self, Response};
 /// learn a subscriber is gone via a plain atomic flag instead of a lock shared
 /// with that task.
 struct Subscriber {
-    channel: Arc<wire::Subscriber>,
+    channel: SubscriberChannel,
     alive: Arc<AtomicBool>,
 }
 
@@ -302,7 +321,7 @@ fn state_subscribe_handler(
             continue;
         };
         subscribers.streams.push(Subscriber {
-            channel: subscriber.clone(),
+            channel: SubscriberChannel::Wire(subscriber.clone()),
             alive: Arc::new(AtomicBool::new(true)),
         });
     }
@@ -434,6 +453,7 @@ fn collect_state_broadcast_events_for_intent(
 
 fn state_event_broadcast_handler(
     mut messages: MessageReader<Event>,
+    mut layout_ops: MessageReader<LayoutOpsProcessed>,
     mut subscribers: ResMut<StateSubscribers>,
     mut cache: ResMut<StateBroadcastCache>,
     focused_changes: Query<Entity, Added<FocusedMarker>>,
@@ -441,6 +461,7 @@ fn state_event_broadcast_handler(
     state: QueryStateParams,
 ) {
     let events = messages.read().collect::<Vec<_>>();
+    let layout_ops_processed = layout_ops.read().count() != 0;
 
     if subscribers.streams.is_empty() {
         return;
@@ -450,16 +471,17 @@ fn state_event_broadcast_handler(
     let signals = StateBroadcastSignals {
         virtual_workspace_changed: !active_workspace_changes.is_empty() || census_changed,
         desktops_changed: census_changed,
-        windows_changed: events.iter().any(|event| {
-            let Event::WindowMoved { window_id } = event else {
-                return false;
-            };
-            state
-                .windows()
-                .find(*window_id)
-                .and_then(|(_, entity)| state.windows().get_managed(entity))
-                .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
-        }),
+        windows_changed: layout_ops_processed
+            || events.iter().any(|event| {
+                let Event::WindowMoved { window_id } = event else {
+                    return false;
+                };
+                state
+                    .windows()
+                    .find(*window_id)
+                    .and_then(|(_, entity)| state.windows().get_managed(entity))
+                    .is_some_and(|(_, _, unmanaged)| matches!(unmanaged, Some(Unmanaged::Floating)))
+            }),
         window_focused: !focused_changes.is_empty(),
     };
     let intent = StateBroadcastIntent::from_events(events, signals);
@@ -833,6 +855,251 @@ mod tests {
             assert!(stack_intent.windows_changed);
             assert!(stack_intent.on_screen_changed);
         }
+    }
+
+    fn attach_primed_subscriber(
+        harness: &mut crate::tests::TestHarness,
+    ) -> (PaneruQueryState, std::sync::mpsc::Receiver<StateEvent>) {
+        use bevy::ecs::system::SystemState;
+
+        // Flush any buffered setup events so the subscriber starts caught up
+        // to the current tick, just like an already-connected client.
+        harness.app.update();
+        harness.app.update();
+
+        let world = harness.world();
+        let mut query = SystemState::<QueryStateParams>::new(world);
+        let snapshot = query.get(world).unwrap().extract().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        *world.resource_mut::<StateBroadcastCache>() = StateBroadcastCache {
+            workspace: Some(WorkspaceBroadcastSnapshot::from(&snapshot.active)),
+            focus: Some(FocusBroadcastSnapshot::from(&snapshot.active)),
+            virtual_workspaces: Some(snapshot.virtual_workspaces.clone()),
+            desktops: Some(snapshot.desktops.clone()),
+            on_screen: Some(snapshot.on_screen().into_iter().cloned().collect()),
+            titles: BTreeMap::new(),
+        };
+        world
+            .resource_mut::<StateSubscribers>()
+            .streams
+            .push(Subscriber {
+                channel: SubscriberChannel::Test(tx),
+                alive: Arc::new(AtomicBool::new(true)),
+            });
+        // Run one idle tick to sync `state_event_broadcast_handler`'s readers.
+        harness.app.update();
+        let _ = drain_subscriber(&rx);
+        (snapshot, rx)
+    }
+
+    fn drain_subscriber(rx: &std::sync::mpsc::Receiver<StateEvent>) -> Vec<StateEvent> {
+        std::iter::from_fn(|| rx.try_recv().ok()).collect()
+    }
+
+    #[test]
+    fn test_layout_batches_notify_subscribers_of_hidden_reordering() {
+        use bevy::ecs::message::Messages;
+        use bevy::ecs::system::SystemState;
+        use std::time::Duration;
+
+        use crate::config::Config;
+        use crate::tests::TestHarness;
+        use crate::types::windowset::LayoutOp;
+
+        let config = Config::try_from("default_workspaces = 2\n").unwrap();
+        let mut harness = TestHarness::new().with_config(config).with_windows(3);
+        let layout = |ops| Event::Command {
+            command: Command::Layout(ops),
+        };
+        harness.advance(Duration::from_millis(500));
+        harness.world().write_message(layout(vec![
+            LayoutOp::MoveToWorkspace {
+                window: 1,
+                workspace: 2,
+                follow: false,
+            },
+            LayoutOp::MoveToWorkspace {
+                window: 2,
+                workspace: 2,
+                follow: false,
+            },
+        ]));
+        harness.advance(Duration::from_millis(1100));
+
+        let (before, rx) = attach_primed_subscriber(&mut harness);
+        let hidden_row = |state: &PaneruQueryState| {
+            state
+                .virtual_workspaces
+                .iter()
+                .find(|row| row.number == 2 && !row.shown)
+                .expect("hidden workspace")
+                .windows
+                .iter()
+                .map(|window| window.window_id)
+                .collect::<Vec<_>>()
+        };
+        let original_order = hidden_row(&before);
+        assert_eq!(original_order.len(), 2);
+
+        let mut cursor = harness
+            .world()
+            .resource::<Messages<LayoutOpsProcessed>>()
+            .get_cursor_current();
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Swap(1, 2)]));
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Swap(1, 99)]));
+        harness.app.update();
+        let processed = cursor
+            .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+            .count();
+        assert_eq!(processed, 1, "nonempty batches share one broadcast check");
+
+        let mut query = SystemState::<QueryStateParams>::new(harness.world());
+        let after = query.get(harness.world()).unwrap().extract().unwrap();
+        assert_eq!(
+            hidden_row(&after),
+            vec![original_order[1], original_order[0]]
+        );
+
+        let delivered = drain_subscriber(&rx);
+        assert_eq!(
+            delivered
+                .iter()
+                .filter(|event| matches!(event, StateEvent::WindowsChanged { .. }))
+                .count(),
+            1,
+            "hidden reorder must emit one WindowsChanged via state_event_broadcast_handler"
+        );
+
+        // Empty and all-skipped batches emit neither LayoutOpsProcessed nor subscriber events.
+        harness.world().write_message(layout(vec![]));
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Swap(1, 99)]));
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            0
+        );
+        assert_eq!(drain_subscriber(&rx), Vec::<StateEvent>::new());
+    }
+
+    #[test]
+    fn test_layout_focus_view_and_focused_set_width_broadcast_correctly() {
+        use bevy::ecs::message::Messages;
+        use std::time::Duration;
+
+        use crate::config::Config;
+        use crate::tests::TestHarness;
+        use crate::types::windowset::LayoutOp;
+
+        let config = Config::try_from("default_workspaces = 2\n").unwrap();
+        let mut harness = TestHarness::new().with_config(config).with_windows(2);
+        let layout = |ops| Event::Command {
+            command: Command::Layout(ops),
+        };
+        harness.advance(Duration::from_millis(500));
+
+        let (_, rx) = attach_primed_subscriber(&mut harness);
+        let mut cursor = harness
+            .world()
+            .resource::<Messages<LayoutOpsProcessed>>()
+            .get_cursor_current();
+
+        // 1. Focus-only layout batch emits only WindowFocused, not WindowsChanged/OnScreenChanged.
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::Focus(1)]));
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            0,
+            "focus-only layout batch must not write LayoutOpsProcessed"
+        );
+        let focus_events = drain_subscriber(&rx);
+        assert!(
+            focus_events.iter().any(|event| matches!(
+                event,
+                StateEvent::WindowFocused {
+                    window_id: Some(1),
+                    ..
+                }
+            )),
+            "focus-only layout batch must still emit WindowFocused"
+        );
+        assert!(
+            !focus_events.iter().any(|event| matches!(
+                event,
+                StateEvent::WindowsChanged { .. } | StateEvent::OnScreenChanged { .. }
+            )),
+            "focus-only layout batch must not emit spurious WindowsChanged or OnScreenChanged: {focus_events:?}"
+        );
+
+        // 2. Focused SetWidth delegates to Operation::SetWidth on the next tick and
+        // emits WindowsChanged when resize_window actually applies the resize.
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::SetWidth {
+                window: 1,
+                ratio: 0.75,
+            }]));
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            0,
+            "focused SetWidth defers to Operation::SetWidth on the next tick"
+        );
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            1,
+            "resize_window must emit LayoutOpsProcessed on the tick Operation::SetWidth runs"
+        );
+        let resize_events = drain_subscriber(&rx);
+        assert!(
+            resize_events
+                .iter()
+                .any(|event| matches!(event, StateEvent::WindowsChanged { .. })),
+            "focused SetWidth must notify subscribers once resize_window applies: {resize_events:?}"
+        );
+
+        // 3. View-only layout batch switches workspaces without emitting WindowsChanged.
+        harness
+            .world()
+            .write_message(layout(vec![LayoutOp::View { workspace: 2 }]));
+        harness.app.update();
+        assert_eq!(
+            cursor
+                .read(harness.world().resource::<Messages<LayoutOpsProcessed>>())
+                .count(),
+            0,
+            "view-only layout batch must not write LayoutOpsProcessed"
+        );
+        harness.app.update();
+        let view_events = drain_subscriber(&rx);
+        assert!(
+            view_events
+                .iter()
+                .any(|event| matches!(event, StateEvent::VirtualWorkspaceChanged { .. })),
+            "view-only layout batch must emit VirtualWorkspaceChanged: {view_events:?}"
+        );
+        assert!(
+            !view_events
+                .iter()
+                .any(|event| matches!(event, StateEvent::WindowsChanged { .. })),
+            "view-only layout batch must not emit spurious WindowsChanged: {view_events:?}"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use stdext::prelude::RwLockExt;
 
-use super::mocks::MockState;
+use super::mocks::{MockState, MockWmBridgeMode};
 use crate::events::Event;
 use crate::manager::spaces::{
     AssignMode, DesktopBridgeApi, RawDisplaySpaces, SpaceCensus, SpaceError, SpaceErrorKind,
@@ -96,11 +96,32 @@ impl MockState {
         self.inner.force_write().screen_locked = locked;
     }
 
+    pub(crate) fn set_wm_bridge_mode(&self, mode: MockWmBridgeMode) {
+        self.inner.force_write().wm_bridge_mode = mode;
+    }
+
+    pub(crate) fn wm_bridge_probe_calls(&self) -> usize {
+        self.inner.force_read().wm_bridge_probe_calls
+    }
+
+    pub(crate) fn wm_bridge_mutation_calls(&self) -> usize {
+        self.inner.force_read().wm_bridge_mutation_calls
+    }
+
     pub(crate) fn flush_deferred_desktop_ops(&self) {
         let ops = std::mem::take(&mut self.inner.force_write().deferred_desktop_ops);
         for op in ops {
             op(self);
         }
+    }
+
+    fn record_mutation_and_check_rejected(&self) -> bool {
+        let mut inner = self.inner.force_write();
+        inner.wm_bridge_mutation_calls += 1;
+        matches!(
+            inner.wm_bridge_mode,
+            MockWmBridgeMode::RejectAll | MockWmBridgeMode::RejectMutationsOnly
+        )
     }
 
     fn run_or_defer_desktop(&self, op: impl FnOnce(&Self) + Send + Sync + 'static) {
@@ -164,6 +185,13 @@ impl DesktopBridgeApi for MockDesktopBridge {
         } else {
             Ok(())
         }
+    }
+
+    fn probe_wm_bridge(&self, _space_id: SpaceId) -> Result<bool, SpaceError> {
+        self.session_unlocked()?;
+        let mut inner = self.0.inner.force_write();
+        inner.wm_bridge_probe_calls += 1;
+        Ok(inner.wm_bridge_mode != MockWmBridgeMode::RejectAll)
     }
 
     fn spaces_for_window(&self, window_id: WinID) -> Result<Vec<SpaceId>, SpaceError> {
@@ -246,6 +274,9 @@ impl DesktopBridgeApi for MockDesktopBridge {
         _hide: &[SpaceId],
     ) -> Result<(), SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Ok(());
+        }
         let raw = target.get();
         self.0.run_or_defer_desktop(move |state| {
             let mut inner = state.inner.force_write();
@@ -265,6 +296,13 @@ impl DesktopBridgeApi for MockDesktopBridge {
 
     fn create_desktop(&mut self) -> Result<SpaceId, SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Err(SpaceError::new(
+                SpaceErrorKind::OperationFailed,
+                "SLSBridgedSpaceCreateOperation result was nil",
+            )
+            .with_applied(true));
+        }
         let raw = {
             let mut inner = self.0.inner.force_write();
             let id = inner.next_space_id;
@@ -287,6 +325,9 @@ impl DesktopBridgeApi for MockDesktopBridge {
 
     fn destroy_space(&mut self, space_id: SpaceId) -> Result<(), SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Ok(());
+        }
         let raw = space_id.get();
         self.0.run_or_defer_desktop(move |state| {
             let mut inner = state.inner.force_write();
@@ -335,6 +376,9 @@ impl DesktopBridgeApi for MockDesktopBridge {
         remove_others: bool,
     ) -> Result<(), SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Ok(());
+        }
         let raw = space_id.get();
         let win_vec = windows.to_vec();
         self.0.run_or_defer_desktop(move |state| {
@@ -358,6 +402,9 @@ impl DesktopBridgeApi for MockDesktopBridge {
 
     fn assign_process(&mut self, pid: Pid, mode: AssignMode) -> Result<(), SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Ok(());
+        }
         self.0.run_or_defer_desktop(move |state| {
             let mut inner = state.inner.force_write();
             let mut display_desktops: Vec<(u32, WorkspaceId, Vec<WorkspaceId>, Vec<WorkspaceId>)> =
@@ -419,6 +466,9 @@ impl DesktopBridgeApi for MockDesktopBridge {
         index: u32,
     ) -> Result<(), SpaceError> {
         self.session_unlocked()?;
+        if self.0.record_mutation_and_check_rejected() {
+            return Ok(());
+        }
         let raw = space_id.get();
         let disp_name = skylight_display.to_string();
         self.0.run_or_defer_desktop(move |state| {

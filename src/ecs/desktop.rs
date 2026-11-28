@@ -27,7 +27,9 @@ use crate::ecs::{
     UpdateSet,
 };
 use crate::events::Event;
-use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceError, SpaceId};
+use crate::manager::spaces::{
+    DesktopBridge, DisplaySpaces, SpaceCensus, SpaceError, SpaceErrorKind, SpaceId,
+};
 use crate::manager::{Display, Window};
 use crate::platform::{WinID, WorkspaceId};
 
@@ -47,6 +49,94 @@ pub const DESKTOP_CONFIRM_BUDGET: Duration = Duration::from_secs(2);
 
 /// Fallback census poll cadence while awaiting an asynchronous `WMBridge` op.
 pub const DESKTOP_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+/// One-time HUD flash shown when the user invokes a `desktop_*` command after
+/// `WMBridge` mutations have been soft-disabled.
+pub const DESKTOP_BRIDGE_UNAVAILABLE_FLASH: &str =
+    "Native Desktop controls unavailable on this macOS";
+
+const DESKTOP_BRIDGE_UNAVAILABLE_FLASH_SECS: f32 = 3.0;
+
+/// Runtime availability of `WindowManager` `SLSBridged*Operation` (`WMBridge`)
+/// mutations (for example, macOS 27.3+ rejects unentitled bridged operations).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BridgeMutationStatus {
+    /// Not yet probed, or deferred while the console GUI session was locked/inactive.
+    #[default]
+    Unknown,
+    /// Startup probe could not run or returned an unexpected error; rely on
+    /// runtime confirmation/timeout detection without re-probing every event.
+    ProbeInconclusive,
+    /// Startup probe or a real mutation succeeded.
+    Available,
+    /// `WindowManager` rejected bridged operations; native Desktop mutations are
+    /// soft-disabled for this session while read-only census queries stay active.
+    Unavailable,
+}
+
+/// Tracks whether `WMBridge` mutations are accepted by macOS `WindowManager`
+/// during this session.
+#[derive(Resource, Clone, Debug, Default)]
+pub struct DesktopBridgeState {
+    status: BridgeMutationStatus,
+    confirmed_any: bool,
+    notified_user: bool,
+}
+
+impl DesktopBridgeState {
+    #[cfg(test)]
+    #[must_use]
+    pub const fn status(&self) -> BridgeMutationStatus {
+        self.status
+    }
+
+    #[must_use]
+    pub const fn mutations_available(&self) -> bool {
+        !matches!(self.status, BridgeMutationStatus::Unavailable)
+    }
+
+    #[must_use]
+    pub const fn is_unavailable(&self) -> bool {
+        matches!(self.status, BridgeMutationStatus::Unavailable)
+    }
+
+    #[must_use]
+    pub const fn is_confirmed(&self) -> bool {
+        self.confirmed_any
+    }
+
+    #[must_use]
+    pub const fn should_probe(&self) -> bool {
+        matches!(self.status, BridgeMutationStatus::Unknown) && !self.confirmed_any
+    }
+
+    pub fn mark_probe_available(&mut self) {
+        if self.status == BridgeMutationStatus::Unknown {
+            self.status = BridgeMutationStatus::Available;
+        }
+    }
+
+    pub fn mark_probe_inconclusive(&mut self) {
+        if self.status == BridgeMutationStatus::Unknown {
+            self.status = BridgeMutationStatus::ProbeInconclusive;
+        }
+    }
+
+    pub fn mark_confirmed(&mut self) {
+        self.confirmed_any = true;
+        self.status = BridgeMutationStatus::Available;
+    }
+
+    pub fn mark_unavailable(&mut self, reason: &str) {
+        if self.status != BridgeMutationStatus::Unavailable {
+            warn!(
+                "native macOS Desktop controls disabled: {reason}. \
+                 Read-only Desktop queries and Paneru virtual workspaces remain active."
+            );
+            self.status = BridgeMutationStatus::Unavailable;
+        }
+    }
+}
 
 /// Cached `SkyLight` Space census in ECS, updated reactively on display/space
 /// events and confirmed `WMBridge` operations so readers avoid FFI calls.
@@ -155,6 +245,10 @@ pub struct PendingDesktopOp {
     pub remaining: Timer,
     pub poll: Timer,
     pub fresh: bool,
+    /// True when triggered by an explicit user `desktop_*` command (eligible
+    /// to show the one-time unavailable flash if it times out). False for
+    /// background `[windows]` rules and `pin all` auto-joins.
+    pub user_initiated: bool,
     pub on_confirmed: Option<PostConfirmAction>,
 }
 
@@ -171,8 +265,15 @@ impl PendingDesktopOp {
             remaining: Timer::new(DESKTOP_CONFIRM_BUDGET, TimerMode::Once),
             poll: Timer::new(DESKTOP_POLL_INTERVAL, TimerMode::Repeating),
             fresh: true,
+            user_initiated: true,
             on_confirmed,
         }
+    }
+
+    #[must_use]
+    pub const fn background(mut self) -> Self {
+        self.user_initiated = false;
+        self
     }
 }
 
@@ -215,6 +316,10 @@ impl PendingDesktopOps {
     pub fn is_empty(&self) -> bool {
         self.queue.is_empty()
     }
+
+    pub fn clear(&mut self) {
+        self.queue.clear();
+    }
 }
 
 pub struct DesktopEventsPlugin;
@@ -224,8 +329,11 @@ impl Plugin for DesktopEventsPlugin {
         let has_added_displays = |added: Query<(), Added<Display>>| !added.is_empty();
         let has_pending_ops =
             |pending: Option<Res<PendingDesktopOps>>| pending.is_some_and(|p| !p.is_empty());
+        let desktop_mutations_available =
+            |state: Option<Res<DesktopBridgeState>>| state.is_none_or(|s| s.mutations_available());
 
         app.init_resource::<DesktopCensus>()
+            .init_resource::<DesktopBridgeState>()
             .init_resource::<PendingDesktopOps>()
             .add_systems(
                 PreUpdate,
@@ -244,7 +352,8 @@ impl Plugin for DesktopEventsPlugin {
                     sync_sticky_windows,
                     pin::join_pinned_windows_to_new_desktops
                         .after(confirm_desktop_ops)
-                        .run_if(resource_changed::<DesktopCensus>),
+                        .run_if(resource_changed::<DesktopCensus>)
+                        .run_if(desktop_mutations_available),
                 )
                     .in_set(UpdateSet::Events)
                     .before(crate::ecs::workspace::workspace_change_handler),
@@ -256,7 +365,8 @@ impl Plugin for DesktopEventsPlugin {
                     .after(super::triggers::apply_window_defaults)
                     .after(super::systems::detect_tabbed_windows)
                     .before(super::triggers::apply_window_positions)
-                    .run_if(not(resource_exists::<Initializing>)),
+                    .run_if(not(resource_exists::<Initializing>))
+                    .run_if(desktop_mutations_available),
             )
             .add_systems(
                 PostUpdate,
@@ -295,18 +405,101 @@ fn refresh_census_from_bridge(bridge: &DesktopBridge, census: &mut ResMut<Deskto
     }
 }
 
-/// Logs `err`, refreshes [`DesktopCensus`] if `err.request_may_have_applied`,
-/// and unwraps `Ok(val)` into `Some(val)`.
+fn probe_target_space(census: &SpaceCensus) -> Option<SpaceId> {
+    census
+        .displays
+        .iter()
+        .find_map(|d| {
+            d.current_space_record()
+                .filter(|s| s.kind.is_desktop())
+                .map(|s| s.id)
+        })
+        .or_else(|| {
+            census
+                .displays
+                .iter()
+                .flat_map(DisplaySpaces::desktop_ids)
+                .next()
+        })
+        .or_else(|| census.displays.first().map(|d| d.current_space))
+}
+
+/// Runs the one-shot read-only `WMBridge` probe (`SLSBridgedSpaceCopyValuesOperation`)
+/// if it has not yet completed for this session.
+pub(super) fn probe_bridge_if_needed(
+    bridge: &DesktopBridge,
+    census: &SpaceCensus,
+    bridge_state: &mut ResMut<DesktopBridgeState>,
+) {
+    if !bridge_state.should_probe() {
+        return;
+    }
+    let Some(space_id) = probe_target_space(census) else {
+        return;
+    };
+    match bridge.probe_wm_bridge(space_id) {
+        Ok(true) => {
+            debug!("WMBridge probe succeeded on space {space_id}");
+            bridge_state.mark_probe_available();
+        }
+        Ok(false) => {
+            bridge_state.mark_unavailable(
+                "WindowManager rejected bridged Space probe \
+                 (macOS 27.3+ requires private Apple entitlements)",
+            );
+        }
+        Err(err)
+            if matches!(
+                err.kind,
+                SpaceErrorKind::SessionLocked | SpaceErrorKind::NoGuiSession
+            ) =>
+        {
+            debug!("WMBridge probe deferred ({err}); will retry when session is active");
+        }
+        Err(err) => {
+            debug!("WMBridge probe inconclusive ({err}); falling back to runtime detection");
+            bridge_state.mark_probe_inconclusive();
+        }
+    }
+}
+
+/// Shows the one-time HUD flash when the user invokes a native Desktop command
+/// after `WMBridge` mutations have been soft-disabled.
+pub(super) fn flash_unavailable_once(
+    bridge_state: &mut ResMut<DesktopBridgeState>,
+    commands: &mut Commands,
+) {
+    if !bridge_state.notified_user {
+        bridge_state.notified_user = true;
+        commands.flash_message(
+            DESKTOP_BRIDGE_UNAVAILABLE_FLASH.to_owned(),
+            DESKTOP_BRIDGE_UNAVAILABLE_FLASH_SECS,
+        );
+    }
+}
+
+/// Logs `err`, latches [`DesktopBridgeState`] unavailable on
+/// [`SpaceErrorKind::Unsupported`], refreshes [`DesktopCensus`] if
+/// `err.request_may_have_applied`, and unwraps `Ok(val)` into `Some(val)`.
 pub(super) fn exec_bridge_op<T>(
     label: &str,
     result: Result<T, SpaceError>,
     bridge: &DesktopBridge,
     census: &mut ResMut<DesktopCensus>,
+    bridge_state: &mut ResMut<DesktopBridgeState>,
+    flash_commands: Option<&mut Commands>,
 ) -> Option<T> {
     match result {
         Ok(val) => Some(val),
         Err(err) => {
-            warn!("{label} failed: {err}");
+            if err.kind == SpaceErrorKind::Unsupported {
+                bridge_state.mark_unavailable(&format!("{label}: {}", err.message));
+                if let Some(cmds) = flash_commands {
+                    flash_unavailable_once(bridge_state, cmds);
+                }
+            } else {
+                warn!("{label} failed: {err}");
+            }
             if err.request_may_have_applied {
                 refresh_census_from_bridge(bridge, census);
             }
@@ -374,17 +567,27 @@ pub(super) fn validate_desktop_memberships(
 /// Joins `wid` onto every ordinary Desktop on `disp` not already present in
 /// `memberships`, stopping on the first bridge error. Returns `(added, failed,
 /// may_have_applied)`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn join_window_to_desktops(
     wid: WinID,
     disp: &DisplaySpaces,
     memberships: &[SpaceId],
     bridge: &mut DesktopBridge,
+    bridge_state: &mut ResMut<DesktopBridgeState>,
+    flash_commands: Option<&mut Commands>,
     label: &str,
 ) -> (Vec<SpaceId>, bool, bool) {
     let mut added = Vec::new();
     for sid in disp.desktop_ids().filter(|sid| !memberships.contains(sid)) {
         if let Err(err) = bridge.add_windows_to_space(&[wid], sid, false) {
-            warn!("{label} failed adding {wid} to {sid}: {err}");
+            if err.kind == SpaceErrorKind::Unsupported {
+                bridge_state.mark_unavailable(&format!("{label}: {}", err.message));
+                if let Some(cmds) = flash_commands {
+                    flash_unavailable_once(bridge_state, cmds);
+                }
+            } else {
+                warn!("{label} failed adding {wid} to {sid}: {err}");
+            }
             return (added, true, err.request_may_have_applied);
         }
         added.push(sid);
@@ -400,6 +603,7 @@ fn sync_desktop_census(
     displays: Query<(), With<Display>>,
     bridge: Option<NonSend<DesktopBridge>>,
     mut census: ResMut<DesktopCensus>,
+    mut bridge_state: ResMut<DesktopBridgeState>,
     mut initial_attempts: Local<u8>,
 ) {
     let event_triggered = messages.read().any(is_census_event);
@@ -423,6 +627,7 @@ fn sync_desktop_census(
     refresh_census_from_bridge(&bridge, &mut census);
     if !census.0.displays.is_empty() {
         *initial_attempts = 0;
+        probe_bridge_if_needed(&bridge, &census.0, &mut bridge_state);
     }
 }
 
@@ -706,6 +911,7 @@ fn ensure_strip_and_maybe_focus(
     focus: bool,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
+    bridge_state: &mut ResMut<DesktopBridgeState>,
     targets: &ConfirmFocusTargets,
     commands: &mut Commands,
 ) -> (Option<PendingDesktopOp>, bool) {
@@ -726,7 +932,14 @@ fn ensure_strip_and_maybe_focus(
         .map(|s| s.id)
         .collect();
     if let Err(err) = bridge.activate_space(&disp.skylight_display, space_id, &hide) {
-        warn!("failed to focus newly created desktop {space_id}: {err}");
+        if err.kind == SpaceErrorKind::Unsupported {
+            bridge_state.mark_unavailable(&format!(
+                "focus newly created desktop {space_id}: {}",
+                err.message
+            ));
+        } else {
+            warn!("failed to focus newly created desktop {space_id}: {err}");
+        }
         ensure_strip_exists(space_id, rec.display_id, targets, commands);
         return (None, err.request_may_have_applied);
     }
@@ -748,6 +961,7 @@ fn run_post_confirm(
     action: PostConfirmAction,
     confirmed_census: &SpaceCensus,
     bridge: &mut DesktopBridge,
+    bridge_state: &mut ResMut<DesktopBridgeState>,
     targets: &mut ConfirmFocusTargets,
     commands: &mut Commands,
 ) -> (Option<PendingDesktopOp>, bool) {
@@ -771,6 +985,7 @@ fn run_post_confirm(
                 focus,
                 confirmed_census,
                 bridge,
+                bridge_state,
                 targets,
                 commands,
             )
@@ -784,7 +999,14 @@ fn run_post_confirm(
             migrated,
         } => {
             if let Err(err) = bridge.destroy_space(space_id) {
-                warn!("failed to destroy vacated space {space_id}: {err}");
+                if err.kind == SpaceErrorKind::Unsupported {
+                    bridge_state.mark_unavailable(&format!(
+                        "destroy vacated space {space_id}: {}",
+                        err.message
+                    ));
+                } else {
+                    warn!("failed to destroy vacated space {space_id}: {err}");
+                }
                 if activate_display {
                     activate_space_in_ecs(
                         neighbor_id,
@@ -857,7 +1079,14 @@ fn run_post_confirm(
             active_space,
         } => {
             if let Err(err) = bridge.move_space_to_index(space_id, &skylight_display, index) {
-                warn!("second step of desktop swap failed for {space_id}: {err}");
+                if err.kind == SpaceErrorKind::Unsupported {
+                    bridge_state.mark_unavailable(&format!(
+                        "desktop swap step 2 for {space_id}: {}",
+                        err.message
+                    ));
+                } else {
+                    warn!("second step of desktop swap failed for {space_id}: {err}");
+                }
                 return (None, err.request_may_have_applied);
             }
             (
@@ -876,11 +1105,13 @@ fn run_post_confirm(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn confirm_desktop_ops(
     time: Res<Time<Virtual>>,
     mut messages: MessageReader<Event>,
     mut pending: ResMut<PendingDesktopOps>,
     mut census: ResMut<DesktopCensus>,
+    mut bridge_state: ResMut<DesktopBridgeState>,
     bridge: Option<NonSendMut<DesktopBridge>>,
     mut targets: ConfirmFocusTargets,
     mut commands: Commands,
@@ -921,14 +1152,23 @@ fn confirm_desktop_ops(
         if let ConfirmProbe::Confirmed(maybe_census) = condition_met(&bridge, &front.condition) {
             let completed = pending.queue.pop_front().expect("front checked");
             debug!("confirmed desktop op: {}", completed.description);
+            if !bridge_state.is_confirmed() {
+                bridge_state.mark_confirmed();
+            }
             if let Some(confirmed_census) = maybe_census
                 && census.0 != confirmed_census
             {
                 census.0 = confirmed_census;
             }
             if let Some(action) = completed.on_confirmed {
-                let (follow_up, needs_resync) =
-                    run_post_confirm(action, &census.0, &mut bridge, &mut targets, &mut commands);
+                let (follow_up, needs_resync) = run_post_confirm(
+                    action,
+                    &census.0,
+                    &mut bridge,
+                    &mut bridge_state,
+                    &mut targets,
+                    &mut commands,
+                );
                 if let Some(follow_up) = follow_up {
                     pending.queue.push_front(follow_up);
                 }
@@ -941,6 +1181,20 @@ fn confirm_desktop_ops(
 
         if front.remaining.is_finished() {
             let expired = pending.queue.pop_front().expect("front checked");
+            if !bridge_state.is_confirmed() && bridge.session_unlocked().is_ok() {
+                let had_user_op =
+                    expired.user_initiated || pending.queue.iter().any(|op| op.user_initiated);
+                bridge_state.mark_unavailable(&format!(
+                    "desktop op '{}' timed out after {:?} with no OS confirmation",
+                    expired.description, DESKTOP_CONFIRM_BUDGET
+                ));
+                if had_user_op {
+                    flash_unavailable_once(&mut bridge_state, &mut commands);
+                }
+                pending.queue.clear();
+                refresh_census_from_bridge(&bridge, &mut census);
+                return;
+            }
             warn!(
                 "desktop op '{}' timed out after {:?}; resyncing census",
                 expired.description, DESKTOP_CONFIRM_BUDGET

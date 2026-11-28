@@ -95,6 +95,15 @@ inspired by [Niri] and [PaperWM.spoon].
 - Check your System Settings for "Displays have separate spaces" option. It
   should be enabled - this allows Paneru to manage the workspaces independently.
 
+- **Native macOS Desktop controls (`desktop_*`) on macOS 27.3+.** Starting with
+  macOS 27.3, `WindowManager` restricts bridged Space operations
+  (`SLSBridged*Operation`) to Apple-entitled clients, rejecting calls from
+  third-party binaries when SIP is enabled. Paneru automatically detects this
+  and disables `desktop_*` mutations (and `[windows]` `desktop` placement rules)
+  without repeated timeouts; read-only Desktop queries (`paneru query desktops`)
+  and Paneru's virtual workspaces (`window_virtual_*`) continue to work normally
+  with SIP enabled.
+
 - **Multiple displays**. Paneru is moving the windows off-screen, hiding them
   to the left or right. If you have multiple displays, for example your laptop
   open when docked to an external monitor you may experience weird behavior.

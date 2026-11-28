@@ -166,6 +166,7 @@ type TabIndicatorWindowMoved<'w, 's> = Query<
 #[allow(clippy::too_many_lines)]
 pub fn register_systems(app: &mut bevy::app::App) {
     const CLOSED_WINDOW_CHECK_FREQ: Duration = Duration::from_secs(1);
+    const UNORDERED_WINDOW_SWEEP_FREQ: Duration = Duration::from_secs(5);
     const LOW_POWER_MODE_CHECK: Duration = Duration::from_mins(1);
     const APP_OBSERVABILITY_CHECK_FREQ: Duration = Duration::from_millis(200);
 
@@ -309,9 +310,12 @@ pub fn register_systems(app: &mut bevy::app::App) {
             )
                 .chain()
                 .run_if(not_swiping),
-            workspace::cleanup_unordered_windows
+            workspace::verify_pending_destroys
                 .run_if(not(resource_exists::<Initializing>))
                 .run_if(on_timer(CLOSED_WINDOW_CHECK_FREQ)),
+            workspace::cleanup_unordered_windows
+                .run_if(not(resource_exists::<Initializing>))
+                .run_if(on_timer(UNORDERED_WINDOW_SWEEP_FREQ)),
             systems::regroup_stray_native_tabs
                 .run_if(native_tabs_enabled)
                 .run_if(not(resource_exists::<Initializing>))
@@ -399,6 +403,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
                     .or_eager(crate::menubar::menu_viewport_dirty)
                     .or_eager(resource_changed::<Config>)
                     .or_eager(resource_changed::<desktop::DesktopCensus>)
+                    .or_eager(resource_changed::<desktop::DesktopBridgeState>)
                     .or_eager(resource_changed::<crate::menubar::MenuBarVisibility>),
             ),
             systems::update_tab_indicators.run_if(tab_indicators_dirty),
@@ -413,6 +418,7 @@ pub fn register_systems(app: &mut bevy::app::App) {
 
 /// Registers all the event triggers for the window manager.
 pub fn register_triggers(app: &mut bevy::app::App) {
+    app.init_resource::<triggers::ConfirmedAppFocus>();
     app.add_systems(
         Update,
         (
@@ -605,6 +611,34 @@ pub enum Unmanaged {
 /// window floats it again instead of tiling it.
 #[derive(Component, Debug)]
 pub struct FloatsWhenRestored;
+
+/// Attached to a window whose `Event::WindowDestroyed` was deferred while the
+/// screen was locked or displays were unsettled. Once unlocked and settled,
+/// `cleanup_unordered_windows` verifies liveness with a bounded attempt budget
+/// so floating, minimized/hidden, and native-tabbed windows that genuinely
+/// closed during the transition are still reaped without continuous AX polling.
+#[derive(Component, Debug)]
+pub struct PendingDestroyCheck {
+    remaining_checks: u8,
+}
+
+impl PendingDestroyCheck {
+    const MAX_CHECKS: u8 = 3;
+
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            remaining_checks: Self::MAX_CHECKS,
+        }
+    }
+
+    /// Consumes one post-settle liveness check and returns `true` when the
+    /// budget is exhausted and the marker should be removed.
+    pub fn consume_attempt(&mut self) -> bool {
+        self.remaining_checks = self.remaining_checks.saturating_sub(1);
+        self.remaining_checks == 0
+    }
+}
 
 /// The window a window was opened from, as the column to its right. Closing
 /// it before focus moves to another column hands focus back there.
@@ -834,6 +868,16 @@ pub trait SpawnCommandsExt {
         display_entity: Entity,
         active: bool,
     ) -> EntityCommands<'_>;
+
+    /// Spawns a layout strip out of sight without selecting it as its space's
+    /// shown row; `parked` records where `show_active_workspace` restores it.
+    fn spawn_parked_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        parked: workspace::PreviousStripPosition,
+    ) -> EntityCommands<'_>;
 }
 
 impl SpawnCommandsExt for Commands<'_, '_> {
@@ -904,6 +948,22 @@ impl SpawnCommandsExt for Commands<'_, '_> {
         }
         spawned
     }
+
+    #[instrument(level = Level::TRACE, skip(self))]
+    fn spawn_parked_strip(
+        &mut self,
+        layout_strip: LayoutStrip,
+        origin: Origin,
+        display_entity: Entity,
+        parked: workspace::PreviousStripPosition,
+    ) -> EntityCommands<'_> {
+        self.spawn((
+            layout_strip,
+            Position(origin),
+            ChildOf(display_entity),
+            parked,
+        ))
+    }
 }
 
 /// Rebuilds the config watcher around `changed`, then re-registers every other
@@ -965,6 +1025,27 @@ fn autorelease_runner(mut app: BevyApp) -> bevy::app::AppExit {
             return exit;
         }
     }
+}
+
+/// Strips unused Bevy schedules (`RunFixedMainLoop`, `SpawnScene`) from
+/// `MainScheduleOrder` and restores per-frame `MessageRegistry` flushing.
+///
+/// `TimePlugin` registers `signal_message_update_system` in `FixedPostUpdate`
+/// and sets `MessageRegistry::should_update = Waiting`, causing Bevy to run
+/// `FixedMain` -> `FixedPostUpdate` (on its default multi-threaded executor) at
+/// 64 Hz — catching up in bursts after slow frames even though Paneru registers
+/// no `FixedUpdate` systems. Setting `ShouldUpdateMessages::Always` keeps
+/// 2-frame message lifetimes without the empty fixed-timestep loop.
+pub(crate) fn strip_unused_schedules(app: &mut BevyApp) {
+    let run_fixed = bevy::app::RunFixedMainLoop.intern();
+    let spawn_scene = bevy::app::SpawnScene.intern();
+    app.world_mut()
+        .resource_mut::<bevy::app::MainScheduleOrder>()
+        .labels
+        .retain(|label| *label != run_fixed && *label != spawn_scene);
+    app.world_mut()
+        .resource_mut::<bevy::ecs::message::MessageRegistry>()
+        .should_update = bevy::ecs::message::ShouldUpdateMessages::Always;
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1039,14 +1120,15 @@ pub fn setup_bevy_app(sender: EventSender, receiver: Receiver<Event>) -> Result<
             overview::register_overview,
         ));
 
+    strip_unused_schedules(&mut app);
+
     // Run every schedule inline rather than fanning systems out across the task
     // pool: the task-pool handoff measured ~45% of main-thread time against
     // ~16% actually spent on accessibility calls, dropping to ~10% once
-    // inlined. The expensive systems here all take `&mut Window` and are
-    // already mutually exclusive, so the fan-out bought little; genuine
-    // parallelism (`par_iter_mut`) still goes through `ComputeTaskPool`
-    // directly. `First` is included even though unused because an empty
-    // schedule still costs a task-pool scope per frame.
+    // inlined. The expensive systems here all take `&mut Window` or `NonSend`
+    // AppKit state and are already mutually exclusive, so the fan-out bought
+    // little; genuine parallelism (`par_iter_mut`) still goes through
+    // `ComputeTaskPool` directly.
     for label in [
         First.intern(),
         PreUpdate.intern(),

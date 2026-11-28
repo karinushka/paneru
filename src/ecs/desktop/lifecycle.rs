@@ -5,17 +5,22 @@ use objc2_core_graphics::CGDirectDisplayID;
 use tracing::{debug, warn};
 
 use super::ops::{
-    DesktopOpWorld, preferred_focus_on_space, read_active_census, resolve_desktop_target,
-    save_active_strip_focus, sibling_space_ids,
+    DesktopOpWorld, active_display_id, preferred_focus_on_space, read_active_census,
+    resolve_desktop_target, save_active_strip_focus, sibling_space_ids,
 };
 use super::{
-    ConfirmCondition, PendingDesktopOp, PostConfirmAction, exec_bridge_op,
+    ConfirmCondition, PendingDesktopOp, PostConfirmAction, flash_unavailable_once,
     refresh_census_from_bridge, select_desktop_strip, spawn_desktop_strip,
 };
 use crate::commands::DesktopTarget;
 use crate::ecs::layout::LayoutStrip;
-use crate::manager::spaces::{DesktopBridge, DisplaySpaces, SpaceCensus, SpaceId, SpaceRecord};
+use crate::manager::spaces::{
+    DesktopBridge, DisplaySpaces, SpaceCensus, SpaceErrorKind, SpaceId, SpaceRecord,
+};
 use crate::platform::WinID;
+
+/// macOS Mission Control caps ordinary Desktops per display at 16.
+const MAX_MACOS_DESKTOPS_PER_DISPLAY: usize = 16;
 
 /// Creates a new ordinary Desktop (`type == 0`) via `WMBridge` (§5.4), optionally
 /// switching to it once confirmed in the `SkyLight` census.
@@ -27,8 +32,30 @@ pub(super) fn handle_create(focus: bool, bridge: &mut DesktopBridge, world: &mut
         return;
     };
     let res = bridge.create_desktop();
-    let Some(new_id) = exec_bridge_op("desktop create", res, bridge, &mut world.census) else {
-        return;
+    let new_id = match res {
+        Ok(id) => id,
+        Err(err)
+            if err.kind == SpaceErrorKind::OperationFailed
+                && err.request_may_have_applied
+                && !world.bridge_state.is_confirmed()
+                && bridge.session_unlocked().is_ok()
+                && active_display_id(&world.displays)
+                    .and_then(|id| before.display(id))
+                    .is_some_and(|d| d.desktop_count() < MAX_MACOS_DESKTOPS_PER_DISPLAY) =>
+        {
+            world.bridge_state.mark_unavailable(&format!(
+                "desktop create rejected by WindowManager ({})",
+                err.message
+            ));
+            world.pending.clear();
+            flash_unavailable_once(&mut world.bridge_state, &mut world.commands);
+            refresh_census_from_bridge(bridge, &mut world.census);
+            return;
+        }
+        Err(err) => {
+            world.exec_bridge_op::<SpaceId>("desktop create", Err(err), bridge);
+            return;
+        }
     };
     if before.find_space(new_id).is_some() {
         warn!("desktop create returned pre-existing space {new_id}; resyncing census");
@@ -221,13 +248,13 @@ fn destroy_active_desktop(
     };
     let hide = sibling_space_ids(census, neighbor);
     let res = bridge.activate_space(&disp.skylight_display, neighbor.id, &hide);
-    if exec_bridge_op(
-        &format!("desktop destroy switch to {}", neighbor.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(
+            &format!("desktop destroy switch to {}", neighbor.id),
+            res,
+            bridge,
+        )
+        .is_none()
     {
         return;
     }
@@ -255,13 +282,9 @@ fn destroy_inactive_desktop(
     world: &mut DesktopOpWorld,
 ) {
     let res = bridge.destroy_space(dest.id);
-    if exec_bridge_op(
-        &format!("desktop destroy {}", dest.id),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(&format!("desktop destroy {}", dest.id), res, bridge)
+        .is_none()
     {
         return;
     }
@@ -339,13 +362,13 @@ pub(super) fn handle_reorder(
     expected.insert(target_local, moved);
 
     let res = bridge.move_space_to_index(source_id, &disp.skylight_display, index_u32);
-    if exec_bridge_op(
-        &format!("desktop reorder {source_id} -> index {index_u32}"),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(
+            &format!("desktop reorder {source_id} -> index {index_u32}"),
+            res,
+            bridge,
+        )
+        .is_none()
     {
         return;
     }
@@ -396,13 +419,13 @@ pub(super) fn handle_swap(
     step1_expected.insert(high, removed);
 
     let res = bridge.move_space_to_index(earlier, &disp.skylight_display, high_u32);
-    if exec_bridge_op(
-        &format!("desktop swap step 1 ({earlier} -> {high_u32})"),
-        res,
-        bridge,
-        &mut world.census,
-    )
-    .is_none()
+    if world
+        .exec_bridge_op(
+            &format!("desktop swap step 1 ({earlier} -> {high_u32})"),
+            res,
+            bridge,
+        )
+        .is_none()
     {
         return;
     }

@@ -30,7 +30,7 @@ use crate::config::Config;
 use crate::config::decorations::{
     DescriptorStyle, IndicatorFormat, IndicatorStyle, MenubarOrientation,
 };
-use crate::ecs::desktop::DesktopCensus;
+use crate::ecs::desktop::{DesktopBridgeState, DesktopCensus};
 use crate::ecs::layout::LayoutStrip;
 use crate::ecs::params::ActiveDisplay;
 use crate::ecs::{
@@ -278,9 +278,13 @@ impl MenuDesktopSnapshot {
 #[must_use]
 pub(crate) fn menu_desktop_snapshot(
     census: Option<&DesktopCensus>,
+    bridge_state: Option<&DesktopBridgeState>,
     display_id: u32,
     active_space_id: u64,
 ) -> MenuDesktopSnapshot {
+    if bridge_state.is_some_and(DesktopBridgeState::is_unavailable) {
+        return MenuDesktopSnapshot::default();
+    }
     let Some(disp) = census.and_then(|c| c.0.display(display_id)) else {
         return MenuDesktopSnapshot::default();
     };
@@ -894,7 +898,7 @@ impl MenuBarManager {
                 }
             }
             IndicatorStyle::Paged => {
-                let last = paged_last_index(all.len());
+                let last = paged_last_index(all, current);
                 stack.addArrangedSubview(&self.format_indicator(config, format, current, true));
                 stack.addArrangedSubview(&self.indicator_field(config, "/", false));
                 stack.addArrangedSubview(&self.format_indicator(config, format, last, false));
@@ -1059,11 +1063,13 @@ fn selected_width_percentages(widths: &[i32], ratio: Option<f64>) -> Vec<i32> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn update_menu_bar(
     active_display: ActiveDisplay,
     workspaces: Query<&LayoutStrip>,
     focused: Query<(&Bounds, Has<Unmanaged>), With<FocusedMarker>>,
     census: Option<Res<DesktopCensus>>,
+    bridge_state: Option<Res<DesktopBridgeState>>,
     config: Res<Config>,
     visibility: Res<MenuBarVisibility>,
     menu_bar: Option<NonSendMut<MenuBarManager>>,
@@ -1093,7 +1099,12 @@ pub fn update_menu_bar(
     let focused_width_ratio = focused_window.and_then(|(bounds, unmanaged)| {
         (!unmanaged).then(|| f64::from(bounds.0.x) / f64::from(viewport.width()))
     });
-    let desktops = menu_desktop_snapshot(census.as_deref(), active_display.id(), strip.id());
+    let desktops = menu_desktop_snapshot(
+        census.as_deref(),
+        bridge_state.as_deref(),
+        active_display.id(),
+        strip.id(),
+    );
 
     menu_bar.update(
         strip.virtual_index,
@@ -1131,11 +1142,11 @@ fn indicator_label(
     }
 }
 
-/// The index the paged indicator's total is formatted from: the workspace
-/// count reads as the last workspace's own label, so it goes through the same
-/// formatter and comes out Roman when the format asks for it.
-fn paged_last_index(count: usize) -> u32 {
-    u32::try_from(count.max(1) - 1).unwrap_or(u32::MAX)
+/// The index the paged indicator's total is formatted from: the highest
+/// workspace index on the space (at least `current`), so gaps or a reaped
+/// row 0 never produce an impossible `2 / 1` or `3 / 2` label.
+fn paged_last_index(all: &[u32], current: u32) -> u32 {
+    all.iter().copied().max().unwrap_or(0).max(current)
 }
 
 fn roman_numeral(value: u32) -> String {
@@ -1555,7 +1566,7 @@ mod tests {
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(4),
+                paged_last_index(&[0, 1, 2, 3], 0),
                 false,
                 '☉',
                 '○'
@@ -1563,14 +1574,20 @@ mod tests {
             "4"
         );
         assert_eq!(
-            indicator_label(IndicatorFormat::Roman, paged_last_index(4), false, '☉', '○'),
+            indicator_label(
+                IndicatorFormat::Roman,
+                paged_last_index(&[0, 1, 2, 3], 0),
+                false,
+                '☉',
+                '○'
+            ),
             "IV"
         );
         // A lone workspace still reads as "1 / 1" rather than underflowing.
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(1),
+                paged_last_index(&[0], 0),
                 false,
                 '☉',
                 '○'
@@ -1580,12 +1597,43 @@ mod tests {
         assert_eq!(
             indicator_label(
                 IndicatorFormat::Default,
-                paged_last_index(0),
+                paged_last_index(&[], 0),
                 false,
                 '☉',
                 '○'
             ),
             "1"
+        );
+        // Reaping row 0 or leaving a gap must never render "2 / 1" or "3 / 2".
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[1], 1),
+                false,
+                '☉',
+                '○'
+            ),
+            "2"
+        );
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[0, 2], 2),
+                false,
+                '☉',
+                '○'
+            ),
+            "3"
+        );
+        assert_eq!(
+            indicator_label(
+                IndicatorFormat::Default,
+                paged_last_index(&[0, 2], 0),
+                false,
+                '☉',
+                '○'
+            ),
+            "3"
         );
     }
 
@@ -1660,11 +1708,13 @@ mod tests {
 
     #[test]
     fn menu_desktop_snapshot_reflects_census_and_guards_closing_last_or_fullscreen() {
-        use super::{DesktopCensus, MenuDesktopSnapshot, menu_desktop_snapshot};
+        use super::{
+            DesktopBridgeState, DesktopCensus, MenuDesktopSnapshot, menu_desktop_snapshot,
+        };
         use crate::manager::spaces::{RawDisplaySpaces, SpaceCensus, SpaceId, SpaceKind};
 
         assert_eq!(
-            menu_desktop_snapshot(None, 1, 2),
+            menu_desktop_snapshot(None, None, 1, 2),
             MenuDesktopSnapshot::default()
         );
 
@@ -1689,7 +1739,7 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_fs = menu_desktop_snapshot(Some(&census), 1, 20);
+        let snap_fs = menu_desktop_snapshot(Some(&census), None, 1, 20);
         assert_eq!(snap_fs.desktop_count, 2);
         assert_eq!(snap_fs.active_desktop, None);
         assert!(
@@ -1710,7 +1760,7 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_other = menu_desktop_snapshot(Some(&census_other), 1, 25);
+        let snap_other = menu_desktop_snapshot(Some(&census_other), None, 1, 25);
         assert_eq!(snap_other.desktop_count, 2);
         assert_eq!(snap_other.active_desktop, None);
         assert!(
@@ -1730,10 +1780,18 @@ mod tests {
             }])
             .unwrap(),
         );
-        let snap_d2 = menu_desktop_snapshot(Some(&census_d2), 1, 30);
+        let snap_d2 = menu_desktop_snapshot(Some(&census_d2), None, 1, 30);
         assert_eq!(snap_d2.desktop_count, 2);
         assert_eq!(snap_d2.active_desktop, Some(2));
         assert!(snap_d2.can_close_active());
+
+        let mut unavailable = DesktopBridgeState::default();
+        unavailable.mark_unavailable("test rejection");
+        assert_eq!(
+            menu_desktop_snapshot(Some(&census_d2), Some(&unavailable), 1, 30),
+            MenuDesktopSnapshot::default(),
+            "unavailable WMBridge must hide the interactive Desktops menu section"
+        );
 
         let census_single = DesktopCensus(
             SpaceCensus::from_raw(vec![RawDisplaySpaces {
@@ -1744,6 +1802,6 @@ mod tests {
             }])
             .unwrap(),
         );
-        assert!(!menu_desktop_snapshot(Some(&census_single), 1, 10).can_close_active());
+        assert!(!menu_desktop_snapshot(Some(&census_single), None, 1, 10).can_close_active());
     }
 }

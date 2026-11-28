@@ -1,7 +1,7 @@
 use std::{ffi::c_void, os::raw::c_float, ptr::NonNull};
 
 use accessibility_sys::AXUIElementRef;
-use objc2_core_foundation::{CFArray, CFMutableData, CFString, CFType, CFUUID, CGPoint};
+use objc2_core_foundation::{CFArray, CFMutableData, CFString, CFType, CFUUID, CGPoint, CGRect};
 use objc2_core_graphics::{CGDirectDisplayID, CGError};
 
 use crate::platform::{CFStringRef, ConnID, OSStatus, Pid, ProcessSerialNumber, WinID};
@@ -51,7 +51,7 @@ unsafe extern "C" {
     ///
     /// # Original signature
     /// extern `CGError` SLSGetWindowBounds(int cid, `uint32_t` wid, `CGRect` *frame);
-    // pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
+    pub fn SLSGetWindowBounds(cid: ConnID, window_id: WinID, frame: &mut CGRect) -> CGError;
 
     /// Moves a window to a new position at the compositor level (no IPC to the app).
     ///

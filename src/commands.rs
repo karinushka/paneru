@@ -67,16 +67,28 @@ type StripsWithVisibility<'w, 's> = Query<
     ),
 >;
 
+/// Current position and any pending reposition target for each `LayoutStrip`.
+type StripPositions<'w, 's> =
+    Query<'w, 's, (&'static Position, Option<&'static RepositionMarker>), With<LayoutStrip>>;
+
 #[derive(SystemParam)]
 struct PagingFocusParams<'w, 's> {
     page_requests: MessageReader<'w, 's, PageFocusRequest>,
     page_state: ResMut<'w, PageGestureState>,
     config: Res<'w, Config>,
-    strip_positions:
-        Query<'w, 's, (&'static Position, Option<&'static RepositionMarker>), With<LayoutStrip>>,
+    strip_positions: StripPositions<'w, 's>,
     haptics: MessageWriter<'w, PageHapticRequest>,
     focus_history: Option<Res<'w, FocusHistory>>,
     overview_phase: Option<Res<'w, crate::ecs::overview::OverviewPhase>>,
+}
+
+/// Returns a strip's target `y` coordinate: its pending `RepositionMarker`
+/// destination while animating, or its current `Position` when stationary.
+fn strip_target_y(strip_entity: Entity, strips: &StripPositions) -> Option<i32> {
+    strips
+        .get(strip_entity)
+        .ok()
+        .map(|(position, moving)| moving.map_or(position.0.y, |RepositionMarker(to)| to.y))
 }
 
 pub fn register_commands(app: &mut bevy::app::App) {
@@ -96,6 +108,7 @@ pub fn register_commands(app: &mut bevy::app::App) {
     // Registered here (not with the Lua systems) and in every build: an IPC
     // client's `Request::WindowSetApply` needs no embedded interpreter, and the
     // mock harness exercises it without one.
+    app.add_message::<crate::ecs::layout_ops::LayoutOpsProcessed>();
     app.add_systems(
         PreUpdate,
         crate::ecs::layout_ops::apply_layout_ops.in_set(crate::ecs::PreUpdateSet::Dispatch),
@@ -1008,6 +1021,7 @@ fn command_center_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    strips: StripPositions,
     window_manager: Res<WindowManager>,
     config: Res<Config>,
     mut commands: Commands,
@@ -1033,8 +1047,14 @@ fn command_center_window(
             // record the placement as deliberate so a later reshuffle — a
             // repeated focus event, a return from another display — does not
             // re-derive the offset and undo the centering.
-            let strip_position = origin - layout_position.0;
             let strip_entity = active_display.active_strip_entity();
+            let mut strip_position = origin - layout_position.0;
+            // Centering is horizontal only. Keep the strip's target y so centering
+            // mid-way through a workspace switch does not strand the strip partway
+            // up from its parked corner.
+            if let Some(target_y) = strip_target_y(strip_entity, &strips) {
+                strip_position.y = target_y;
+            }
             commands.reposition_entity(strip_entity, strip_position);
             mark_manual_offset(
                 strip_entity,
@@ -1071,6 +1091,7 @@ fn resize_window(
     active_display: ActiveDisplay,
     config: Res<Config>,
     mut commands: Commands,
+    mut layout_ops_processed: MessageWriter<crate::ecs::layout_ops::LayoutOpsProcessed>,
 ) {
     let Some(operation) = filter_window_operations(&mut messages, |op| {
         matches!(
@@ -1155,6 +1176,9 @@ fn resize_window(
 
     commands.resize_entity(entity, size);
     commands.reshuffle_around(entity);
+    if matches!(operation, Operation::SetWidth(_)) {
+        layout_ops_processed.write(crate::ecs::layout_ops::LayoutOpsProcessed);
+    }
 }
 
 /// One step from `ratio` in `direction`, kept between `min_ratio` and the full
@@ -1471,11 +1495,12 @@ fn copy_window_rule(
 /// `display_entity`, applying `width_ratio` against the destination display's
 /// viewport once the cross-display move has settled. Skips the resize if the
 /// window has already left `display_entity` in the meantime.
-fn schedule_cross_display_resize(
+pub(crate) fn schedule_cross_display_resize(
     moved_window: Entity,
     moving_entities: Vec<Entity>,
     display_entity: Entity,
     width_ratio: Option<f64>,
+    reshuffle: bool,
     commands: &mut Commands,
 ) {
     let refresh_size = move |windows: Query<&Bounds, With<Window>>,
@@ -1483,27 +1508,39 @@ fn schedule_cross_display_resize(
                              displays: Query<(&Display, Option<&DockPosition>)>,
                              mut commands: Commands,
                              config: Res<Config>| {
-        if !strips.iter().any(|(strip, parent)| {
+        let Some((strip, _)) = strips.iter().find(|(strip, parent)| {
             parent.parent() == display_entity && strip.contains(moved_window)
-        }) {
+        }) else {
             return;
-        }
+        };
         let Ok((display, dock)) = displays.get(display_entity) else {
             return;
         };
         let viewport_bounds = display.actual_display_bounds(dock, &config);
+        if viewport_bounds.width() <= 0 || viewport_bounds.height() <= 0 {
+            return;
+        }
         if let Ok(Bounds(bounds)) = windows.get(moved_window) {
             debug!("Refreshing size of window {moved_window}");
             let width = width_ratio
                 .map_or(bounds.x, |ratio| {
                     round_px(ratio * f64::from(viewport_bounds.width()))
                 })
-                .min(viewport_bounds.width());
+                .clamp(1, viewport_bounds.width());
             let size = Size::new(width, viewport_bounds.height());
             for &member in &moving_entities {
-                commands.resize_entity(member, size);
+                if reshuffle {
+                    commands.resize_entity(member, size);
+                } else if strip.index_of(member).ok() == strip.index_of(moved_window).ok()
+                    && let Ok(Bounds(current)) = windows.get(member)
+                    && current.x != width
+                {
+                    commands.resize_entity(member, Size::new(width, current.y));
+                }
             }
-            commands.reshuffle_around(moved_window);
+            if reshuffle {
+                commands.reshuffle_around(moved_window);
+            }
         }
     };
     let system_id = commands.register_system(refresh_size);
@@ -1583,7 +1620,6 @@ fn to_next_display(
     };
     let target_display_id = other.id();
     let other_bounds = other.bounds();
-    let other_width = other.width();
 
     // Resolve and validate the destination strip before mutating the source
     // strip so a missing or native-fullscreen destination cannot drop the
@@ -1611,7 +1647,7 @@ fn to_next_display(
     debug!(
         "moving window (id {}, {entity}) to display {target_display_id}: {}.",
         window.id(),
-        other_width / 2,
+        other.width() / 2,
     );
     let center = other_bounds.center().x;
     let width_ratio =
@@ -1667,6 +1703,7 @@ fn to_next_display(
         moving_entities,
         display_entity,
         width_ratio,
+        true,
         &mut commands,
     );
 }
@@ -1857,6 +1894,7 @@ fn snap_window(
     mut messages: MessageReader<Event>,
     windows: Windows,
     active_display: ActiveDisplay,
+    strips: StripPositions,
     config: Res<Config>,
     mut commands: Commands,
 ) {
@@ -1870,7 +1908,8 @@ fn snap_window(
     let Some((_, entity)) = windows.focused() else {
         return;
     };
-    let Some(strip_position) = snap_strip_position(entity, &windows, &active_display, &config)
+    let Some(strip_position) =
+        snap_strip_position(entity, &windows, &active_display, &strips, &config)
     else {
         return;
     };
@@ -1881,6 +1920,7 @@ fn snap_strip_position(
     entity: Entity,
     windows: &Windows,
     active_display: &ActiveDisplay,
+    strips: &StripPositions,
     config: &Config,
 ) -> Option<Origin> {
     let layout_position = windows.layout_position(entity)?;
@@ -1892,7 +1932,13 @@ fn snap_strip_position(
     // window) so the layout stays consistent.
     let size = frame.size();
     frame.min = clamp_origin_to_viewport(frame.min, size, display_bounds);
-    Some(frame.min - layout_position.0)
+    let mut strip_position = frame.min - layout_position.0;
+    // Snapping is horizontal only. Keep the strip's target y so snapping a
+    // shorter or vertically displaced window does not move the strip vertically.
+    if let Some(target_y) = strip_target_y(active_display.active_strip_entity(), strips) {
+        strip_position.y = target_y;
+    }
+    Some(strip_position)
 }
 
 /// A page gesture reveals a mouse-focused window that is clipped on the side
@@ -1921,8 +1967,13 @@ fn reveal_clipped_page(
         return false;
     }
 
-    let Some(target) = snap_strip_position(focused_entity, windows, active_display, &paging.config)
-    else {
+    let Some(target) = snap_strip_position(
+        focused_entity,
+        windows,
+        active_display,
+        &paging.strip_positions,
+        &paging.config,
+    ) else {
         return false;
     };
     let Ok((position, reposition)) = paging

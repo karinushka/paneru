@@ -32,8 +32,8 @@ use crate::ecs::layout::{
 use crate::ecs::params::{ActiveDisplay, WindowCtx, Windows};
 use crate::ecs::{
     ActiveWorkspaceMarker, DockPosition, FocusedMarker, Initializing, ManualStripOffset,
-    NativeFullscreenMarker, Position, RaiseWindow, RepositionMarker, Scrolling,
-    SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
+    NativeFullscreenMarker, PendingDestroyCheck, Position, RaiseWindow, RepositionMarker,
+    Scrolling, SelectedVirtualMarker, SendMessageTrigger, SpawnCommandsExt, Timeout, Unmanaged,
 };
 use crate::errors::Result;
 use crate::events::{DestroySource, Event};
@@ -159,7 +159,10 @@ impl Plugin for WorkspaceEventsPlugin {
             Update,
             (
                 renumber_virtual_indexes,
-                reap_empty_virtual_workspaces.run_if(reap_workspaces),
+                reap_empty_virtual_workspaces
+                    .run_if(reap_workspaces)
+                    .run_if(not(resource_exists::<Initializing>))
+                    .run_if(not(resource_exists::<super::restore::SessionRestore>)),
                 reap_emptied_virtual_workspaces
                     .run_if(reap_workspaces)
                     .run_if(not(resource_exists::<Initializing>))
@@ -939,9 +942,9 @@ fn find_orphaned_workspaces(
     let mut rehomed = false;
 
     for (orphan, orphan_entity, timeout, child) in orphans {
-        // Row 0 is the row every space is created with, so it is re-parented
-        // like a populated strip: despawning it leaves the space numbered from
-        // "2" with no row that any switch or reap path recreates.
+        // Row 0 is the baseline row every space starts with, so re-parent it
+        // like a populated strip rather than unexpectedly dropping workspace 1
+        // across a display reconnect when empty-workspace reaping is off.
         if orphan.len() == 0 && orphan.virtual_index > 0 {
             if let Ok(mut cmd) = commands.get_entity(orphan_entity) {
                 cmd.try_despawn();
@@ -1005,31 +1008,140 @@ fn find_orphaned_workspaces(
     }
 }
 
+/// Resolves each display's active native `SkyLight` Space ID from ECS state
+/// without making OS calls. Returns `(active_space_ids, all_displays_covered)`.
+fn resolve_active_native_spaces(
+    displays: &Query<&Display>,
+    workspaces: &Query<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    census: Option<&crate::ecs::desktop::DesktopCensus>,
+) -> (Vec<WorkspaceId>, bool) {
+    let mut ids: Vec<WorkspaceId> = Vec::new();
+    let mut covered = !displays.is_empty();
+    for display in displays {
+        if let Some(space_id) = census.and_then(|c| c.active_space(display.id())) {
+            if !ids.contains(&space_id) {
+                ids.push(space_id);
+            }
+        } else {
+            covered = false;
+        }
+    }
+    for (strip, active) in workspaces {
+        if active && !ids.contains(&strip.id()) {
+            ids.push(strip.id());
+        }
+    }
+    if !covered && displays.iter().len() == 1 && !ids.is_empty() {
+        covered = true;
+    }
+    (ids, covered)
+}
+
+/// Re-checks windows whose `Event::WindowDestroyed` arrived while the screen
+/// was locked or displays were unsettled. Gated on [`Populated`] so it does not
+/// even schedule when no deferred destroys are pending.
 #[allow(clippy::needless_pass_by_value)]
-pub(crate) fn cleanup_unordered_windows(
-    windows: Query<&Window>,
-    workspaces: Query<&LayoutStrip>,
+pub(crate) fn verify_pending_destroys(
+    mut pending_windows: Populated<(Entity, &Window, &mut PendingDestroyCheck)>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
-    let windows = workspaces
-        .iter()
-        .flat_map(|strip| {
-            strip
-                .all_windows()
-                .into_iter()
-                .filter(|entity| !strip.tabbed(*entity))
-        })
-        .filter_map(|entity| windows.get(entity).ok());
+    if window_manager.screen_locked_or_displays_unsettled() {
+        return;
+    }
 
-    for window in windows {
+    for (entity, window, mut pending) in &mut pending_windows {
         let window_id = window.id();
-        if window_manager.window_is_unordered(window_id) && !window.is_alive() {
-            debug!("Window {window_id} is unordered; removing it.");
+        if !window.is_alive() {
+            debug!("Deferred destroy confirmed dead for window {window_id}; removing it.");
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingDestroyCheck>();
+            }
             commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
                 window_id,
                 source: DestroySource::Accessibility,
             }));
+        } else if pending.consume_attempt() {
+            debug!("Deferred destroy cleared for live window {window_id}.");
+            if let Ok(mut entity_commands) = commands.get_entity(entity) {
+                entity_commands.try_remove::<PendingDestroyCheck>();
+            }
+        }
+    }
+}
+
+#[allow(clippy::needless_pass_by_value)]
+pub(crate) fn cleanup_unordered_windows(
+    windows: Query<(Entity, &Window, Option<&Unmanaged>), Without<PendingDestroyCheck>>,
+    workspaces: Query<(&LayoutStrip, Has<ActiveWorkspaceMarker>)>,
+    displays: Query<&Display>,
+    census: Option<Res<crate::ecs::desktop::DesktopCensus>>,
+    bridge: Option<NonSend<crate::manager::spaces::DesktopBridge>>,
+    window_manager: Res<WindowManager>,
+    mut commands: Commands,
+) {
+    if window_manager.screen_locked() {
+        return;
+    }
+
+    // Lazily resolve active native Space IDs from ECS (zero OS calls) and
+    // display/space topology only if a window actually needs a liveness probe.
+    // On macOS, `SLSWindowIsOrderedIn` returns false for live windows on
+    // inactive native Spaces (other Desktops or inactive native fullscreen
+    // Spaces); skipping those avoids display-space queries and synchronous
+    // cross-process `is_alive()` AX IPC stalls on background apps.
+    let mut active_spaces: Option<(Vec<WorkspaceId>, bool)> = None;
+    let mut displays_unsettled: Option<bool> = None;
+
+    for (entity, window, unmanaged) in &windows {
+        let window_id = window.id();
+
+        // Skip minimized/hidden windows and native-tabbed windows in the steady-state
+        // sweep: macOS orders them out while alive, so probing `is_alive()` on a timer
+        // would fan out AX IPC across live background windows. Any such window whose
+        // destroy event was deferred while locked/unsettled is verified separately by
+        // `verify_pending_destroys`.
+        if matches!(unmanaged, Some(Unmanaged::Minimized | Unmanaged::Hidden)) {
+            continue;
+        }
+        if !window_manager.window_is_unordered(window_id) {
+            continue;
+        }
+
+        let (known_active_spaces, all_displays_covered) = active_spaces.get_or_insert_with(|| {
+            resolve_active_native_spaces(&displays, &workspaces, census.as_deref())
+        });
+
+        let eligible = if matches!(unmanaged, Some(Unmanaged::Floating)) {
+            if *all_displays_covered
+                && let Some(bridge) = bridge.as_deref()
+                && let Ok(win_spaces) = bridge.spaces_for_window(window_id)
+                && !win_spaces.is_empty()
+            {
+                win_spaces
+                    .iter()
+                    .any(|space| known_active_spaces.contains(&space.get()))
+            } else {
+                true
+            }
+        } else {
+            workspaces.iter().any(|(strip, _)| {
+                (!*all_displays_covered || known_active_spaces.contains(&strip.id()))
+                    && strip.contains(entity)
+                    && !strip.tabbed(entity)
+            })
+        };
+        if eligible {
+            if *displays_unsettled.get_or_insert_with(|| window_manager.displays_unsettled()) {
+                return;
+            }
+            if !window.is_alive() {
+                debug!("Window {window_id} is unordered; removing it.");
+                commands.trigger(SendMessageTrigger(Event::WindowDestroyed {
+                    window_id,
+                    source: DestroySource::Accessibility,
+                }));
+            }
         }
     }
 }
@@ -1277,16 +1389,21 @@ fn handle_virtual_window_moves(
             let mut new_strip = LayoutStrip::new(workspace_id, target_idx);
             new_strip.append_relocation_group(window_entity, group.as_ref());
 
-            let mut spawned = commands.spawn_layout_strip(new_strip, origin, display_entity, false);
             if stay {
                 // show_active_workspace needs this to restore the strip
                 // onscreen when the user later switches to this workspace.
-                spawned.insert(PreviousStripPosition {
+                let parked = PreviousStripPosition {
                     origin: shown,
                     focus: Some(window_entity),
-                });
+                };
+                commands
+                    .spawn_parked_strip(new_strip, origin, display_entity, parked)
+                    .id()
+            } else {
+                commands
+                    .spawn_layout_strip(new_strip, origin, display_entity, false)
+                    .id()
             }
-            spawned.id()
         };
 
         // Preserve the source strip's scroll position for when the user returns.
@@ -1635,16 +1752,17 @@ fn move_virtual_workspace_bind(
             }
         }
         Operation::VirtualMove(Direction::North | Direction::West, move_focus) => {
-            if current_virtual_index == 0 {
+            let Some(prev_index) = current_index.checked_sub(1) else {
                 return;
-            }
-            (current_virtual_index - 1, *move_focus)
+            };
+            (rows[prev_index].1.virtual_index, *move_focus)
         }
         Operation::VirtualMove(Direction::First, move_focus) => {
-            if current_virtual_index == 0 {
+            let first_virtual_index = rows.first().map_or(0, |(_, strip, _)| strip.virtual_index);
+            if current_virtual_index == first_virtual_index {
                 return;
             }
-            (0, *move_focus)
+            (first_virtual_index, *move_focus)
         }
         Operation::VirtualMove(Direction::Last, move_focus) => {
             let last_virtual_index = rows.last().map_or(0, |(_, strip, _)| strip.virtual_index);
@@ -1905,26 +2023,32 @@ fn renumber_virtual_indexes(mut set: RenumberStrips) {
 /// next/previous step into it. Only one that has had windows goes: one made
 /// empty (`default_workspaces`, a restore's place, a switch to a new number)
 /// is somewhere to go, and stays until it's left, as `reap_empty_virtual_workspaces`
-/// has it. Neither the first, nor one a display shows.
+/// has it. Never one a display shows, and never the last strip on its space.
 fn reap_emptied_virtual_workspaces(
     drag: Res<WindowDrag>,
     changed_strips: ChangedStrips,
-    all_strips: Query<Entity, With<LayoutStrip>>,
+    all_strips: Query<(Entity, &LayoutStrip)>,
     mut lengths: Local<EntityHashMap<usize>>,
     mut commands: Commands,
 ) {
     lengths.retain(|&entity, _| all_strips.contains(entity));
+    let mut despawned = HashSet::new();
     for (entity, strip, active, selected) in &changed_strips {
         if drag.keeps_strip(entity) {
             continue;
         }
         let len = strip.len();
         let had = lengths.get(&entity).copied().unwrap_or(0);
+        let has_sibling = || {
+            all_strips.iter().any(|(other, other_strip)| {
+                other != entity && !despawned.contains(&other) && other_strip.id() == strip.id()
+            })
+        };
         if had > 0
             && len == 0
             && !active
             && !selected
-            && strip.virtual_index > 0
+            && has_sibling()
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {
             debug!(
@@ -1933,6 +2057,7 @@ fn reap_emptied_virtual_workspaces(
                 strip.id()
             );
             lengths.remove(&entity);
+            despawned.insert(entity);
             entity_commands.try_despawn();
             continue;
         }
@@ -1967,7 +2092,6 @@ fn reap_empty_virtual_workspaces(
     for (entity, strip) in rows {
         if entity != changed_entity
             && !drag.keeps_strip(entity)
-            && strip.virtual_index > 0
             && strip.len() == 0
             && let Ok(mut entity_commands) = commands.get_entity(entity)
         {

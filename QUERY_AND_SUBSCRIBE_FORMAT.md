@@ -4,11 +4,8 @@ Paneru exposes structured state over the same IPC channel used by `send-cmd`:
 a Mach service named `com.github.karinushka.paneru`. The CLI commands below
 require a running Paneru daemon.
 
-**The JSON below is what the CLI prints, not what crosses between processes.**
-Requests and responses travel as typed values in a compact binary encoding
-(`postcard`); `paneru query` and `paneru subscribe` render them as JSON because
-a terminal — and `jq`, and a status bar's shell script — needs text. Anything
-consuming these commands' output sees exactly the shapes documented here.
+Requests and responses use MessagePack with named fields over IPC.
+The `paneru query` and `paneru subscribe` commands render their results as JSON.
 
 A client written in Rust can skip the JSON entirely by using the
 `paneru::types` module (`src/types`): its `wire::Request` and `wire::Response`
@@ -215,10 +212,9 @@ changes.
 {"event":"windows_changed","virtual_workspace_number":3,"active":{"display_id":1,"native_workspace_id":4,"virtual_workspace_number":3,"focused_window_id":321,"focused_bundle_id":"com.apple.Terminal","focused_app_name":"Terminal","focused_window_title":"paneru"}}
 ```
 
-Emitted after managed window creation/destruction/minimize/deminimize events and
-after Paneru moves or sends a window between virtual workspaces. The event is
-emitted only when Paneru's virtual workspace/window state differs from the last
-emitted `windows_changed` event.
+Paneru checks for changes after managed windows are created, destroyed, minimized or restored, and after moving windows between virtual workspaces.
+It also checks after processing layout operations from an IPC client or a Lua handler, including edits to hidden workspaces.
+The event is emitted when the virtual workspace/window state differs from the last emitted `windows_changed` event.
 
 ```json
 {"event":"window_focused","window_id":321,"bundle_id":"com.apple.Terminal","title":"paneru","virtual_workspace_number":3}
@@ -269,3 +265,32 @@ window_virtualnum_3 = "cmd + alt - 3"
 window_virtualmovenum_3 = "cmd + alt + ctrl - 3"
 window_virtualsendnum_3 = "cmd + alt + shift - 3"
 ```
+
+## Placing a tiled column
+
+The IPC request `WindowSetApply` can carry a `place` layout operation.
+Name any window in the column and give the destination native Space ID, one-based virtual workspace number and zero-based column index.
+The JSON shows the structure of the MessagePack request.
+The index is measured after lifting the column out of its source and may point just past the last remaining column to append.
+
+```json
+{"WindowSetApply":[{"place":{"window":42,"space":7,"workspace":2,"index":0}}]}
+```
+
+The destination virtual workspace must already exist on the native Space currently shown on its display.
+It can be an unselected virtual workspace within that Space.
+The source native Space must also be shown on its display.
+The operation uses window positioning and skips requests that would require changing native Spaces on one display.
+This operation is available through IPC.
+The whole column moves, including its stack or tabs, without switching to the destination workspace.
+Stale or invalid destinations are skipped, as with other layout operations.
+
+To move one window out of a stack, send `unstack` before `place` in the same request.
+Paneru applies the operations in order.
+
+```json
+{"WindowSetApply":[{"unstack":42},{"place":{"window":42,"space":7,"workspace":2,"index":0}}]}
+```
+
+If the destination is stale, a successful unstack still takes effect.
+A group of native macOS tabs stays together.

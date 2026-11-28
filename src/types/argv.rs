@@ -106,6 +106,8 @@ fn parse_operation(argv: &[&str]) -> Result<Operation> {
         "nextdisplaysend" => Operation::ToNextDisplay(MoveFocus::Stay),
         "displaymove" => Operation::ToDisplay(parse_display_id(argument()?)?, MoveFocus::Follow),
         "displaysend" => Operation::ToDisplay(parse_display_id(argument()?)?, MoveFocus::Stay),
+        "focusdisplay" => Operation::FocusDisplay(Direction::parse_compass(argument()?)?),
+        "movedisplay" => Operation::MoveToDisplay(Direction::parse_compass(argument()?)?),
         "snap" => Operation::Snap,
         "copyrule" => Operation::CopyRule,
         // The `virtual*` verbs take either a direction or a workspace number,
@@ -345,6 +347,12 @@ impl Operation {
             Operation::ToDisplay(id, MoveFocus::Stay) => {
                 vec!["displaysend".to_string(), id.to_string()]
             }
+            Operation::FocusDisplay(direction) => {
+                vec!["focusdisplay".to_string(), direction.token()]
+            }
+            Operation::MoveToDisplay(direction) => {
+                vec!["movedisplay".to_string(), direction.token()]
+            }
             Operation::Equalize => owned(&["equalize"]),
             Operation::Balance => owned(&["balance"]),
             Operation::Manage => owned(&["manage"]),
@@ -501,6 +509,10 @@ mod tests {
             Operation::ToNextDisplay(MoveFocus::Stay),
             Operation::ToDisplay(3, MoveFocus::Follow),
             Operation::ToDisplay(3, MoveFocus::Stay),
+            Operation::FocusDisplay(Direction::North),
+            Operation::FocusDisplay(Direction::West),
+            Operation::MoveToDisplay(Direction::South),
+            Operation::MoveToDisplay(Direction::East),
             Operation::Equalize,
             Operation::Balance,
             Operation::Manage,
@@ -559,6 +571,10 @@ mod tests {
     fn display_commands_need_a_numeric_id() {
         assert!(parse_command(&["window", "displaymove"]).is_err());
         assert!(parse_command(&["window", "displaysend", "left"]).is_err());
+        assert!(parse_command(&["window", "focusdisplay"]).is_err());
+        assert!(parse_command(&["window", "focusdisplay", "first"]).is_err());
+        assert!(parse_command(&["window", "movedisplay", "last"]).is_err());
+        assert!(parse_command(&["window", "movedisplay", "2"]).is_err());
         assert!(parse_command(&["mouse", "display"]).is_err());
         assert_eq!(
             parse_command(&["window", "displaymove", "2"]).unwrap(),

@@ -58,6 +58,21 @@ impl Direction {
         })
     }
 
+    /// Parses `north`, `south`, `west`, or `east`, the directions that name a
+    /// neighbouring display.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ParseError`] if `name` is not one of the four compass directions.
+    pub fn parse_compass(name: &str) -> Result<Self, ParseError> {
+        match Direction::parse(name)? {
+            Direction::First | Direction::Last | Direction::Nth(_) => Err(ParseError::new(
+                format!("'{name}' is not north, south, west, or east"),
+            )),
+            direction => Ok(direction),
+        }
+    }
+
     /// Parses a direction name or a 1-based position (`"3"` → `Nth(2)`).
     ///
     /// # Errors
@@ -302,6 +317,10 @@ pub enum Operation {
     /// Copies a `[windows]` configuration rule for the focused window to the
     /// clipboard.
     CopyRule,
+    /// Focuses the display in a compass direction from the active display.
+    FocusDisplay(Direction),
+    /// Moves the focused window to the display in a compass direction and follows it.
+    MoveToDisplay(Direction),
 }
 
 /// Identifies a native macOS Desktop or managed Space target.

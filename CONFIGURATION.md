@@ -285,6 +285,8 @@ https://github.com/karinushka/paneru/blob/3790b01f8d65df5d9000142db7cf25f9270dcc
 | `window_balance` | Make all columns in the strip the same width as the focused window. |
 | `window_nextdisplay` | Move focused window to the next monitor and follow it. |
 | `window_nextdisplaysend` | Move focused window to the next monitor but stay on current. |
+| `window_focusdisplay_<direction>` | Focus the display to the north, south, west, or east. |
+| `window_movedisplay_<direction>` | Move the focused window to that display and follow it. |
 | `window_displaymove_<id>` | Move focused window to the monitor with this display ID and follow it. `paneru query active` reports display IDs. |
 | `window_displaysend_<id>` | Move focused window to the monitor with this display ID but stay on current. |
 | `mouse_nextdisplay` | Warp mouse cursor to the next monitor. |

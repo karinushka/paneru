@@ -323,6 +323,8 @@ $ paneru send-cmd <command> [args...]
 | `window copyrule`          | Copy a window rule snippet for the focused window to the clipboard |
 | `window nextdisplay`       | Move the focused window to the next display      |
 | `window nextdisplaysend`   | Move the window to the next display but stay here |
+| `window focusdisplay <direction>` | Focus the display to the north, south, west, or east |
+| `window movedisplay <direction>`  | Move the focused window to that display and follow it |
 | `window displaymove <id>`  | Move the focused window to display `<id>`        |
 | `window displaysend <id>`  | Move the window to display `<id>` but stay here  |
 | `window virtual <dir\|n>`  | Switch to the previous/next or numbered virtual workspace |

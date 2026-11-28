@@ -192,6 +192,7 @@ impl StateBroadcastIntent {
                             | Operation::VirtualMoveNumber(_, _)
                             | Operation::ToNextDisplay(_)
                             | Operation::ToDisplay(..)
+                            | Operation::MoveToDisplay(_)
                             | Operation::Swap(_)
                             | Operation::Stack(_)
                             | Operation::Consume

@@ -1,3 +1,4 @@
+use std::cmp::Reverse;
 use std::time::Duration;
 
 use bevy::app::{PostUpdate, PreUpdate};
@@ -341,6 +342,41 @@ fn pick_nearest_in_direction(
         })
         .min_by_key(|(_, dist_sq)| *dist_sq)
         .map(|(entity, _)| entity)
+}
+
+/// The display that lies in `direction` from the display bounded by `from` in
+/// the physical arrangement, or `None` for `First`, `Last`, and `Nth`.
+///
+/// Candidates lie wholly on that side. One that shares an edge range with
+/// `from` beats one that is only diagonal. Then the nearest by edge gap wins,
+/// so a display behind another is never picked over it. Then the longest shared
+/// edge, the nearest center, and the lowest `display` value, so ties do not
+/// depend on query order.
+fn display_in_compass_direction(
+    direction: &Direction,
+    from: IRect,
+    displays: impl IntoIterator<Item = (u32, IRect)>,
+) -> Option<u32> {
+    let shared = |a: (i32, i32), b: (i32, i32)| (a.1.min(b.1) - a.0.max(b.0)).max(0);
+    displays
+        .into_iter()
+        .filter_map(|(display, bounds)| {
+            let horizontal = shared((bounds.min.x, bounds.max.x), (from.min.x, from.max.x));
+            let vertical = shared((bounds.min.y, bounds.max.y), (from.min.y, from.max.y));
+            let (gap, edge) = match direction {
+                Direction::East => (bounds.min.x - from.max.x, vertical),
+                Direction::West => (from.min.x - bounds.max.x, vertical),
+                Direction::North => (from.min.y - bounds.max.y, horizontal),
+                Direction::South => (bounds.min.y - from.max.y, horizontal),
+                Direction::First | Direction::Last | Direction::Nth(_) => return None,
+            };
+            let distance = (bounds.center() - from.center())
+                .as_i64vec2()
+                .length_squared();
+            (gap >= 0).then_some((edge == 0, gap, Reverse(edge), distance, display))
+        })
+        .min()
+        .map(|(.., display)| display)
 }
 
 /// Floating windows of `workspace_id` that are on `display_bounds`.
@@ -1511,7 +1547,26 @@ pub(crate) fn schedule_cross_display_resize(
     Timeout::callback(Duration::from_millis(150), system_id, commands);
 }
 
-/// Moves the focused window to the next available display.
+fn display_move_request(
+    operation: &Operation,
+    active_display: &ActiveDisplayMut,
+) -> Option<(Option<u32>, MoveFocus)> {
+    match operation {
+        Operation::ToNextDisplay(move_focus) => Some((None, *move_focus)),
+        Operation::ToDisplay(id, move_focus) => Some((Some(*id), *move_focus)),
+        Operation::MoveToDisplay(direction) => display_in_compass_direction(
+            direction,
+            active_display.bounds(),
+            active_display
+                .other()
+                .map(|display| (display.id(), display.bounds())),
+        )
+        .map(|id| (Some(id), MoveFocus::Follow)),
+        _ => None,
+    }
+}
+
+/// Moves the focused window to the next display, to a display ID, or in a compass direction.
 /// The window will be repositioned to the center of the new display.
 ///
 /// # Arguments
@@ -1529,14 +1584,9 @@ fn to_next_display(
     config: Res<Config>,
     mut commands: Commands,
 ) {
-    let Some((target, move_focus)) = filter_window_operations(&mut messages, |op| {
-        matches!(op, Operation::ToNextDisplay(_) | Operation::ToDisplay(..))
-    })
-    .find_map(|op| match op {
-        Operation::ToNextDisplay(move_focus) => Some((None, *move_focus)),
-        Operation::ToDisplay(id, move_focus) => Some((Some(*id), *move_focus)),
-        _ => None,
-    }) else {
+    let Some((target, move_focus)) = filter_window_operations(&mut messages, |_| true)
+        .find_map(|operation| display_move_request(operation, &active_display))
+    else {
         return;
     };
 
@@ -1658,13 +1708,14 @@ fn to_next_display(
     );
 }
 
-/// Moves the mouse pointer to the next available display, or to a named one.
+/// Moves the pointer and focuses a window on the chosen display.
 #[instrument(level = Level::DEBUG, skip_all)]
 fn mouse_to_next_display(
     mut messages: MessageReader<Event>,
     windows: Windows,
     layout_strips: Query<(&LayoutStrip, Entity, Has<SelectedVirtualMarker>)>,
     displays: Query<&Display>,
+    active_display: Option<Single<&Display, With<ActiveDisplayMarker>>>,
     window_manager: Res<WindowManager>,
     mut commands: Commands,
 ) {
@@ -1675,6 +1726,20 @@ fn mouse_to_next_display(
         Event::Command {
             command: Command::Mouse(MouseMove::ToDisplay(id)),
         } => Some(Some(*id)),
+        Event::Command {
+            command: Command::Window(Operation::FocusDisplay(direction)),
+        } => {
+            let active = active_display.as_deref()?;
+            let target = display_in_compass_direction(
+                direction,
+                active.bounds(),
+                displays
+                    .iter()
+                    .filter(|display| display.id() != active.id())
+                    .map(|display| (display.id(), display.bounds())),
+            )?;
+            Some(Some(target))
+        }
         _ => None,
     }) else {
         return;
@@ -2431,6 +2496,106 @@ mod tests {
         assert_eq!(
             pick_nearest_in_direction(&Direction::East, focused, candidates),
             None,
+        );
+    }
+
+    #[test]
+    fn display_in_compass_direction_follows_a_horizontal_arrangement() {
+        let laptop = IRect::new(0, 0, 1512, 982);
+        let right = IRect::new(1512, -200, 1512 + 2560, 1240);
+
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, laptop, [(2, right)]),
+            Some(2)
+        );
+        assert_eq!(
+            display_in_compass_direction(&Direction::West, right, [(1, laptop)]),
+            Some(1)
+        );
+        for direction in [Direction::West, Direction::North, Direction::South] {
+            assert_eq!(
+                display_in_compass_direction(&direction, laptop, [(2, right)]),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn display_in_compass_direction_follows_a_vertical_arrangement() {
+        let laptop = IRect::new(0, 0, 1512, 982);
+        let above = IRect::new(-500, -1440, 2060, 0);
+
+        assert_eq!(
+            display_in_compass_direction(&Direction::North, laptop, [(2, above)]),
+            Some(2)
+        );
+        assert_eq!(
+            display_in_compass_direction(&Direction::South, above, [(1, laptop)]),
+            Some(1)
+        );
+        for direction in [Direction::South, Direction::West, Direction::East] {
+            assert_eq!(
+                display_in_compass_direction(&direction, laptop, [(2, above)]),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn display_in_compass_direction_prefers_a_side_by_side_display_then_the_nearest() {
+        let center = IRect::new(0, 0, 1000, 800);
+        let far = IRect::new(3000, 0, 4000, 800);
+        let diagonal = IRect::new(1000, -900, 2000, -100);
+        let near = IRect::new(1000, 100, 2000, 900);
+
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(1, diagonal), (2, far)]),
+            Some(2),
+            "a display beside this one wins over a closer diagonal one"
+        );
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(2, far), (3, near)]),
+            Some(3)
+        );
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(1, diagonal)]),
+            Some(1),
+            "a diagonal display is still reachable when it is the only one"
+        );
+        for direction in [Direction::First, Direction::Last, Direction::Nth(0)] {
+            assert_eq!(
+                display_in_compass_direction(&direction, center, [(3, near)]),
+                None
+            );
+        }
+    }
+
+    #[test]
+    fn display_in_compass_direction_breaks_a_tie_by_display_id() {
+        let center = IRect::new(0, 0, 1000, 800);
+        let upper = IRect::new(1000, -400, 2000, 400);
+        let lower = IRect::new(1000, 400, 2000, 1200);
+
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(7, upper), (4, lower)]),
+            Some(4)
+        );
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(4, lower), (7, upper)]),
+            Some(4)
+        );
+    }
+
+    #[test]
+    fn display_in_compass_direction_prefers_the_longest_shared_edge() {
+        let center = IRect::new(0, 0, 1000, 800);
+        let sliver = IRect::new(1000, 799, 2000, 1599);
+        let broad = IRect::new(1000, -50, 2600, 750);
+
+        assert_eq!(
+            display_in_compass_direction(&Direction::East, center, [(1, sliver), (2, broad)]),
+            Some(2),
+            "750 px of shared edge wins over 1 px even with a farther center"
         );
     }
 

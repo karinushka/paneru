@@ -1,4 +1,5 @@
 use bevy::ecs::change_detection::DetectChangesMut;
+use bevy::ecs::component::ComponentIdFor;
 use bevy::ecs::entity::Entity;
 use bevy::ecs::hierarchy::{ChildOf, Children};
 use bevy::ecs::lifecycle::{Add, Insert, Remove, RemovedComponents};
@@ -901,8 +902,10 @@ pub(super) fn window_minimized_trigger(
 }
 
 #[instrument(level = Level::DEBUG, skip_all, fields(trigger))]
+#[allow(clippy::too_many_arguments)]
 pub(super) fn window_managed_trigger(
     trigger: On<Remove<Unmanaged>>,
+    window_component: ComponentIdFor<Window>,
     active_display: Single<(&Display, Option<&DockPosition>), With<ActiveDisplayMarker>>,
     apps: Query<(Entity, &Application)>,
     mut workspaces: Query<
@@ -922,16 +925,17 @@ pub(super) fn window_managed_trigger(
     if initializing.is_some() {
         return;
     }
-    let entity = trigger.event().entity;
-
-    if ctx
-        .windows
-        .get(entity)
-        .is_some_and(|window| !window.is_alive())
+    // `On<Remove<Unmanaged>>` also fires when the entity is being despawned
+    // (`new_archetype == None`) or when `Window` is removed alongside
+    // `Unmanaged`. Only re-tile when `Window` survives in the new archetype.
+    if !trigger
+        .trigger()
+        .new_archetype
+        .is_some_and(|archetype| archetype.contains(*window_component))
     {
-        // The marker was removed because the windows was destroyed.
         return;
     }
+    let entity = trigger.event().entity;
 
     debug!("Entity {entity} is managed again.");
     let (display, dock) = *active_display;

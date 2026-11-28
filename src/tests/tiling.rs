@@ -1222,6 +1222,132 @@ fn test_closing_floating_window_does_not_reinsert_it_into_the_strip() {
         .run(commands);
 }
 
+/// Closing a floating window while AX still reports `is_alive() == true`
+/// (e.g., an exiting app returning `kAXErrorCannotComplete` instead of
+/// `kAXErrorInvalidUIElement`, or lagging AX teardown) must not let
+/// `On<Remove<Unmanaged>>` re-insert the despawning entity as a phantom tile
+/// into the `LayoutStrip`.
+#[test]
+fn test_closing_floating_window_while_ax_still_reports_alive_leaves_no_phantom_in_strip() {
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::WindowDestroyed {
+            window_id: 1,
+            source: DestroySource::Accessibility,
+        },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    let mut params = WindowParams::new("^Window 1$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    TestHarness::new()
+        .with_config(config)
+        .with_windows(3)
+        .on_iteration(2, |world, _state| {
+            assert!(!window_exists(world, 1), "closed window must be despawned");
+            let mut strips = world.query::<&LayoutStrip>();
+            let entities = strips
+                .iter(world)
+                .flat_map(LayoutStrip::all_windows)
+                .collect::<Vec<_>>();
+            for entity in entities {
+                assert!(
+                    world.get::<crate::manager::Window>(entity).is_some(),
+                    "strip holds despawned phantom entity {entity}"
+                );
+            }
+        })
+        .run(commands);
+}
+
+/// Terminating an application recursively despawns its child `Window` entities.
+/// When a child window was floating (`Unmanaged::Floating`) and AX still
+/// reports `is_alive() == true` (e.g. `kAXErrorCannotComplete` on an exiting
+/// process), `On<Remove<Unmanaged>>` must not re-insert the despawning child
+/// into a `LayoutStrip`.
+#[test]
+fn test_terminating_app_with_floating_window_while_ax_still_reports_alive_leaves_no_phantom_in_strip()
+ {
+    let float_pid = TEST_PROCESS_ID + 1;
+    let float_psn = crate::platform::ProcessSerialNumber {
+        high: 0,
+        low: float_pid.cast_unsigned(),
+    };
+
+    let mut params = WindowParams::new("^FloatApp$", None);
+    params.floating = Some(true);
+    let config: Config = (MainOptions::default(), vec![params]).into();
+
+    let mut harness = TestHarness::new().with_config(config).with_windows(2);
+    harness
+        .mock_state
+        .spawn_app(float_pid, "com.test.float", "FloatApp");
+    let float_proc = harness.mock_state.create_process(float_pid);
+    let float_app = harness.mock_state.create_application(float_pid);
+    let float_win = harness.mock_state.spawn_window(
+        float_pid,
+        TEST_WORKSPACE_ID,
+        99,
+        IRect::new(50, 50, 450, 450),
+    );
+    harness
+        .mock_state
+        .update_window(99, |w| w.title = "FloatApp".to_string());
+    {
+        let world = harness.world();
+        let proc_entity = world.spawn(crate::ecs::BProcess(Box::new(float_proc))).id();
+        world.spawn((crate::ecs::ExistingMarker, ChildOf(proc_entity), float_app));
+        world.trigger(crate::ecs::SpawnWindowTrigger(vec![float_win]));
+    }
+
+    let commands = vec![
+        Event::Command {
+            command: Command::PrintState,
+        },
+        Event::ApplicationTerminated { psn: float_psn },
+        Event::Command {
+            command: Command::PrintState,
+        },
+    ];
+
+    harness
+        .on_iteration(0, |world, _state| {
+            let e99 = find_window_entity(99, world);
+            assert!(
+                matches!(
+                    world.get::<crate::ecs::Unmanaged>(e99),
+                    Some(crate::ecs::Unmanaged::Floating)
+                ),
+                "window 99 must start floating"
+            );
+        })
+        .on_iteration(2, |world, _state| {
+            assert!(
+                !window_exists(world, 99),
+                "terminated app's floating window must be despawned"
+            );
+            let mut strips = world.query::<&LayoutStrip>();
+            let entities = strips
+                .iter(world)
+                .flat_map(LayoutStrip::all_windows)
+                .collect::<Vec<_>>();
+            assert_eq!(entities.len(), 2, "only the 2 tiled windows must remain");
+            for entity in entities {
+                assert!(
+                    world.get::<crate::manager::Window>(entity).is_some(),
+                    "strip holds despawned phantom entity {entity}"
+                );
+            }
+        })
+        .run(commands);
+}
+
 /// Floats window `id` with the `float` event after a warm-up step, minimizes
 /// it, restores it, and checks that it floats outside the strip again.
 fn assert_floats_after_minimize_and_restore(harness: TestHarness, float: Event, id: i32) {
